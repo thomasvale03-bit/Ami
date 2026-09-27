@@ -156,8 +156,9 @@ def resolve_venue_for_date(request, date_obj, live_availability_checker,
     previous_night_venue: the venue already registered for the night before
         (used only for the Friday/Saturday no-repeat rule).
 
-    Requested venue always has first priority (section 4), then the default
-    routing table, then rules.LAST_RESORT_VENUES. The Fri/Sat no-repeat rule
+    Requested venues have first priority (section 4) — ordered by the night's
+    schedule when the guest picked several — then the default routing table,
+    then rules.LAST_RESORT_VENUES. The Fri/Sat no-repeat rule
     overrides everything, including a venue the guest explicitly requested.
     """
     route = default_route_for_date(date_obj)
@@ -165,10 +166,17 @@ def resolve_venue_for_date(request, date_obj, live_availability_checker,
         # This night has a single open venue; nothing else is tried.
         candidates = [route["primary"]]
     else:
-        candidates = list(request["requested_venues"])
+        schedule = []
         for v in routed_candidates(date_obj, previous_night_venue) + rules.LAST_RESORT_VENUES:
-            if v not in candidates:
-                candidates.append(v)
+            if v not in schedule:
+                schedule.append(v)
+        requested = list(request["requested_venues"])
+        # When the guest picked several venues, the night's schedule decides
+        # which of them comes first; picked venues the schedule doesn't
+        # mention follow in the guest's order, then the rest of the schedule.
+        candidates = [v for v in schedule if v in requested]
+        candidates += [v for v in requested if v not in candidates]
+        candidates += [v for v in schedule if v not in candidates]
 
     if date_obj.strftime("%A") == "Saturday" and previous_night_venue:
         candidates = [v for v in candidates if v != previous_night_venue]

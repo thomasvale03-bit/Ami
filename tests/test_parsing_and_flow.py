@@ -128,6 +128,22 @@ class RealEmailFormatTests(unittest.TestCase):
         _, text = gmail_client.get_form_text(FakeService(), "abc")
         self.assertIn("Visit start date", text)
 
+    def test_all_clubs_picked_follows_weekly_schedule(self):
+        result = process_one_request(self.raw, dry_run=True, today=TODAY)
+        self.assertEqual([r["venue"] for r in result["registrations"]], [
+            "Marquee Nightclub",   # Mon
+            "OMNIA Nightclub",     # Tue
+            "Hakkasan Nightclub",  # Wed
+            "Hakkasan Nightclub",  # Thu
+            "JEWEL Nightclub",     # Fri
+        ])
+
+    def test_picked_clubs_limit_the_schedule(self):
+        raw = dict(self.raw, start_date="2026-10-03", end_date="2026-10-03",
+                   venues=["Omnia Nightclub", "Marquee Nightclub", "TAO Nightclub", "Hakkasan Nightclub"])
+        result = process_one_request(raw, dry_run=True, today=TODAY)
+        self.assertEqual(result["registrations"][0]["venue"], "Marquee Nightclub")  # Sat, JEWEL not picked
+
     def test_past_nights_are_skipped(self):
         result = process_one_request(self.raw, dry_run=True, today=date(2026, 10, 15))
         self.assertEqual([r["date"] for r in result["registrations"]], ["2026-10-15", "2026-10-16"])

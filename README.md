@@ -66,8 +66,9 @@ team@playmakerentertainment.com (`TEAM_NOTIFICATION_EMAIL` in
 - Tuesdays: OMNIA Nightclub only (for the time being). No other venue is
   tried, even one the guest requested. If OMNIA has no guest list, that night
   is skipped quietly — no team email.
-- Order tried every other night: the venue the guest requested, then the routing
-  table, then JEWEL, Hakkasan and Marquee as last resorts
+- Order tried every other night: the venue(s) the guest picked — when they
+  picked several, the night's schedule decides which comes first — then the
+  routing table, then JEWEL, Hakkasan and Marquee as last resorts
   (`LAST_RESORT_VENUES`).
 - Never the same club Friday and Saturday — even if the guest asked for it.
   After a JEWEL Friday, Saturday tries Hakkasan first.
