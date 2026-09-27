@@ -53,7 +53,15 @@ DEFAULT_ROUTING = {
     "Sunday":    {"primary": "TAO Nightclub", "fallback": "best_available"},
 }
 
-# Never repeat the same nightclub Fri + Sat. If Friday resolves to JEWEL,
+# Last resort for any night when neither the requested venue nor the routed
+# venues have a live Passes listing.
+LAST_RESORT_VENUE = "JEWEL Nightclub"
+
+# Where PROCESSED / ACTION NEEDED records are emailed in --live mode.
+TEAM_NOTIFICATION_EMAIL = PLAYMAKER_EMAIL
+
+# Never repeat the same nightclub Fri + Sat — this applies even when the
+# guest requested that venue for both nights. If Friday resolves to JEWEL,
 # prefer Hakkasan for Saturday when available (see rules_engine.apply_weekend_override).
 
 # --- Per-venue qualification notes (reference values; the LIVE Passes/

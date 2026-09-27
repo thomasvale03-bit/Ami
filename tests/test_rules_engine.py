@@ -97,11 +97,18 @@ class RoutingTests(unittest.TestCase):
     def test_saturday_never_repeats_routed_friday_venue(self):
         self.assertNotIn("Hakkasan Nightclub", routed_candidates(SATURDAY, "Hakkasan Nightclub"))
 
-    def test_requested_venue_may_repeat_on_saturday(self):
+    def test_requested_venue_is_not_repeated_on_saturday(self):
         req = normalize_guest_request(raw_request(venues=["JEWEL Nightclub"]))
         venue, _ = resolve_venue_for_date(
             req, SATURDAY, available("JEWEL Nightclub", "Hakkasan Nightclub"),
             previous_night_venue="JEWEL Nightclub")
+        self.assertEqual(venue, "Hakkasan Nightclub")
+
+    def test_jewel_is_last_resort(self):
+        wednesday = date(2026, 10, 7)  # routing: Hakkasan, then Marquee
+        req = normalize_guest_request(raw_request(
+            start_date="2026-10-07", end_date="2026-10-07", venues=["OMNIA Nightclub"]))
+        venue, _ = resolve_venue_for_date(req, wednesday, available("JEWEL Nightclub"))
         self.assertEqual(venue, "JEWEL Nightclub")
 
     def test_best_available_tries_other_nightclubs(self):

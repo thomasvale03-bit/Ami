@@ -58,13 +58,19 @@ In `--live` mode, each message is labeled once handled:
   submission, or an unexpected error. (A message that errors is never
   retried automatically, so a guest can't be registered twice.)
 
-PROCESSED / ACTION NEEDED records are logged and appended to
-`amy_records.jsonl`.
+PROCESSED / ACTION NEEDED records are emailed to
+team@playmakerentertainment.com (`TEAM_NOTIFICATION_EMAIL` in
+`config/rules.py`) and appended to `amy_records.jsonl`.
 
 ### Routing notes
-- A venue the guest requested always comes first, even if it repeats Friday's
-  venue on Saturday. The Fri/Sat no-repeat rule (and "Hakkasan on Saturday
-  after a JEWEL Friday") applies only to routed venues.
+- Order tried each night: the venue the guest requested, then the routing
+  table, then JEWEL as a last resort (`LAST_RESORT_VENUE`).
+- Never the same club Friday and Saturday — even if the guest asked for it.
+  After a JEWEL Friday, Saturday tries Hakkasan first.
+- If nothing has a live guest list, the guest is not emailed; the team gets an
+  ACTION NEEDED email.
+- Outdoor dayclubs are never picked automatically from October 1, but are
+  booked if a guest asks for one and TAO shows a guest list.
 - `best_available` in the routing table means "try the remaining nightclubs".
 - Submitted venue names are matched case-insensitively, and short forms
   like "OMNIA" work when they identify a single venue.
@@ -79,8 +85,4 @@ Either way, Claude Code can help you write the deployment config once the
 core logic is verified.
 
 ## Not yet decided (flagged in the operating instructions)
-- No "not qualified" customer-facing email exists yet — right now, an
-  unavailable request just creates an internal ACTION NEEDED record instead
-  of emailing the customer. Decide the wording before going live if you want
-  customers notified automatically either way.
 - Drai's is hard-paused in `config/rules.py` until you say otherwise.

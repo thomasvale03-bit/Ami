@@ -12,6 +12,7 @@ every few minutes. See README.md for hosting options.
 import argparse
 import json
 import logging
+import traceback
 from datetime import datetime, timedelta, timezone
 
 from config import rules
@@ -181,6 +182,11 @@ def handle_message(service, msg_ref, dry_run, labels):
         log.info("%s record for %s:\n%s", kind, message_id, text)
         if not dry_run:
             append_record(message_id, kind, text)
+            gmail_client.send_email(
+                service, rules.TEAM_NOTIFICATION_EMAIL,
+                f"Amy: {text.splitlines()[0]} — {raw.get('name') or raw.get('email') or message_id}",
+                text, sender=rules.INTAKE_EMAIL,
+            )
 
     if not dry_run:
         gmail_client.mark_processed(service, message_id, labels[label])
@@ -214,6 +220,14 @@ def main():
                 # A TAO submission may already have gone through, so never let
                 # this message be picked up and resubmitted automatically.
                 gmail_client.mark_processed(service, msg_ref["id"], labels[gmail_client.EXCEPTION_LABEL])
+                gmail_client.send_email(
+                    service, rules.TEAM_NOTIFICATION_EMAIL,
+                    f"Amy: ACTION NEEDED — error processing message {msg_ref['id']}",
+                    f"ACTION NEEDED\n\nAmy hit an error on Gmail message {msg_ref['id']} and did not finish it.\n"
+                    "A TAO registration may or may not have gone through. Check TAO before re-submitting.\n\n"
+                    f"Error:\n{traceback.format_exc()}",
+                    sender=rules.INTAKE_EMAIL,
+                )
             continue
         log.info("Processed %s -> %s", msg_ref["id"], label)
 

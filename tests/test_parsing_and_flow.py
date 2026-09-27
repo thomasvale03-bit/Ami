@@ -75,7 +75,7 @@ class DryRunFlowTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["exceptions"], [])
         self.assertEqual([r["venue"] for r in result["registrations"]],
-                         ["JEWEL Nightclub", "JEWEL Nightclub"])  # requested venue both nights
+                         ["JEWEL Nightclub", "Hakkasan Nightclub"])  # never the same club Fri + Sat
         self.assertIn("Hi Jane", result["confirmation_email"]["body"])
 
     def test_routed_weekend_does_not_repeat(self):
