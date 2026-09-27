@@ -24,7 +24,7 @@ a real logged-in session — that can't be done blind from a chat. In Claude
 Code:
 
 ```
-playwright codegen https://tickets.taogroup.com/promoter/68d79ff5-3d04-4198-83d7-00330a1e6107
+playwright codegen "https://tickets.taogroup.com/promoter/68d79ff5-3d04-4198-83d7-00330a1e6107?utm_source=promoter&utm_id=68d79ff587c84397b19f00330a1e6107"
 ```
 
 Click through checking one real event and submitting one real test guest.

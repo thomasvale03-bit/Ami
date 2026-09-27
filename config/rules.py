@@ -110,4 +110,9 @@ DAYLIFE_AUTO_VENUES_PAUSED_IN_OFFSEASON = {
     "TAO Beach Dayclub", "Marquee Dayclub", "Liquid Pool Lounge", "Palm Tree Beach Club"
 }
 
-TAO_PROMOTER_URL = "https://tickets.taogroup.com/promoter/68d79ff5-3d04-4198-83d7-00330a1e6107"
+# Promoter master link. Keep the utm_* parameters: they attribute bookings
+# to Playmaker.
+TAO_PROMOTER_URL = (
+    "https://tickets.taogroup.com/promoter/68d79ff5-3d04-4198-83d7-00330a1e6107"
+    "?utm_source=promoter&utm_id=68d79ff587c84397b19f00330a1e6107"
+)
