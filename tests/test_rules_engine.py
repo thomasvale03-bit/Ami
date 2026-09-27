@@ -115,8 +115,19 @@ class RoutingTests(unittest.TestCase):
         req = normalize_guest_request(raw_request(start_date="2026-10-05", end_date="2026-10-11"))
         from rules_engine import date_range
         for d in date_range("2026-10-05", "2026-10-11"):
+            if d.strftime("%A") == "Tuesday":
+                continue  # OMNIA-only night
             venue, _ = resolve_venue_for_date(req, d, available("Marquee Nightclub"))
             self.assertEqual(venue, "Marquee Nightclub", d)
+
+    def test_tuesday_is_omnia_only(self):
+        tuesday = date(2026, 10, 6)
+        req = normalize_guest_request(raw_request(
+            start_date="2026-10-06", end_date="2026-10-06", venues=["TAO Nightclub"]))
+        everything = available(*__import__("config.rules").rules.NIGHTCLUBS)
+        self.assertEqual(resolve_venue_for_date(req, tuesday, everything)[0], "OMNIA Nightclub")
+        no_omnia = available("TAO Nightclub", "JEWEL Nightclub", "Hakkasan Nightclub", "Marquee Nightclub")
+        self.assertIsNone(resolve_venue_for_date(req, tuesday, no_omnia)[0])
 
     def test_sunday_omnia_then_tao(self):
         sunday = date(2026, 10, 4)

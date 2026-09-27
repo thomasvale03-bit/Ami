@@ -63,7 +63,10 @@ team@playmakerentertainment.com (`TEAM_NOTIFICATION_EMAIL` in
 `config/rules.py`) and appended to `amy_records.jsonl`.
 
 ### Routing notes
-- Order tried each night: the venue the guest requested, then the routing
+- Tuesdays: OMNIA Nightclub only (for the time being). No other venue is
+  tried, even one the guest requested; if OMNIA has no guest list the team
+  gets an ACTION NEEDED email.
+- Order tried every other night: the venue the guest requested, then the routing
   table, then JEWEL, Hakkasan and Marquee as last resorts
   (`LAST_RESORT_VENUES`).
 - Never the same club Friday and Saturday — even if the guest asked for it.

@@ -45,7 +45,9 @@ FALLBACK_BILLING_ZIP = "85306"
 
 DEFAULT_ROUTING = {
     "Monday":    {"primary": "Marquee Nightclub", "fallback": "best_available"},
-    "Tuesday":   {"primary": "OMNIA Nightclub", "fallback": ["TAO Nightclub", "best_available"]},
+    # For the time being OMNIA is the only venue open on Tuesdays: no
+    # fallbacks, and requested venues / last resorts are not used.
+    "Tuesday":   {"primary": "OMNIA Nightclub", "fallback": [], "only": True},
     "Wednesday": {"primary": "Hakkasan Nightclub", "fallback": "Marquee Nightclub"},
     "Thursday":  {"primary": "Hakkasan Nightclub", "fallback": "TAO Nightclub"},
     "Friday":    {"primary": "JEWEL Nightclub", "fallback": "Hakkasan Nightclub"},

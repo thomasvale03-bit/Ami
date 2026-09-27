@@ -160,10 +160,15 @@ def resolve_venue_for_date(request, date_obj, live_availability_checker,
     routing table, then rules.LAST_RESORT_VENUES. The Fri/Sat no-repeat rule
     overrides everything, including a venue the guest explicitly requested.
     """
-    candidates = list(request["requested_venues"])
-    for v in routed_candidates(date_obj, previous_night_venue) + rules.LAST_RESORT_VENUES:
-        if v not in candidates:
-            candidates.append(v)
+    route = default_route_for_date(date_obj)
+    if route.get("only"):
+        # This night has a single open venue; nothing else is tried.
+        candidates = [route["primary"]]
+    else:
+        candidates = list(request["requested_venues"])
+        for v in routed_candidates(date_obj, previous_night_venue) + rules.LAST_RESORT_VENUES:
+            if v not in candidates:
+                candidates.append(v)
 
     if date_obj.strftime("%A") == "Saturday" and previous_night_venue:
         candidates = [v for v in candidates if v != previous_night_venue]
