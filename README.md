@@ -64,7 +64,8 @@ team@playmakerentertainment.com (`TEAM_NOTIFICATION_EMAIL` in
 
 ### Routing notes
 - Order tried each night: the venue the guest requested, then the routing
-  table, then JEWEL as a last resort (`LAST_RESORT_VENUE`).
+  table, then JEWEL, Hakkasan and Marquee as last resorts
+  (`LAST_RESORT_VENUES`).
 - Never the same club Friday and Saturday — even if the guest asked for it.
   After a JEWEL Friday, Saturday tries Hakkasan first.
 - If nothing has a live guest list, the guest is not emailed; the team gets an

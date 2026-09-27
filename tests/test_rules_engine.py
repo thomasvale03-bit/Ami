@@ -104,6 +104,20 @@ class RoutingTests(unittest.TestCase):
             previous_night_venue="JEWEL Nightclub")
         self.assertEqual(venue, "Hakkasan Nightclub")
 
+    def test_hakkasan_then_marquee_after_jewel_friday(self):
+        req = normalize_guest_request(raw_request(venues=["OMNIA Nightclub"]))
+        venue, _ = resolve_venue_for_date(
+            req, SATURDAY, available("JEWEL Nightclub", "Marquee Nightclub"),
+            previous_night_venue="JEWEL Nightclub")
+        self.assertEqual(venue, "Marquee Nightclub")
+
+    def test_last_resorts_cover_every_night(self):
+        req = normalize_guest_request(raw_request(start_date="2026-10-05", end_date="2026-10-11"))
+        from rules_engine import date_range
+        for d in date_range("2026-10-05", "2026-10-11"):
+            venue, _ = resolve_venue_for_date(req, d, available("Marquee Nightclub"))
+            self.assertEqual(venue, "Marquee Nightclub", d)
+
     def test_jewel_is_last_resort(self):
         wednesday = date(2026, 10, 7)  # routing: Hakkasan, then Marquee
         req = normalize_guest_request(raw_request(

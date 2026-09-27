@@ -53,9 +53,9 @@ DEFAULT_ROUTING = {
     "Sunday":    {"primary": "TAO Nightclub", "fallback": "best_available"},
 }
 
-# Last resort for any night when neither the requested venue nor the routed
-# venues have a live Passes listing.
-LAST_RESORT_VENUE = "JEWEL Nightclub"
+# Last resorts, tried in this order on any night when neither the requested
+# venue nor the routed venues have a live Passes listing.
+LAST_RESORT_VENUES = ["JEWEL Nightclub", "Hakkasan Nightclub", "Marquee Nightclub"]
 
 # Where PROCESSED / ACTION NEEDED records are emailed in --live mode.
 TEAM_NOTIFICATION_EMAIL = PLAYMAKER_EMAIL
