@@ -50,7 +50,7 @@ DEFAULT_ROUTING = {
     "Thursday":  {"primary": "Hakkasan Nightclub", "fallback": "TAO Nightclub"},
     "Friday":    {"primary": "JEWEL Nightclub", "fallback": "Hakkasan Nightclub"},
     "Saturday":  {"primary": "JEWEL Nightclub", "fallback": "Marquee Nightclub"},
-    "Sunday":    {"primary": "TAO Nightclub", "fallback": "best_available"},
+    "Sunday":    {"primary": "OMNIA Nightclub", "fallback": ["TAO Nightclub", "best_available"]},
 }
 
 # Last resorts, tried in this order on any night when neither the requested

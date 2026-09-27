@@ -118,6 +118,14 @@ class RoutingTests(unittest.TestCase):
             venue, _ = resolve_venue_for_date(req, d, available("Marquee Nightclub"))
             self.assertEqual(venue, "Marquee Nightclub", d)
 
+    def test_sunday_omnia_then_tao(self):
+        sunday = date(2026, 10, 4)
+        req = normalize_guest_request(raw_request(start_date="2026-10-04", end_date="2026-10-04"))
+        everything = available(*__import__("config.rules").rules.NIGHTCLUBS)
+        self.assertEqual(resolve_venue_for_date(req, sunday, everything)[0], "OMNIA Nightclub")
+        self.assertEqual(resolve_venue_for_date(req, sunday, available("TAO Nightclub", "JEWEL Nightclub"))[0],
+                         "TAO Nightclub")
+
     def test_jewel_is_last_resort(self):
         wednesday = date(2026, 10, 7)  # routing: Hakkasan, then Marquee
         req = normalize_guest_request(raw_request(
