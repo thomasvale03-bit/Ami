@@ -14,6 +14,7 @@ import json
 import logging
 import traceback
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from config import rules
 from rules_engine import (
@@ -28,6 +29,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("amy")
 
 RECORDS_PATH = "amy_records.jsonl"
+VEGAS = ZoneInfo("America/Los_Angeles")
 
 
 def dry_run_availability(venue, date_obj):
@@ -40,7 +42,7 @@ def dry_run_availability(venue, date_obj):
     }
 
 
-def process_one_request(raw, dry_run=True, availability_checker=None):
+def process_one_request(raw, dry_run=True, availability_checker=None, today=None):
     try:
         request = normalize_guest_request(raw)
     except ActionNeeded as e:
@@ -52,8 +54,12 @@ def process_one_request(raw, dry_run=True, availability_checker=None):
     registrations = []
     exceptions = []
     venue_by_date = {}
+    today = today or datetime.now(VEGAS).date()
 
     for date_obj in date_range(request["start_date"], request["end_date"]):
+        if date_obj < today:
+            log.info("Skipping %s: night has already passed", date_obj)
+            continue
         venue, listing = resolve_venue_for_date(
             request, date_obj,
             live_availability_checker=availability_checker,
@@ -141,7 +147,7 @@ def handle_message(service, msg_ref, dry_run, labels):
     """Process one inbox message. Returns the label name applied (or that
     would be applied in a dry run)."""
     message_id = msg_ref["id"]
-    _, body = gmail_client.get_plain_text_body(service, message_id)
+    _, body = gmail_client.get_form_text(service, message_id)
     raw = gmail_client.parse_request(message_id, body)
 
     if raw.get("_missing_required"):
