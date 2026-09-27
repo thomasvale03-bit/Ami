@@ -38,6 +38,7 @@ def dry_run_availability(venue, date_obj):
     return {
         "event": "[would be read from live listing]",
         "listing_type": "Passes",
+        "price": 0,
         "arrival_text": "[would be read from live listing]",
     }
 

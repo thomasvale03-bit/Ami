@@ -63,6 +63,8 @@ team@playmakerentertainment.com (`TEAM_NOTIFICATION_EMAIL` in
 `config/rules.py`) and appended to `amy_records.jsonl`.
 
 ### Routing notes
+- Guest lists are TAO's free **Passes**. Amy only books a listing marked
+  Passes with a price of $0 — never paid tickets or anything with a charge.
 - Tuesdays: OMNIA Nightclub only (for the time being). No other venue is
   tried, even one the guest requested. If OMNIA has no guest list, that night
   is skipped quietly — no team email.

@@ -145,11 +145,24 @@ def routed_candidates(date_obj, previous_night_venue=None):
     return deduped
 
 
+def is_free_pass(listing):
+    """Guest lists are TAO's free "Passes". Anything that is not a Passes
+    listing with a confirmed price of 0 (paid tickets, table deposits, an
+    unknown price) is never used."""
+    if not listing or listing.get("listing_type") != "Passes":
+        return False
+    try:
+        return float(listing.get("price")) == 0
+    except (TypeError, ValueError):
+        return False
+
+
 def resolve_venue_for_date(request, date_obj, live_availability_checker,
                            previous_night_venue=None):
     """
     live_availability_checker(venue, date_obj) -> dict or None
         Expected dict shape: {"event": str, "listing_type": "Passes"|"Tickets",
+                               "price": number (must be 0 to be used),
                                "female_cutoff": str, "male_cutoff": str, ...}
         Must return None if there is no live Passes/Guest List entry.
 
@@ -185,7 +198,7 @@ def resolve_venue_for_date(request, date_obj, live_availability_checker,
         if venue in rules.PAUSED_VENUES:
             continue
         listing = live_availability_checker(venue, date_obj)
-        if listing and listing.get("listing_type") == "Passes":
+        if is_free_pass(listing):
             return venue, listing
 
     return None, None

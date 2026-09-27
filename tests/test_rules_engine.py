@@ -27,7 +27,7 @@ def available(*venues):
     """Checker that reports a Passes listing only for the given venues."""
     def check(venue, date_obj):
         if venue in venues:
-            return {"event": f"{venue} night", "listing_type": "Passes"}
+            return {"event": f"{venue} night", "listing_type": "Passes", "price": 0}
         return None
     return check
 
@@ -81,6 +81,13 @@ class RoutingTests(unittest.TestCase):
         req = normalize_guest_request(raw_request(venues=["OMNIA Nightclub"]))
         venue, _ = resolve_venue_for_date(req, FRIDAY, available("JEWEL Nightclub"))
         self.assertEqual(venue, "JEWEL Nightclub")
+
+    def test_paid_or_unpriced_passes_are_not_eligible(self):
+        req = normalize_guest_request(raw_request())
+        for price in (25, "20.00", None):
+            venue, _ = resolve_venue_for_date(
+                req, FRIDAY, lambda v, d: {"event": "x", "listing_type": "Passes", "price": price})
+            self.assertIsNone(venue, price)
 
     def test_tickets_listing_is_not_eligible(self):
         req = normalize_guest_request(raw_request())

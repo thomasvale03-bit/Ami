@@ -12,10 +12,12 @@ Design contract with rules_engine.py:
     check_availability(venue, date_obj) -> dict | None
         None                => no live Passes/Guest List entry for that venue+date
         {"event": ..., "listing_type": "Passes"|"Tickets",
+         "price": 0,   # price per pass as shown on TAO; only 0 is ever booked
          "female_cutoff": ..., "male_cutoff": ..., "listing_url": ...}
 
     submit_registration(event_listing, guest) -> dict
-        Returns {"confirmation_id": ..., "verified": bool}. Never fabricate
+        Returns {"confirmation_id": ..., "verified": bool}. Must abort without
+        submitting if the checkout shows any total other than $0. Never fabricate
         a confirmation_id — if the success page/response can't be parsed,
         return {"confirmation_id": None, "verified": False}.
 """
