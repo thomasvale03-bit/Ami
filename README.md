@@ -64,8 +64,8 @@ team@playmakerentertainment.com (`TEAM_NOTIFICATION_EMAIL` in
 
 ### Routing notes
 - Tuesdays: OMNIA Nightclub only (for the time being). No other venue is
-  tried, even one the guest requested; if OMNIA has no guest list the team
-  gets an ACTION NEEDED email.
+  tried, even one the guest requested. If OMNIA has no guest list, that night
+  is skipped quietly — no team email.
 - Order tried every other night: the venue the guest requested, then the routing
   table, then JEWEL, Hakkasan and Marquee as last resorts
   (`LAST_RESORT_VENUES`).

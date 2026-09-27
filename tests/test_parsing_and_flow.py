@@ -85,6 +85,14 @@ class DryRunFlowTests(unittest.TestCase):
         self.assertEqual([r["venue"] for r in result["registrations"]],
                          ["JEWEL Nightclub", "Hakkasan Nightclub"])
 
+    def test_tuesday_without_omnia_is_skipped_quietly(self):
+        body = SAMPLE_BODY.replace("2026-10-02", "2026-10-06").replace("2026-10-03", "2026-10-06")
+        raw = gmail_client.parse_request("abc", body)
+        result = process_one_request(raw, dry_run=True, availability_checker=lambda v, d: None)
+        self.assertEqual(result["registrations"], [])
+        self.assertEqual(result["exceptions"], [])
+        self.assertNotIn("action_needed_records", result)
+
     def test_unavailable_dates_become_action_needed(self):
         raw = gmail_client.parse_request("abc", SAMPLE_BODY)
         result = process_one_request(raw, dry_run=True, availability_checker=lambda v, d: None)

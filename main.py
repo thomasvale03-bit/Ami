@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from config import rules
 from rules_engine import (
     normalize_guest_request, ActionNeeded, date_range,
-    resolve_venue_for_date,
+    resolve_venue_for_date, default_route_for_date,
 )
 from templates.emails import consolidated_confirmation, internal_processed_record, internal_action_needed
 import gmail_client
@@ -60,6 +60,11 @@ def process_one_request(raw, dry_run=True, availability_checker=None):
             previous_night_venue=venue_by_date.get(date_obj - timedelta(days=1)),
         )
         if not venue:
+            if default_route_for_date(date_obj).get("only"):
+                # Single-venue night (e.g. OMNIA-only Tuesday) with no guest
+                # list: by instruction, skip the night quietly — no exception.
+                log.info("No guest list at the only open venue on %s; skipping that night", date_obj)
+                continue
             exceptions.append({
                 "date": date_obj.isoformat(),
                 "issue": "No matching live Passes/Guest List event for requested or routed venues.",
