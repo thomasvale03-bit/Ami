@@ -134,6 +134,27 @@ def get_plain_text_body(service, message_id):
     return msg, body
 
 
+def posh_order_already_handled(service, order_number, exclude_message_id):
+    """True if another NEW POSH SIGNUP email with this Posh order number was
+    already handled by Amy (labeled Amy/Processed or Amy/Exception)."""
+    import posh
+    if not order_number:
+        return False
+    resp = service.users().messages().list(
+        userId="me",
+        q=(f'subject:"NEW POSH SIGNUP" "{order_number}" '
+           f"(label:{PROCESSED_LABEL} OR label:{EXCEPTION_LABEL})"),
+        maxResults=20,
+    ).execute()
+    for ref in resp.get("messages", []):
+        if ref["id"] == exclude_message_id:
+            continue
+        _, body = get_plain_text_body(service, ref["id"])
+        if posh.parse_signup(ref["id"], body)["posh"].get("order_number") == order_number:
+            return True
+    return False
+
+
 def get_subject(msg):
     for header in msg.get("payload", {}).get("headers", []):
         if header.get("name", "").lower() == "subject":

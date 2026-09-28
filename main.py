@@ -206,6 +206,9 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
     msg, body = gmail_client.get_plain_text_body(service, message_id)
     if posh.is_posh_signup(gmail_client.get_subject(msg or {}), body):
         raw = posh.parse_signup(message_id, body)
+        order = raw["posh"].get("order_number")
+        log.info("%s: source POSH, order %s, event %r, ticket %r", message_id, order or "(none)",
+                 raw["posh"].get("event_name"), raw["posh"].get("ticket"))
     else:
         raw = gmail_client.parse_request(message_id, body)
 
@@ -215,6 +218,12 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
                                            and any(a in body.lower() for a in allowlist)):
             log.info("[test mode] leaving %s untouched (not from an allowlisted address)", message_id)
             return None
+
+    if raw.get("source") == "Posh":
+        order = raw["posh"].get("order_number")
+        if gmail_client.posh_order_already_handled(service, order, message_id):
+            log.info("%s: POSH order %s was already processed; not booking it again", message_id, order)
+            return gmail_client.PROCESSED_LABEL
 
     if raw.get("_missing_required"):
         team_alert(service, message_id, raw, [internal_action_needed(

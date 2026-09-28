@@ -477,12 +477,13 @@ class PoshParseTests(unittest.TestCase):
 class PoshFlowTests(unittest.TestCase):
     LABELS = LiveFlowTests.LABELS
 
-    def run_posh(self, body, consent):
+    def run_posh(self, body, consent, already_handled=False):
         fake = FakeGmail(body)
         listing = {"event": "OMNIA Night", "event_time": "10:30 PM", "listing_type": "Passes",
                    "listing_url": "https://tickets.taogroup.com/e/guest-list/x"}
         with mock.patch.dict("os.environ", {"POSH_CONSENT_ON_FILE": "true" if consent else ""}), \
              mock.patch.multiple(gmail_client, **fake_module(fake)), \
+             mock.patch.object(gmail_client, "posh_order_already_handled", return_value=already_handled), \
              mock.patch.object(main.tao_portal, "check_availability", side_effect=nightclubs_only(listing)), \
              mock.patch.object(main.tao_portal, "submit_registration",
                                return_value={"confirmation_id": "ORD-1", "verified": True}) as submit, \
@@ -503,6 +504,12 @@ class PoshFlowTests(unittest.TestCase):
         self.assertTrue(submit.called)
         self.assertEqual(fake.sent[0]["to"], "jane.sample@example.com")
         self.assertEqual(fake.sent[0]["cc"], "team@playmakerentertainment.com")
+
+    def test_same_posh_order_is_never_booked_twice(self):
+        outcome, fake, submit = self.run_posh(POSH, consent=True, already_handled=True)
+        self.assertEqual(outcome, gmail_client.PROCESSED_LABEL)
+        submit.assert_not_called()
+        self.assertEqual(fake.sent, [])
 
     def test_unknown_gender_goes_to_team(self):
         outcome, fake, submit = self.run_posh(POSH.replace("Ladies Guest List", "General Admission"), consent=True)
@@ -527,3 +534,37 @@ class PoshSubjectOnlyTests(unittest.TestCase):
         self.assertTrue(posh.is_posh_signup(gmail_client.get_subject(msg), body))
         raw = posh.parse_signup("m", body)
         self.assertEqual((raw["start_date"], raw["venues"], raw["male_count"]), ("2026-10-09", ["JEWEL Nightclub"], "1"))
+
+
+class PoshOrderLookupTests(unittest.TestCase):
+    """posh_order_already_handled against a fake Gmail API."""
+
+    def service(self, messages):
+        class Api:
+            def __init__(self, msgs): self.msgs, self.q = msgs, None
+            def users(self): return self
+            def messages(self): return self
+            def list(self, userId, q, maxResults):
+                self.q = q
+                return self
+            def execute(self): return {"messages": [{"id": i} for i in self.msgs]}
+        return Api(messages)
+
+    def lookup(self, others, order="1001"):
+        api = self.service(list(others))
+        bodies = dict(others)
+        with mock.patch.object(gmail_client, "get_plain_text_body", lambda s, mid: ({}, bodies.get(mid, ""))):
+            return gmail_client.posh_order_already_handled(api, order, "current"), api.q
+
+    def test_found_when_another_handled_email_has_the_same_order(self):
+        found, query = self.lookup({"old": POSH})
+        self.assertTrue(found)
+        self.assertIn('"1001"', query)
+        self.assertIn("label:Amy/Processed", query)
+
+    def test_not_found_for_a_different_order_or_itself(self):
+        self.assertFalse(self.lookup({"old": POSH.replace("1001", "2002")})[0])
+        self.assertFalse(self.lookup({"current": POSH})[0])
+
+    def test_no_order_number_never_counts_as_duplicate(self):
+        self.assertFalse(self.lookup({"old": POSH}, order="")[0])
