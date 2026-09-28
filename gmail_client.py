@@ -77,10 +77,13 @@ def get_service(token_path="token.json"):
             scopes=SCOPES,
         )
         creds.refresh(Request())
-    else:
+    elif os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
         if not creds.valid and creds.refresh_token:
             creds.refresh(Request())
+    else:
+        raise SystemExit("No Gmail credentials: set GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET and "
+                         "GMAIL_REFRESH_TOKEN (or create token.json with authorize.py).")
     return build("gmail", "v1", credentials=creds)
 
 

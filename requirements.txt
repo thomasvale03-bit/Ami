@@ -1,4 +1,5 @@
 google-api-python-client>=2.100.0
-google-auth-oauthlib>=1.1.0
-playwright>=1.40.0
 google-auth>=2.20.0
+google-auth-oauthlib>=1.1.0
+# Must match the Playwright Docker base image version in Dockerfile.
+playwright==1.63.0

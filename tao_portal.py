@@ -35,7 +35,10 @@ from urllib.parse import urlparse
 
 from config.rules import TAO_AUTOMATION_AUTHORIZATION, TAO_PROMOTER_URL
 
-READY = False
+# Checked against the live site on 2026-09-28 (read-only listing plus a
+# full form rehearsal stopped before "Submit Order"). The first real
+# submission happens in test mode, limited to the owner's own address.
+READY = True
 
 # URL slug fragments that identify each venue on TAO Pass links.
 VENUE_SLUGS = {
@@ -237,6 +240,12 @@ def _load_catalog():
         link["card"] = card
     _catalog = build_catalog(links)
     return _catalog
+
+
+def reset_catalog():
+    """Forget the cached promoter-page listings (called between cycles)."""
+    global _catalog
+    _catalog = None
 
 
 def _catalog_urls():

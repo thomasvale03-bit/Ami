@@ -314,3 +314,35 @@ class LiveCatalogTests(unittest.TestCase):
         import tao_portal as t
         self.assertEqual(t.date_from_url("https://tickets.taogroup.com/e/guest-list-omnia-nc-9-29-2026/tickets?x=1"),
                          date(2026, 9, 29))
+
+
+class TestModeTests(unittest.TestCase):
+    """Test mode books only for allowlisted addresses; everyone else's
+    request is left completely untouched (no labels, no email)."""
+
+    LABELS = LiveFlowTests.LABELS
+
+    def run_mode(self, body, allowlist):
+        fake = FakeGmail(body)
+        listing = {"event": "OMNIA Night", "listing_type": "Passes", "listing_url": "https://tickets.taogroup.com/e/guest-list/x"}
+        with mock.patch.multiple(gmail_client, **fake_module(fake)), \
+             mock.patch.object(main.tao_portal, "check_availability", side_effect=nightclubs_only(listing)), \
+             mock.patch.object(main.tao_portal, "submit_registration",
+                               return_value={"confirmation_id": "ORD-1", "verified": True}) as submit, \
+             mock.patch.object(main, "datetime") as dt:
+            dt.now.return_value.date.return_value = TODAY
+            outcome = main.handle_message(None, "msg-1", dry_run=False, labels=self.LABELS, allowlist=allowlist)
+        return outcome, fake, submit
+
+    def test_other_customers_are_untouched(self):
+        outcome, fake, submit = self.run_mode(FIXTURE, {"valeconsultingaz@gmail.com"})
+        self.assertIsNone(outcome)
+        self.assertEqual((fake.labels, fake.sent), ([], []))
+        submit.assert_not_called()
+
+    def test_allowlisted_request_is_booked_and_confirmed(self):
+        body = FIXTURE.replace("jane.sample@example.com", "valeconsultingaz@gmail.com")
+        outcome, fake, submit = self.run_mode(body, {"valeconsultingaz@gmail.com"})
+        self.assertEqual(outcome, gmail_client.PROCESSED_LABEL)
+        self.assertTrue(submit.called)
+        self.assertEqual(fake.sent[0]["to"], "valeconsultingaz@gmail.com")

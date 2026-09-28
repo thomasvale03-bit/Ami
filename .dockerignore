@@ -1,12 +1,8 @@
-# Secrets — never commit
+.git
 token.json
 client_secret*.json
 credentials.json
-
-# Runtime output
 amy_records.jsonl
-
-__pycache__/
+__pycache__
 *.pyc
-.venv/
-.env
+tests

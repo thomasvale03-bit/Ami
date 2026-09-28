@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -155,10 +156,19 @@ def team_alert(service, message_id, raw, problems, dry_run):
     )
 
 
-def handle_message(service, message_id, dry_run, labels):
-    """Process one request email end to end. Returns the outcome label."""
+def handle_message(service, message_id, dry_run, labels, allowlist=None):
+    """Process one request email end to end. Returns the outcome label, or
+    None when test mode skips a request that isn't from an allowlisted
+    address (it is left completely untouched)."""
     _, body = gmail_client.get_plain_text_body(service, message_id)
     raw = gmail_client.parse_request(message_id, body)
+
+    if allowlist is not None:
+        guest = (raw.get("email") or "").lower()
+        if guest not in allowlist and not (raw.get("_missing_required")
+                                           and any(a in body.lower() for a in allowlist)):
+            log.info("[test mode] leaving %s untouched (not from an allowlisted address)", message_id)
+            return None
 
     if raw.get("_missing_required"):
         team_alert(service, message_id, raw, [internal_action_needed(
@@ -210,40 +220,17 @@ def handle_message(service, message_id, dry_run, labels):
     return gmail_client.PROCESSED_LABEL
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--dry-run", action="store_true", help="Read and decide only (default)")
-    mode.add_argument("--live", action="store_true", help="Actually submit + send email")
-    args = parser.parse_args()
-    dry_run = not args.live
-
-    if not dry_run and not tao_portal.READY:
-        sys.exit("--live is disabled until tao_portal.py is filled in from a recorded TAO session.")
-
-    # Unix seconds; requests received earlier were handled by the previous
-    # process and must never be booked again. Required for --live.
-    start_after = os.environ.get("AMY_START_AFTER")
-    if not dry_run and not start_after:
-        sys.exit("--live needs AMY_START_AFTER (Unix time of go-live) so old requests are not re-booked.")
-
-    service = gmail_client.get_service()
-    account = gmail_client.get_account_email(service)
-    if account.lower() != rules.INTAKE_EMAIL:
-        sys.exit(f"Wrong Gmail account: signed in as {account}, expected {rules.INTAKE_EMAIL}.")
-
-    pending = gmail_client.list_pending_requests(service, start_after=start_after)
-    log.info("Found %d pending guest-list request(s)%s", len(pending), " [DRY RUN]" if dry_run else "")
-
-    labels = {}
-    if not dry_run:
-        for name in (gmail_client.PROCESSING_LABEL, gmail_client.PROCESSED_LABEL, gmail_client.EXCEPTION_LABEL):
-            labels[name] = gmail_client.get_or_create_label(service, name)
+def run_once(service, mode, labels, allowlist=None, start_after=None):
+    dry_run = mode == "dry-run"
+    # Test mode may pick up allowlisted requests from before go-live.
+    pending = gmail_client.list_pending_requests(
+        service, start_after=None if mode == "test" else start_after)
+    log.info("Found %d pending guest-list request(s) [%s]", len(pending), mode)
 
     for msg_ref in reversed(pending):  # oldest first
         message_id = msg_ref["id"]
         try:
-            outcome = handle_message(service, message_id, dry_run, labels)
+            outcome = handle_message(service, message_id, dry_run, labels, allowlist)
         except Exception:
             log.exception("Failed while processing %s", message_id)
             if dry_run:
@@ -255,6 +242,8 @@ def main():
                 "Amy hit an error partway through this request. A TAO registration may or may "
                 "not have gone through — check TAO before re-submitting."
             ], dry_run)
+        if outcome is None:
+            continue
         log.info("%s -> %s", message_id, outcome)
         if not dry_run:
             gmail_client.set_labels(
@@ -262,6 +251,64 @@ def main():
                 add=[gmail_client.PROCESSED_LABEL] + ([outcome] if outcome == gmail_client.EXCEPTION_LABEL else []),
                 remove=[gmail_client.PROCESSING_LABEL],
             )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    mode_flags = parser.add_mutually_exclusive_group()
+    mode_flags.add_argument("--dry-run", action="store_true", help="Read and decide only")
+    mode_flags.add_argument("--test", action="store_true",
+                            help="Live, but only for requests from TEST_GUEST_EMAIL_ALLOWLIST")
+    mode_flags.add_argument("--live", action="store_true", help="Book and email for every new request")
+    parser.add_argument("--loop", action="store_true",
+                        help="Keep running, checking the inbox every AMY_POLL_SECONDS (default 120)")
+    args = parser.parse_args()
+
+    # Flags win; otherwise AMY_MODE (how the server is configured); default dry-run.
+    mode = ("dry-run" if args.dry_run else "test" if args.test else "live" if args.live
+            else os.environ.get("AMY_MODE", "dry-run"))
+    if mode not in ("dry-run", "test", "live"):
+        sys.exit(f"AMY_MODE must be dry-run, test or live (got {mode!r}).")
+
+    if mode != "dry-run" and not tao_portal.READY:
+        sys.exit("Booking is disabled until tao_portal.READY is True.")
+
+    allowlist = None
+    if mode == "test":
+        allowlist = {a.strip().lower() for a in os.environ.get("TEST_GUEST_EMAIL_ALLOWLIST", "").split(",") if a.strip()}
+        if not allowlist:
+            sys.exit("Test mode needs TEST_GUEST_EMAIL_ALLOWLIST (e.g. valeconsultingaz@gmail.com).")
+
+    # Unix seconds; requests received earlier were handled by the previous
+    # process and must never be booked again. Required for live mode.
+    start_after = os.environ.get("AMY_START_AFTER")
+    if mode == "live" and not start_after:
+        sys.exit("Live mode needs AMY_START_AFTER (Unix time of go-live) so old requests are not re-booked.")
+
+    service = gmail_client.get_service()
+    account = gmail_client.get_account_email(service)
+    if account.lower() != rules.INTAKE_EMAIL:
+        sys.exit(f"Wrong Gmail account: signed in as {account}, expected {rules.INTAKE_EMAIL}.")
+    log.info("Amy started as %s in %s mode%s", account, mode,
+             f" (allowlist: {', '.join(sorted(allowlist))})" if allowlist else "")
+
+    labels = {}
+    if mode != "dry-run":
+        for name in (gmail_client.PROCESSING_LABEL, gmail_client.PROCESSED_LABEL, gmail_client.EXCEPTION_LABEL):
+            labels[name] = gmail_client.get_or_create_label(service, name)
+
+    poll_seconds = max(int(os.environ.get("AMY_POLL_SECONDS", "120")), 30)
+    while True:
+        try:
+            run_once(service, mode, labels, allowlist, start_after)
+        except Exception:
+            if not args.loop:
+                raise
+            log.exception("Inbox check failed; will retry next cycle")
+        if not args.loop:
+            break
+        tao_portal.reset_catalog()  # fresh promoter-page listings every cycle
+        time.sleep(poll_seconds)
 
 
 if __name__ == "__main__":

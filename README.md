@@ -73,7 +73,24 @@ What `--live` does per request:
   that errors midway is labeled Exception and never retried automatically.
 - Nights that have already passed are skipped.
 
-## Deploying so it actually runs 24/7
+## Running on Railway (24/7)
+The `Dockerfile` builds on the official Playwright image and runs
+`python main.py --loop`, checking the inbox every `AMY_POLL_SECONDS`.
+Set these in the Railway service's Variables (see `.env.example`):
+
+| Variable | Value |
+|---|---|
+| `AMY_MODE` | `dry-run` first, then `test`, then `live` |
+| `TEST_GUEST_EMAIL_ALLOWLIST` | `valeconsultingaz@gmail.com` (test mode books only for these) |
+| `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN` | from the Google OAuth setup |
+| `AMY_START_AFTER` | Unix time of go-live; required for `live` |
+
+Keep exactly one instance running. Rollout: `dry-run` (watch the logs) →
+`test` (one real booking for the owner's own request, confirm it appears in
+the TAO promoter dashboard and the confirmation email is right) → pause the
+previous guest-list process → `live`.
+
+## Deploying so it actually runs 24/7 (original notes)
 Once `--live` works correctly against a handful of real requests:
 - Cheapest: a scheduled Cloud Function / Cloud Run job that runs `main.py`
   every 2–5 minutes.
