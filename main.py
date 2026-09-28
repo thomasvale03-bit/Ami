@@ -34,7 +34,19 @@ log = logging.getLogger("amy")
 VEGAS = ZoneInfo("America/Los_Angeles")
 
 
-def process_one_request(raw, dry_run=True, today=None):
+def event_has_started(listing, date_obj, now):
+    """True when the listing is for today and its start time (e.g. "11:00 AM")
+    is already past in Las Vegas. Unknown start times never count as started."""
+    if not listing or date_obj != now.date() or not listing.get("event_time"):
+        return False
+    try:
+        start = datetime.strptime(listing["event_time"].replace(" ", "").upper(), "%I:%M%p").time()
+    except ValueError:
+        return False
+    return now.time() >= start
+
+
+def process_one_request(raw, dry_run=True, today=None, now=None):
     try:
         request = normalize_guest_request(raw)
     except ActionNeeded as e:
@@ -88,14 +100,25 @@ def process_one_request(raw, dry_run=True, today=None):
         })
         return True
 
-    today = today or datetime.now(VEGAS).date()
+    now = now or datetime.now(VEGAS)
+    today = today or now.date()
+
+    def dayclub_checker(venue, date_obj):
+        # A dayclub that has already started today is skipped (the next
+        # dayclub is tried). Nightclubs are not: their guest lists stay
+        # usable until the late arrival cutoff.
+        listing = checker(venue, date_obj)
+        if event_has_started(listing, date_obj, now):
+            log.info("Skipping %s on %s: it started at %s", venue, date_obj, listing["event_time"])
+            return None
+        return listing
     for date_obj in date_range(request["start_date"], request["end_date"]):
         if date_obj < today:
             log.info("Skipping %s: that night has already passed", date_obj)
             continue
 
         # Dayclub: an extra registration when a free dayclub Pass is live.
-        dayclub, day_listing = resolve_dayclub_for_date(request, date_obj, checker)
+        dayclub, day_listing = resolve_dayclub_for_date(request, date_obj, dayclub_checker)
         if dayclub:
             book(dayclub, day_listing, date_obj, "dayclub")
 

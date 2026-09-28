@@ -373,3 +373,50 @@ class OrderIdTests(unittest.TestCase):
     def test_no_id_found(self):
         import tao_portal as t
         self.assertIsNone(t.order_id_from("https://tickets.taogroup.com/e/x/tickets", "Something went wrong"))
+
+
+class StartedEventTests(unittest.TestCase):
+    """Same-day requests: a dayclub that has already started is skipped."""
+
+    def run_at(self, hour, minute):
+        from datetime import datetime
+        now = datetime(2026, 10, 30, hour, minute, tzinfo=main.VEGAS)
+        booked = []
+
+        def available(venue, day):
+            times = {"TAO Beach Dayclub": "10:00 AM", "Marquee Dayclub": "11:00 AM",
+                     "OMNIA Nightclub": "10:30 PM", "JEWEL Nightclub": "10:30 PM"}
+            if venue in times:
+                return {"event": venue, "event_time": times[venue], "listing_type": "Passes",
+                        "listing_url": "https://tickets.taogroup.com/e/guest-list/x"}
+            return None
+
+        def submit(listing, guest):
+            booked.append(listing["event"])
+            return {"confirmation_id": f"ORD-{len(booked)}", "verified": True}
+
+        raw = parsed(FIXTURE.replace("2026-10-31", "2026-10-30"))
+        with mock.patch.object(main.tao_portal, "check_availability", side_effect=available), \
+             mock.patch.object(main.tao_portal, "submit_registration", side_effect=submit):
+            main.process_one_request(raw, dry_run=False, now=now)
+        return booked
+
+    def test_before_the_dayclub_starts_it_is_booked(self):
+        self.assertEqual(self.run_at(9, 0), ["TAO Beach Dayclub", "OMNIA Nightclub"])
+
+    def test_next_dayclub_is_tried_when_the_first_has_started(self):
+        self.assertEqual(self.run_at(10, 30), ["Marquee Dayclub", "OMNIA Nightclub"])
+
+    def test_after_all_dayclubs_started_only_the_nightclub(self):
+        self.assertEqual(self.run_at(15, 0), ["OMNIA Nightclub"])
+
+    def test_nightclub_is_still_booked_after_its_start(self):
+        self.assertEqual(self.run_at(23, 0), ["OMNIA Nightclub"])
+
+    def test_time_parsing(self):
+        from datetime import datetime, date
+        now = datetime(2026, 10, 30, 11, 0, tzinfo=main.VEGAS)
+        self.assertTrue(main.event_has_started({"event_time": "11:00 AM"}, date(2026, 10, 30), now))
+        self.assertFalse(main.event_has_started({"event_time": "11:30AM"}, date(2026, 10, 30), now))
+        self.assertFalse(main.event_has_started({"event_time": "9:00 AM"}, date(2026, 10, 31), now))
+        self.assertFalse(main.event_has_started({"event_time": None}, date(2026, 10, 30), now))
