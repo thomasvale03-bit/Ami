@@ -17,6 +17,7 @@ NIGHTCLUBS = [
 DAYLIFE_VENUES = [
     "TAO Beach Dayclub",
     "Marquee Dayclub",
+    "OMNIA Dayclub",
     "Liquid Pool Lounge",
     "Palm Tree Beach Club",
     "LAVO Party Brunch",
@@ -46,6 +47,7 @@ VENUE_ALIASES = {
     "marquee nightclub": "Marquee Nightclub",
     "marquee": "Marquee Nightclub",
     "marquee dayclub": "Marquee Dayclub",
+    "omnia dayclub": "OMNIA Dayclub",
     "tao nightclub": "TAO Nightclub",
     "tao": "TAO Nightclub",
     "tao beach": "TAO Beach Dayclub",
@@ -83,6 +85,17 @@ DEFAULT_ROUTING = {
     "Saturday":  {"primary": "JEWEL Nightclub", "fallback": "Marquee Nightclub"},
     "Sunday":    {"primary": "TAO Nightclub", "fallback": "best_available"},
 }
+
+# On any date with a live, free dayclub Pass, Amy books one dayclub IN
+# ADDITION to the nightclub (never instead of it): a requested dayclub
+# first, then this priority. Live TAO availability decides the season.
+DAYCLUB_PRIORITY = [
+    "TAO Beach Dayclub",
+    "Marquee Dayclub",
+    "OMNIA Dayclub",
+    "Palm Tree Beach Club",
+    "Liquid Pool Lounge",
+]
 
 # Tried after the weekday route, on every night except Tuesday, before giving
 # up on a night (owner decision 2026-09-27).
@@ -135,4 +148,21 @@ DAYLIFE_AUTO_VENUES_PAUSED_IN_OFFSEASON = {
     "TAO Beach Dayclub", "Marquee Dayclub", "Liquid Pool Lounge", "Palm Tree Beach Club"
 }
 
-TAO_PROMOTER_URL = "https://tickets.taogroup.com/promoter/68d79ff5-3d04-4198-83d7-00330a1e6107"
+# Exact promoter link named in the TAO authorization (section 5). Keep the
+# utm_* parameters: they attribute bookings to Playmaker.
+TAO_PROMOTER_URL = (
+    "https://tickets.taogroup.com/promoter/68d79ff5-3d04-4198-83d7-00330a1e6107"
+    "?utm_source=promoter&utm_id=68d79ff587c84397b19f00330a1e6107"
+)
+
+# Written provider authorization for automated $0 Guest List registrations.
+# Signed copy: PME_POA.pdf (kept outside this repository). Scope: $0 Guest
+# List/Pass options only, through the promoter link above; automated browser
+# submission allowed; a Playmaker representative may accept the TicketDriver
+# terms for a customer using the intake form's documented consent. TAO may
+# revoke it with written notice to team@playmakerentertainment.com.
+TAO_AUTOMATION_AUTHORIZATION = (
+    "TAO Group Hospitality / TicketDriver authorization for automated $0 Guest "
+    "List registrations, signed 2026-09-28 by Jonathan Sidara (Las Vegas "
+    "Promotions Director, TAO Group Hospitality); acknowledged by Thomas Vale"
+)

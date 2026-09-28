@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from rules_engine import (
     normalize_guest_request, ActionNeeded, date_range,
-    resolve_venue_for_date,
+    resolve_dayclub_for_date, resolve_venue_for_date,
 )
 from config import rules
 from templates.emails import consolidated_confirmation, internal_processed_record, internal_action_needed
@@ -50,44 +50,67 @@ def process_one_request(raw, dry_run=True, today=None):
             return {"event": "[simulated]", "listing_type": "Passes"}
         return tao_portal.check_availability(venue, date_obj)
 
+    def book(venue, listing, date_obj, category):
+        """Register one venue/date. Returns True only for a verified booking."""
+        if dry_run:
+            registrations.append({
+                "venue": venue, "category": category, "date": date_obj.isoformat(),
+                "event": ("[only if TAO lists a free dayclub Pass that day]" if category == "dayclub"
+                          else "[would be read from live listing]"),
+                "event_time": None,
+                "female_count": request["female_count"], "male_count": request["male_count"],
+                "arrival_text": "[would be read from live listing]",
+                "confirmation_id": "[DRY RUN — not submitted]",
+            })
+            return True
+        try:
+            result = tao_portal.submit_registration(listing, request)
+        except tao_portal.SubmissionUncertain as exc:
+            # The order may exist at TAO: flag it, never retry automatically.
+            exceptions.append({"date": date_obj.isoformat(), "issue": (
+                f"{venue}: submitted but success could not be confirmed ({exc}). "
+                "Check TAO for this guest before re-submitting.")})
+            return False
+        if not result.get("verified"):
+            exceptions.append({"date": date_obj.isoformat(), "issue": (
+                f"{venue}: not submitted — {result.get('reason', 'could not be verified')}.")})
+            return False
+        log.info("Registered %s at %s on %s (order %s) under: %s", request["email"], venue,
+                 date_obj, result["confirmation_id"], result.get("authorization"))
+        registrations.append({
+            "venue": venue, "category": category, "date": date_obj.isoformat(),
+            "event": result.get("event") or listing.get("event", ""),
+            "event_time": result.get("event_time") or listing.get("event_time"),
+            "female_count": request["female_count"], "male_count": request["male_count"],
+            "arrival_text": result.get("arrival_text") or listing.get("arrival_text", ""),
+            "confirmation_id": result["confirmation_id"],
+        })
+        return True
+
     today = today or datetime.now(VEGAS).date()
     for date_obj in date_range(request["start_date"], request["end_date"]):
         if date_obj < today:
             log.info("Skipping %s: that night has already passed", date_obj)
             continue
+
+        # Dayclub: an extra registration when a free dayclub Pass is live.
+        dayclub, day_listing = resolve_dayclub_for_date(request, date_obj, checker)
+        if dayclub:
+            book(dayclub, day_listing, date_obj, "dayclub")
+
         venue, listing = resolve_venue_for_date(
             request, date_obj, live_availability_checker=checker,
             previous_night_venue=previous_night_venue,
         )
-        previous_night_venue = venue
         if not venue:
+            previous_night_venue = None
             exceptions.append({
                 "date": date_obj.isoformat(),
-                "issue": "No matching live Passes/Guest List event for requested or routed venues.",
+                "issue": "No matching live Passes/Guest List event for requested or routed nightclubs.",
             })
             continue
-
-        if dry_run:
-            registrations.append({
-                "venue": venue, "event": "[would be read from live listing]",
-                "date": date_obj.isoformat(),
-                "female_count": request["female_count"], "male_count": request["male_count"],
-                "arrival_text": "[would be read from live listing]",
-                "confirmation_id": "[DRY RUN — not submitted]",
-            })
-            continue
-
-        result = tao_portal.submit_registration(listing, request)
-        if not result.get("verified"):
-            exceptions.append({"date": date_obj.isoformat(), "issue": "Submission could not be verified."})
-            continue
-
-        registrations.append({
-            "venue": venue, "event": listing.get("event", ""), "date": date_obj.isoformat(),
-            "female_count": request["female_count"], "male_count": request["male_count"],
-            "arrival_text": listing.get("arrival_text", ""),
-            "confirmation_id": result["confirmation_id"],
-        })
+        # Only a confirmed nightclub counts for the Fri/Sat no-repeat rule.
+        previous_night_venue = venue if book(venue, listing, date_obj, "nightclub") else None
 
     output = {"request": request, "registrations": registrations, "exceptions": exceptions}
 

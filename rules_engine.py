@@ -116,7 +116,7 @@ def candidate_venues(request, date_obj, previous_night_venue=None):
     if day == "Saturday" and previous_night_venue == "JEWEL Nightclub":
         schedule.insert(0, "Hakkasan Nightclub")
 
-    requested = list(request["requested_venues"])
+    requested = [v for v in request["requested_venues"] if v in rules.NIGHTCLUBS]
     ordered = [v for v in schedule if v in requested] + requested + schedule
 
     seen, result = set(), []
@@ -138,6 +138,21 @@ def resolve_venue_for_date(request, date_obj, live_availability_checker, previou
     Only a 'Passes' listing is ever used; paid 'Tickets' never are.
     """
     for venue in candidate_venues(request, date_obj, previous_night_venue):
+        listing = live_availability_checker(venue, date_obj)
+        if listing and listing.get("listing_type") == "Passes":
+            return venue, listing
+    return None, None
+
+
+def dayclub_candidates(request):
+    requested = [v for v in request["requested_venues"] if v in rules.DAYCLUB_PRIORITY]
+    return list(dict.fromkeys(requested + rules.DAYCLUB_PRIORITY))
+
+
+def resolve_dayclub_for_date(request, date_obj, live_availability_checker):
+    """The one dayclub to add for this date, or (None, None) if none has a
+    live free Pass. Missing a dayclub is normal, not an exception."""
+    for venue in dayclub_candidates(request):
         listing = live_availability_checker(venue, date_obj)
         if listing and listing.get("listing_type") == "Passes":
             return venue, listing

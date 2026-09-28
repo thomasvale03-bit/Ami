@@ -13,6 +13,12 @@ FIXTURE = (pathlib.Path(__file__).parent / "fixtures" / "new_form.txt").read_tex
 TODAY = date(2026, 9, 28)
 
 
+def nightclubs_only(listing):
+    """Availability stub: every nightclub has a free Pass, no dayclub does."""
+    from config import rules
+    return lambda venue, day: listing if venue in rules.NIGHTCLUBS else None
+
+
 def parsed(text=FIXTURE):
     return gmail_client.parse_request("msg-1", text)
 
@@ -74,14 +80,15 @@ class RoutingTests(unittest.TestCase):
 class FlowTests(unittest.TestCase):
     def test_dry_run_plans_each_night(self):
         result = main.process_one_request(parsed(), dry_run=True, today=TODAY)
-        self.assertEqual([(r["date"], r["venue"]) for r in result["registrations"]],
+        nightclubs = [r for r in result["registrations"] if r["category"] == "nightclub"]
+        self.assertEqual([(r["date"], r["venue"]) for r in nightclubs],
                          [("2026-10-30", "OMNIA Nightclub"),   # Friday: requested
                           ("2026-10-31", "JEWEL Nightclub")])  # Saturday: never repeat Friday
         self.assertIn("Hi Jane", result["confirmation_email"]["body"])
 
     def test_past_nights_are_skipped(self):
         result = main.process_one_request(parsed(), dry_run=True, today=date(2026, 10, 31))
-        self.assertEqual([r["date"] for r in result["registrations"]], ["2026-10-31"])
+        self.assertEqual({r["date"] for r in result["registrations"]}, {"2026-10-31"})
 
 
 class FakeGmail:
@@ -115,7 +122,7 @@ class LiveFlowTests(unittest.TestCase):
     def run_handle(self, fake, verified=True, today=TODAY):
         listing = {"event": "OMNIA Night", "listing_type": "Passes", "arrival_text": "Before 1 AM"}
         with mock.patch.multiple(gmail_client, **fake_module(fake)), \
-             mock.patch.object(main.tao_portal, "check_availability", return_value=listing), \
+             mock.patch.object(main.tao_portal, "check_availability", side_effect=nightclubs_only(listing)), \
              mock.patch.object(main.tao_portal, "submit_registration",
                                return_value={"confirmation_id": "ORD-1" if verified else None, "verified": verified}), \
              mock.patch.object(main, "datetime") as dt:
@@ -164,3 +171,117 @@ class GmailHelperTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TaoSafetyTests(unittest.TestCase):
+    def test_only_https_guest_list_links_on_tao(self):
+        import tao_portal as t
+        self.assertTrue(t.is_safe_pass_url("https://tickets.taogroup.com/e/omnia-nc-guest-list/10-6-2026/tickets"))
+        self.assertFalse(t.is_safe_pass_url("https://tickets.taogroup.com/e/omnia-nc-tickets/10-6-2026/tickets"))
+        self.assertFalse(t.is_safe_pass_url("http://tickets.taogroup.com/e/omnia-guest-list/10-6-2026"))
+        self.assertFalse(t.is_safe_pass_url("https://evil.example.com/guest-list"))
+
+    def test_venue_and_date_from_link(self):
+        import tao_portal as t
+        url = "https://tickets.taogroup.com/e/omnia-nc-guest-list/10-6-2026/tickets"
+        self.assertEqual(t.venue_from_url(url), "OMNIA Nightclub")
+        self.assertEqual(t.date_from_url(url), date(2026, 10, 6))
+
+    def test_any_positive_price_blocks(self):
+        import tao_portal as t
+        self.assertTrue(t.has_positive_price("Female GA $0.00 Male GA $20.00"))
+        self.assertFalse(t.has_positive_price("Female GA $0.00 FREE"))
+        self.assertTrue(t.has_free_evidence("Total: $0.00"))
+        self.assertFalse(t.has_free_evidence("Total: $25.00"))
+
+    def test_gender_and_capacity(self):
+        import tao_portal as t
+        self.assertEqual(t.gender_of("Ladies Guest List - FREE"), "female")
+        self.assertEqual(t.gender_of("Men Guest List - FREE"), "male")
+        self.assertEqual(t.max_quantity([{"value": "0"}, {"value": "1"}, {"value": "10"}]), 10)
+
+    def test_authorization_is_recorded(self):
+        from config import rules
+        self.assertIn("Jonathan Sidara", rules.TAO_AUTOMATION_AUTHORIZATION)
+        self.assertIn("utm_id=68d79ff587c84397b19f00330a1e6107", rules.TAO_PROMOTER_URL)
+
+
+class UncertainSubmissionTests(unittest.TestCase):
+    def test_uncertain_night_is_flagged_and_other_nights_continue(self):
+        import tao_portal as t
+        listing = {"event": "E", "listing_type": "Passes", "listing_url": "https://tickets.taogroup.com/e/guest-list/x"}
+        calls = []
+
+        def submit(listing, guest):
+            calls.append(1)
+            if len(calls) == 1:
+                raise t.SubmissionUncertain("no order ID")
+            return {"confirmation_id": "ORD-2", "verified": True}
+
+        with mock.patch.object(t, "check_availability", side_effect=nightclubs_only(listing)), \
+             mock.patch.object(t, "submit_registration", side_effect=submit):
+            result = main.process_one_request(parsed(), dry_run=False, today=TODAY)
+        self.assertEqual(len(calls), 2)  # never retried, next night still processed
+        self.assertEqual([r["confirmation_id"] for r in result["registrations"]], ["ORD-2"])
+        self.assertIn("Check TAO", result["exceptions"][0]["issue"])
+
+
+class DayclubTests(unittest.TestCase):
+    """Matches the owner's example confirmation for Oct 30-31."""
+
+    def run_live(self, live_venues):
+        booked = []
+
+        def available(venue, day):
+            if venue in live_venues:
+                return {"event": f"{venue} event", "listing_type": "Passes",
+                        "listing_url": "https://tickets.taogroup.com/e/guest-list/x"}
+            return None
+
+        def submit(listing, guest):
+            booked.append(listing["event"])
+            return {"confirmation_id": f"ORD-{len(booked)}", "verified": True}
+
+        with mock.patch.object(main.tao_portal, "check_availability", side_effect=available), \
+             mock.patch.object(main.tao_portal, "submit_registration", side_effect=submit):
+            return main.process_one_request(parsed(), dry_run=False, today=TODAY)
+
+    def test_live_dayclub_is_added_before_the_nightclub_each_day(self):
+        result = self.run_live({"Marquee Dayclub", "OMNIA Nightclub", "JEWEL Nightclub"})
+        self.assertEqual([(r["date"], r["venue"]) for r in result["registrations"]], [
+            ("2026-10-30", "Marquee Dayclub"), ("2026-10-30", "OMNIA Nightclub"),
+            ("2026-10-31", "Marquee Dayclub"), ("2026-10-31", "JEWEL Nightclub"),
+        ])
+        self.assertEqual(result["exceptions"], [])
+
+    def test_dayclub_priority_and_no_problem_when_none_is_live(self):
+        self.assertEqual(self.run_live({"Liquid Pool Lounge", "TAO Beach Dayclub", "OMNIA Nightclub",
+                                        "JEWEL Nightclub"})["registrations"][0]["venue"], "TAO Beach Dayclub")
+        result = self.run_live({"OMNIA Nightclub", "JEWEL Nightclub"})
+        self.assertEqual({r["category"] for r in result["registrations"]}, {"nightclub"})
+        self.assertEqual(result["exceptions"], [])
+
+    def test_requested_dayclub_is_tried_first(self):
+        from rules_engine import dayclub_candidates
+        self.assertEqual(dayclub_candidates({"requested_venues": ["Liquid Pool Lounge", "OMNIA Nightclub"]})[0],
+                         "Liquid Pool Lounge")
+
+
+class ConfirmationEmailTests(unittest.TestCase):
+    def test_owner_format(self):
+        from templates.emails import consolidated_confirmation
+        regs = [dict(date="2026-10-30", event_time="10:30 PM", venue="OMNIA Nightclub",
+                     event="Tiësto – Halloween Weekend", confirmation_id="ORD-1", female_count=2, male_count=1),
+                dict(date="2026-10-31", event_time=None, venue="JEWEL Nightclub", event="",
+                     confirmation_id="ORD-2", female_count=2, male_count=1)]
+        subject, body = consolidated_confirmation("Tom", "tom@example.com", "2026-10-30 to 2026-10-31", regs)
+        self.assertIn("confirmed for 2 female guests and 1 male guest:", body)
+        self.assertIn("Friday, October 30 at 10:30 PM — OMNIA Nightclub: Tiësto – Halloween Weekend\nOrder ID: ORD-1", body)
+        self.assertIn("Saturday, October 31 — JEWEL Nightclub\nOrder ID: ORD-2", body)
+        self.assertIn("same email address used for the guest list: tom@example.com", body)
+        self.assertTrue(body.endswith("Enjoy Las Vegas!\n\nPlaymaker Entertainment"))
+
+    def test_party_wording(self):
+        from templates.emails import party_phrase
+        self.assertEqual(party_phrase(1, 0), "1 female guest")
+        self.assertEqual(party_phrase(0, 3), "3 male guests")

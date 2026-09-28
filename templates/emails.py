@@ -18,32 +18,51 @@ def cutoff_sentence(female_cutoff=None, male_cutoff=None, single_cutoff=None,
     return "Please check with the venue for arrival requirements."
 
 
+TAO_APP_URL = "https://apps.apple.com/us/app/tao-group-hospitality-rewards/id1537602625"
+
+
+def _guests(n, word):
+    return f"{n} {word} guest{'s' if n != 1 else ''}"
+
+
+def party_phrase(female_count, male_count):
+    parts = [_guests(n, w) for n, w in ((female_count, "female"), (male_count, "male")) if n]
+    return " and ".join(parts)
+
+
+def _long_date(iso_date):
+    from datetime import date
+    d = date.fromisoformat(iso_date)
+    return f"{d.strftime('%A, %B')} {d.day}"
+
+
+def _event_line(r):
+    when = _long_date(r["date"]) + (f" at {r['event_time']}" if r.get("event_time") else "")
+    event = (r.get("event") or "").strip()
+    what = r["venue"] if not event or event.lower().startswith(r["venue"].lower()) else f"{r['venue']}: {event}"
+    return f"{when} — {what}\nOrder ID: {r['confirmation_id']}"
+
+
 def consolidated_confirmation(first_name, guest_email, date_label, registrations):
-    """
-    registrations: list of dicts, each with keys:
-        venue, event, female_count, male_count, arrival_text, confirmation_id
-    """
-    event_blocks = []
-    for r in registrations:
-        event_blocks.append(
-            f"* {r['venue']} — {r['event']}\n\n"
-            f"Guest list: {r['female_count']} female guest(s) + {r['male_count']} male guest(s)\n\n"
-            f"Arrival: {r['arrival_text']}\n\n"
-            f"Confirmation: {r['confirmation_id']}"
-        )
+    """One email for all verified registrations of a request (owner-approved
+    wording, Sept 28 2026). registrations: dicts with venue, event,
+    event_time (optional), date, female_count, male_count, confirmation_id."""
+    first = registrations[0]
     body = (
         f"Hi {first_name},\n\n"
-        f"Your Playmaker Entertainment guest-list registrations for {date_label} have been confirmed:\n\n"
-        + "\n\n".join(event_blocks) +
-        "\n\nImportant: All guests must be 21 or older and present a current, valid, original "
-        "government-issued photo ID. Complimentary admission is subject to venue capacity and "
-        "the stated arrival requirements. Arriving after a cutoff may require paying a cover charge.\n\n"
-        f"Your passes should be available through the TAO ticket wallet. Please register or sign "
-        f"in using this same email address: {guest_email}.\n\n"
+        f"Your Playmaker Entertainment guest-list registrations are confirmed for "
+        f"{party_phrase(first['female_count'], first['male_count'])}:\n\n"
+        + "\n\n".join(_event_line(r) for r in registrations) +
+        "\n\nPlease arrive early and bring a current, valid government-issued photo ID. "
+        "All guests must be 21+.\n\n"
+        "Your passes will be in the TAO ticket wallet:\n"
+        f"1. Download the TAO Group Hospitality Rewards app: {TAO_APP_URL}\n"
+        f"2. Sign up using the same email address used for the guest list: {guest_email}\n"
+        "3. Open the Ticket Wallet section to view your passes once they're issued.\n\n"
+        "Guest-list admission is subject to each venue’s posted rules, arrival requirements, "
+        "dress code, and capacity.\n\n"
         "Enjoy Las Vegas!\n\n"
-        "Playmaker Entertainment\n"
-        "team@playmakerentertainment.com\n"
-        "PlaymakerEntertainment.com"
+        "Playmaker Entertainment"
     )
     subject = f"Playmaker Guest List Confirmation — {date_label}"
     return subject, body

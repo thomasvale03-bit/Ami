@@ -1,0 +1,15 @@
+<!doctype html><html><body>
+<h1>OMNIA Guest List - Tuesday</h1>
+<p>Guest list closes at 1:00 AM. Valid ID required. 21+.</p>
+<form action="confirmation.html" method="get">
+  <div><label for="TicketFemale">Ladies Guest List - FREE</label>
+    <select id="TicketFemale"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></div>
+  <div><label for="TicketMale">Men Guest List - FREE</label>
+    <select id="TicketMale"><option value="0">0</option><option value="1">1</option><option value="2">2</option></select></div>
+  <input id="OrderEmail" type="email"><input id="OrderFirstName"><input id="OrderLastName">
+  <input id="OrderPhone" type="tel"><input id="OrderPostalCode">
+  <div><input type="checkbox" id="OrderOptedIn" checked><label for="OrderOptedIn">Send me marketing emails</label></div>
+  <div><input type="checkbox" id="OrderTerms" required><label for="OrderTerms">I agree to the Terms and Conditions</label></div>
+  <div id="OrderTotal">Total: $0.00</div><input type="hidden" id="OrderProposedTotal" value="0.00">
+  <button type="submit">Place Order</button>
+</form></body></html>
