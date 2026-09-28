@@ -32,7 +32,7 @@ class MockCheckoutTests(unittest.TestCase):
         patches = [
             mock.patch.object(tao_portal, "TAO_PROMOTER_URL", (MOCK / "promoter.html").as_uri()),
             mock.patch.object(tao_portal, "is_safe_pass_url", return_value=True),
-            mock.patch.object(tao_portal, "_catalog", {(n, None): u for n, u in urls.items()}),
+            mock.patch.object(tao_portal, "_catalog", {(n, None): {"url": u} for n, u in urls.items()}),
         ]
         for patcher in patches:
             patcher.start()
@@ -105,7 +105,7 @@ class MockCheckoutTests(unittest.TestCase):
     def test_availability_reads_a_free_listing(self):
         from datetime import date
         url = (MOCK / "event.html").as_uri()
-        with mock.patch.object(tao_portal, "_catalog", {("OMNIA Nightclub", date(2026, 10, 6)): url}):
+        with mock.patch.object(tao_portal, "_catalog", {("OMNIA Nightclub", date(2026, 10, 6)): {"url": url}}):
             listing = tao_portal.check_availability("OMNIA Nightclub", date(2026, 10, 6))
             self.assertEqual(listing["price"], 0)
             self.assertEqual(listing["capacity"], {"female": 3, "male": 2})
@@ -114,7 +114,7 @@ class MockCheckoutTests(unittest.TestCase):
     def test_availability_rejects_a_priced_listing(self):
         from datetime import date
         url = (MOCK / "paid.html").as_uri()
-        with mock.patch.object(tao_portal, "_catalog", {("OMNIA Nightclub", date(2026, 10, 6)): url}):
+        with mock.patch.object(tao_portal, "_catalog", {("OMNIA Nightclub", date(2026, 10, 6)): {"url": url}}):
             self.assertIsNone(tao_portal.check_availability("OMNIA Nightclub", date(2026, 10, 6)))
 
 

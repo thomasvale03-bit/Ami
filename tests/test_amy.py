@@ -285,3 +285,32 @@ class ConfirmationEmailTests(unittest.TestCase):
         from templates.emails import party_phrase
         self.assertEqual(party_phrase(1, 0), "1 female guest")
         self.assertEqual(party_phrase(0, 3), "3 male guests")
+
+
+class LiveCatalogTests(unittest.TestCase):
+    """Link and card formats copied from the live promoter page (2026-09-28)."""
+
+    def test_builds_catalog_from_pass_links_and_cards(self):
+        import tao_portal as t
+        q = "?utm_source=promoter&utm_id=68d79ff587c84397b19f00330a1e6107"
+        links = [
+            {"text": "Passes", "href": "https://tickets.taogroup.com/e/guest-list-omnia-las-vegas-10-27-2026/tickets" + q,
+             "card": "Guest List - Alesso Tuesday, Oct 27, 2026 at 10:30 PM to Wednesday, Oct 28, 2026 "
+                     "OMNIA Nightclub, Las Vegas, NV More details Passes"},
+            {"text": "Passes", "href": "https://tickets.taogroup.com/e/guest-list-marquee-dc-las-vegas-10-30-2026/tickets" + q,
+             "card": "Guest List - Dawn 2 Dusk – NOTD – Halloween Weekend Friday, Oct 30, 2026 at 11:00 AM "
+                     "Marquee Dayclub, Las Vegas, NV More details Passes"},
+            {"text": "Tickets", "href": "https://tickets.taogroup.com/e/tiesto-omnia-10-30-2026/tickets" + q, "card": ""},
+        ]
+        catalog = t.build_catalog(links)
+        self.assertEqual(set(catalog), {("OMNIA Nightclub", date(2026, 10, 27)), ("Marquee Dayclub", date(2026, 10, 30))})
+        omnia = catalog[("OMNIA Nightclub", date(2026, 10, 27))]
+        self.assertEqual((omnia["event"], omnia["event_time"]), ("Alesso", "10:30 PM"))
+        self.assertTrue(omnia["url"].endswith(q))  # promoter credit kept
+        self.assertEqual(catalog[("Marquee Dayclub", date(2026, 10, 30))]["event"],
+                         "Dawn 2 Dusk – NOTD – Halloween Weekend")
+
+    def test_live_date_format(self):
+        import tao_portal as t
+        self.assertEqual(t.date_from_url("https://tickets.taogroup.com/e/guest-list-omnia-nc-9-29-2026/tickets?x=1"),
+                         date(2026, 9, 29))

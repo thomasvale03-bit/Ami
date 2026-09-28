@@ -82,7 +82,8 @@ def venue_from_url(url):
 
 
 def date_from_url(url):
-    m = re.search(r"/(\d{1,2})-(\d{1,2})-(\d{4})(?:/|$|\?)", url)
+    # TAO Pass links end in the event date, e.g. .../e/guest-list-omnia-nc-9-29-2026/tickets
+    m = re.search(r"[-/](\d{1,2})-(\d{1,2})-(\d{4})(?:/|$|\?)", urlparse(url).path)
     if not m:
         return None
     month, day, year = (int(x) for x in m.groups())
@@ -94,6 +95,12 @@ def date_from_url(url):
 
 def has_positive_price(text):
     return any(float(a) > 0 for a in re.findall(r"\$\s*(\d+(?:\.\d{1,2})?)", text or ""))
+
+
+def option_price_text(levels):
+    """The nearest text around a quantity box that states a price (e.g. the
+    'Guest List - Female FREE' row on TAO), or '' if none does."""
+    return next((l for l in levels if re.search(r"\bfree\b|\$", l, re.I)), "")
 
 
 def has_free_evidence(text):
@@ -132,20 +139,81 @@ def _browser_page(playwright):
     return browser, page
 
 
+def _settle(page):
+    """Give the (large) promoter page time to finish loading; its links are
+    usable before every background request finishes."""
+    try:
+        page.wait_for_load_state("networkidle", timeout=45_000)
+    except Exception:
+        page.wait_for_load_state("load")
+
+
 def _open_via_promoter(page, url):
     """Reach an event page the way a customer does, so Playmaker gets the
     promoter credit: open the promoter link first, then click that event's
     Pass link on it. Returns False if the link is no longer on the page."""
     page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
-    page.wait_for_load_state("networkidle")
+    _settle(page)
     hrefs = page.locator("a").evaluate_all("els => els.map(a => a.href)")
     if url not in hrefs:
         return False
     link = page.locator("a").nth(hrefs.index(url))
     link.evaluate("a => a.removeAttribute('target')")  # stay in this tab
     with page.expect_navigation(wait_until="domcontentloaded"):
-        link.click()
+        if link.is_visible():
+            link.click()
+        else:
+            # The promoter page shows ~20 events at a time; later ones are in
+            # the page but hidden until scrolled to. Activating the link
+            # itself navigates exactly like a click (same URL, same session,
+            # promoter page as referrer).
+            link.evaluate("a => a.click()")
     return True
+
+
+# Walks up from a Pass link to its event card and returns the card text.
+CARD_TEXT_JS = """a => {
+    let node = a;
+    for (let i = 0; i < 6 && node; i++) {
+        node = node.parentElement;
+        if (node && (node.innerText || '').length > 60) break;
+    }
+    return (node ? node.innerText : '').replace(/\\s+/g, ' ').trim();
+}"""
+
+KNOWN_VENUES = sorted(VENUE_SLUGS, key=len, reverse=True)
+
+
+def venue_from_card(text):
+    """Cards read e.g. '... OMNIA Nightclub, Las Vegas, NV ...'."""
+    for venue in KNOWN_VENUES:
+        if re.search(re.escape(venue) + r",\s*Las Vegas", text or "", re.I):
+            return venue
+    return None
+
+
+def card_details(text):
+    """Event name and start time from a card such as 'Guest List - Alesso
+    Tuesday, Oct 27, 2026 at 10:30 PM to Wednesday, ...'."""
+    m = re.search(r"Guest List\s*-\s*(.+?)\s+(?:Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day,", text or "")
+    start = re.search(r"\bat\s+(\d{1,2}:\d{2}\s?[AP]M)\b", text or "", re.I)
+    return (m.group(1).strip() if m else None), (start.group(1).upper() if start else None)
+
+
+def build_catalog(links):
+    """links: [{"text", "href", "card"}] from the promoter page.
+    Returns {(venue, date): {"url", "event", "event_time"}} for Pass links."""
+    catalog = {}
+    for link in links:
+        if not re.fullmatch(r"passes?", link["text"], re.I) or not is_safe_pass_url(link["href"]):
+            continue
+        venue = venue_from_card(link.get("card")) or venue_from_url(link["href"])
+        day = date_from_url(link["href"])
+        if not (venue and day):
+            continue
+        event, event_time = card_details(link.get("card"))
+        catalog.setdefault((venue, day), {"url": link["href"], "event": event, "event_time": event_time})
+    return catalog
 
 
 def _load_catalog():
@@ -155,24 +223,24 @@ def _load_catalog():
         return _catalog
     from playwright.sync_api import sync_playwright
 
-    catalog = {}
     with sync_playwright() as p:
         browser, page = _browser_page(p)
         try:
             page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
-            page.wait_for_load_state("networkidle")
+            _settle(page)
             links = page.locator("a").evaluate_all(
                 "els => els.map(a => ({text: (a.textContent || '').replace(/\\s+/g, ' ').trim(), href: a.href}))")
+            cards = page.locator("a").evaluate_all(f"els => els.map({CARD_TEXT_JS})")
         finally:
             browser.close()
-    for link in links:
-        if not re.fullmatch(r"passes?", link["text"], re.I) or not is_safe_pass_url(link["href"]):
-            continue
-        venue, day = venue_from_url(link["href"]), date_from_url(link["href"])
-        if venue and day:
-            catalog.setdefault((venue, day), link["href"])
-    _catalog = catalog
-    return catalog
+    for link, card in zip(links, cards):
+        link["card"] = card
+    _catalog = build_catalog(links)
+    return _catalog
+
+
+def _catalog_urls():
+    return {entry["url"] for entry in _load_catalog().values()}
 
 
 def _ticket_selects(page):
@@ -181,7 +249,7 @@ def _ticket_selects(page):
         // Text around the select, nearest first: its own label, then each
         // enclosing element. Gender comes from the nearest level that names
         // one, so a neighbouring option's label can't be picked up.
-        const levels = [label];
+        const levels = [((el.getAttribute('aria-label') || '') + ' ' + label).trim()];
         let node = el.parentElement;
         for (let i = 0; i < 4 && node; i++) { levels.push(node.innerText || ''); node = node.parentElement; }
         return {
@@ -221,9 +289,10 @@ def _fill_first(page, selectors, value):
 # --- Public API -------------------------------------------------------------
 
 def check_availability(venue, date_obj):
-    url = _load_catalog().get((venue, date_obj))
-    if not url:
+    entry = _load_catalog().get((venue, date_obj))
+    if not entry:
         return None
+    url = entry["url"]
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -236,14 +305,15 @@ def check_availability(venue, date_obj):
                 return None
             selects = _selects_by_gender(page)
             # Price evidence from each option's own nearest text; any price -> not eligible.
-            priced = " ".join(next((l for l in s["levels"] if l), "") for s in selects.values())
+            priced = " ".join(option_price_text(s["levels"]) for s in selects.values())
             if not selects or has_positive_price(priced) or not has_free_evidence(priced):
                 return None  # not provably free -> never eligible
             title = (page.locator("h1, h2").first.text_content() or "").strip()
+            title = re.sub(r"^Guest List\s*-\s*", "", title)
             start = re.search(r"\b\d{1,2}:\d{2}\s?[AP]M\b", body, re.I)
             return {
-                "event": title or f"{venue} Guest List",
-                "event_time": start.group().upper().replace("  ", " ") if start else None,
+                "event": entry.get("event") or title or f"{venue} Guest List",
+                "event_time": entry.get("event_time") or (start.group().upper() if start else None),
                 "listing_type": "Passes",
                 "price": 0,
                 "listing_url": url,
@@ -254,11 +324,13 @@ def check_availability(venue, date_obj):
             browser.close()
 
 
-def submit_registration(listing, guest):
+def submit_registration(listing, guest, rehearse=False):
+    """rehearse=True fills and checks the whole form, then stops before the
+    final click and returns {"rehearsal": True, ...}: nothing is ordered."""
     url = listing.get("listing_url", "")
     if not is_safe_pass_url(url):
         return {"confirmation_id": None, "verified": False, "reason": f"Refusing non-Guest-List URL: {url}"}
-    if url not in _load_catalog().values():
+    if url not in _catalog_urls():
         return {"confirmation_id": None, "verified": False,
                 "reason": f"Refusing a Pass link that is not on the Playmaker promoter page: {url}"}
     from playwright.sync_api import sync_playwright
@@ -280,7 +352,7 @@ def submit_registration(listing, guest):
                     return stop(f"{gender} Guest List quantity {count} is not available")
                 # Each option being selected must itself be provably free,
                 # whatever the page total says.
-                own_text = next((l for l in select["levels"] if l), "")
+                own_text = option_price_text(select["levels"])
                 if has_positive_price(own_text) or not has_free_evidence(own_text):
                     return stop(f"{gender} option is not shown as free: {own_text[:80]}")
                 option = next((o for o in select["options"]
@@ -334,6 +406,15 @@ def submit_registration(listing, guest):
             if not button.count():
                 return stop("TAO submit button not found")
 
+            if rehearse:
+                return {"confirmation_id": None, "verified": False, "rehearsal": True,
+                        "form": {sel: page.input_value(sel) for sel in
+                                 ("#OrderEmail", "#OrderFirstName", "#OrderLastName", "#OrderPostalCode", "#OrderPhone")
+                                 if page.locator(sel).count()},
+                        "quantities": {g: page.input_value(s["selector"]) for g, s in selects.items()},
+                        "checkboxes": page.locator('input[type="checkbox"]').evaluate_all(
+                            "els => els.map(e => [e.id || e.name || '(unnamed)', e.checked])"),
+                        "totals": totals, "submit_button": button.inner_text().strip()}
             button.click()
             # From here on the order may exist: never report a plain failure.
             try:
