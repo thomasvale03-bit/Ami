@@ -26,9 +26,40 @@ class MockCheckoutTests(unittest.TestCase):
     def listing(self, page):
         return {"event": "OMNIA", "listing_type": "Passes", "listing_url": (MOCK / page).as_uri()}
 
+    def setUp(self):
+        # Local stand-ins for the promoter page and its Pass links.
+        urls = {n: (MOCK / n).as_uri() for n in ("event.html", "paid.html", "uncertain.html")}
+        patches = [
+            mock.patch.object(tao_portal, "TAO_PROMOTER_URL", (MOCK / "promoter.html").as_uri()),
+            mock.patch.object(tao_portal, "is_safe_pass_url", return_value=True),
+            mock.patch.object(tao_portal, "_catalog", {(n, None): u for n, u in urls.items()}),
+        ]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def submit(self, page, guest=GUEST):
-        with mock.patch.object(tao_portal, "is_safe_pass_url", return_value=True):
-            return tao_portal.submit_registration(self.listing(page), guest)
+        return tao_portal.submit_registration(self.listing(page), guest)
+
+    def test_event_is_reached_through_the_promoter_page(self):
+        from playwright.sync_api._generated import Page
+        visited = []
+        real_goto = Page.goto
+
+        def spy_goto(page, url, *args, **kwargs):
+            visited.append(url)
+            return real_goto(page, url, *args, **kwargs)
+
+        with mock.patch.object(Page, "goto", spy_goto):
+            result = self.submit("event.html")
+        self.assertTrue(result["verified"])
+        self.assertEqual(visited, [(MOCK / "promoter.html").as_uri()])  # event page only via click
+
+    def test_link_not_on_promoter_page_is_refused(self):
+        listing = {"event": "X", "listing_type": "Passes", "listing_url": (MOCK / "confirmation.html").as_uri()}
+        result = tao_portal.submit_registration(listing, GUEST)
+        self.assertFalse(result["verified"])
+        self.assertIn("not on the Playmaker promoter page", result["reason"])
 
     def test_free_checkout_returns_the_order_id(self):
         result = self.submit("event.html")
@@ -43,6 +74,8 @@ class MockCheckoutTests(unittest.TestCase):
 
         def spy_click(self_locator, *args, **kwargs):
             page = self_locator.page
+            if not page.locator("#OrderEmail").count():  # the promoter-page link click
+                return real_click(self_locator, *args, **kwargs)
             seen.update(
                 email=page.input_value("#OrderEmail"), first=page.input_value("#OrderFirstName"),
                 female=page.input_value("#TicketFemale"), male=page.input_value("#TicketMale"),

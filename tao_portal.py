@@ -19,6 +19,11 @@ Contract with main.py / rules_engine.py:
         A problem after the final click raises SubmissionUncertain so the
         request is flagged for a person and never retried automatically.
 
+Every event page is reached by opening Playmaker's promoter link and
+clicking through from it (never by going to the event page directly), and
+only Pass links listed on that page are ever used, so each registration is
+credited to Playmaker.
+
 READY stays False until the selectors have been checked against the live
 site (read-only) and one test registration for valeconsultingaz@gmail.com
 has succeeded. main.py refuses --live until then.
@@ -127,6 +132,22 @@ def _browser_page(playwright):
     return browser, page
 
 
+def _open_via_promoter(page, url):
+    """Reach an event page the way a customer does, so Playmaker gets the
+    promoter credit: open the promoter link first, then click that event's
+    Pass link on it. Returns False if the link is no longer on the page."""
+    page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
+    page.wait_for_load_state("networkidle")
+    hrefs = page.locator("a").evaluate_all("els => els.map(a => a.href)")
+    if url not in hrefs:
+        return False
+    link = page.locator("a").nth(hrefs.index(url))
+    link.evaluate("a => a.removeAttribute('target')")  # stay in this tab
+    with page.expect_navigation(wait_until="domcontentloaded"):
+        link.click()
+    return True
+
+
 def _load_catalog():
     """Every live 'Pass'/'Passes' link on the promoter page, keyed by venue+date."""
     global _catalog
@@ -208,7 +229,8 @@ def check_availability(venue, date_obj):
     with sync_playwright() as p:
         browser, page = _browser_page(p)
         try:
-            page.goto(url, wait_until="domcontentloaded")
+            if not _open_via_promoter(page, url):
+                return None
             body = page.locator("body").inner_text()
             if UNAVAILABLE_TEXT.search(body):
                 return None
@@ -236,6 +258,9 @@ def submit_registration(listing, guest):
     url = listing.get("listing_url", "")
     if not is_safe_pass_url(url):
         return {"confirmation_id": None, "verified": False, "reason": f"Refusing non-Guest-List URL: {url}"}
+    if url not in _load_catalog().values():
+        return {"confirmation_id": None, "verified": False,
+                "reason": f"Refusing a Pass link that is not on the Playmaker promoter page: {url}"}
     from playwright.sync_api import sync_playwright
 
     def stop(reason):
@@ -244,7 +269,8 @@ def submit_registration(listing, guest):
     with sync_playwright() as p:
         browser, page = _browser_page(p)
         try:
-            page.goto(url, wait_until="domcontentloaded")
+            if not _open_via_promoter(page, url):
+                return stop("Pass link is no longer on the Playmaker promoter page")
             selects = _selects_by_gender(page)
             for gender, count in (("female", guest["female_count"]), ("male", guest["male_count"])):
                 if count == 0:
