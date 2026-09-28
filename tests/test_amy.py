@@ -451,8 +451,10 @@ class PoshParseTests(unittest.TestCase):
     def test_night_rollover_and_daytime(self):
         import posh
         from datetime import date
-        self.assertEqual(posh.night_of("2026-10-07T08:00:00Z"), date(2026, 10, 6))   # 1 AM -> previous night
-        self.assertEqual(posh.night_of("2026-10-07T18:00:00Z"), date(2026, 10, 7))   # 11 AM dayclub
+        # Posh sends local wall-clock time labelled "Z" (real order: 10:30 PM show -> T22:30:00.000Z).
+        self.assertEqual(posh.night_of("2026-08-03T22:30:00.000Z"), date(2026, 8, 3))
+        self.assertEqual(posh.night_of("2026-10-07T01:00:00.000Z"), date(2026, 10, 6))  # 1 AM -> previous night
+        self.assertEqual(posh.night_of("2026-10-07T11:00:00.000Z"), date(2026, 10, 7))  # 11 AM dayclub
         self.assertIsNone(posh.night_of("not a date"))
 
     def test_venue_detection(self):
@@ -568,3 +570,46 @@ class PoshOrderLookupTests(unittest.TestCase):
 
     def test_no_order_number_never_counts_as_duplicate(self):
         self.assertFalse(self.lookup({"old": POSH}, order="")[0])
+
+
+REAL_POSH_TICKETS = "Guest List - Female - Free Before 1AM,Guest List - Male - Free Before 1AM"
+
+
+class RealPoshOrderTests(unittest.TestCase):
+    """From the first real Posh order (Sept 28 2026), details replaced."""
+
+    def body(self, event_start="2026-10-05T22:30:00.000Z", tickets=REAL_POSH_TICKETS):
+        return (POSH.replace("Playmaker Tuesdays at OMNIA", "Guest List | Marquee Night Club")
+                    .replace("2026-10-07T05:30:00.000Z", event_start)
+                    .replace("Ladies Guest List", tickets))
+
+    def test_each_ticket_in_the_order_is_counted(self):
+        import posh
+        raw = posh.parse_signup("m", self.body())
+        self.assertEqual((raw["female_count"], raw["male_count"]), ("1", "1"))
+        self.assertNotIn("_action_needed", raw)
+        self.assertEqual(raw["venues"], ["Marquee Nightclub"])
+        self.assertEqual(raw["start_date"], "2026-10-05")
+
+    def test_two_of_the_same_ticket(self):
+        import posh
+        self.assertEqual(posh.ticket_counts("Guest List - Female,Guest List - Female"), (2, 0, []))
+
+    def test_an_unknown_ticket_goes_to_team(self):
+        import posh
+        raw = posh.parse_signup("m", self.body(tickets="Guest List - Female,VIP Table"))
+        self.assertIn('"VIP Table"', raw["_action_needed"][0])
+
+    def test_past_event_date_is_sent_to_team_not_silently_skipped(self):
+        import posh
+        raw = posh.parse_signup("m", self.body(event_start="2026-08-03T22:30:00.000Z"))
+        with mock.patch.dict("os.environ", {"POSH_CONSENT_ON_FILE": "true"}):
+            raw = posh.parse_signup("m", self.body(event_start="2026-08-03T22:30:00.000Z"))
+        result = main.process_one_request(raw, dry_run=True, today=TODAY)
+        self.assertEqual(result["status"], "action_needed")
+        self.assertIn("recurring Posh event", result["issue"])
+
+    def test_website_request_for_past_dates_also_goes_to_team(self):
+        raw = parsed(FIXTURE.replace("2026-10-30", "2026-09-01").replace("2026-10-31", "2026-09-02"))
+        result = main.process_one_request(raw, dry_run=True, today=TODAY)
+        self.assertEqual(result["status"], "action_needed")

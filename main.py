@@ -104,6 +104,14 @@ def process_one_request(raw, dry_run=True, today=None, now=None):
     now = now or datetime.now(VEGAS)
     today = today or now.date()
 
+    if request["end_date"] < today.isoformat():
+        issue = f"Every requested night ({request['start_date']} to {request['end_date']}) has already passed."
+        if raw.get("source") == "Posh":
+            issue += (" For a Posh signup this usually means a recurring Posh event reporting its "
+                      "first date, so the night the guest wants is unknown.")
+        return {"status": "action_needed", "issue": issue,
+                "required_action": "Confirm which night the guest wants and register manually."}
+
     def dayclub_checker(venue, date_obj):
         # A dayclub that has already started today is skipped (the next
         # dayclub is tried). Nightclubs are not: their guest lists stay

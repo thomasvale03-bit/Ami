@@ -82,17 +82,38 @@ def venue_from_event(event_name):
 
 
 def night_of(event_start):
-    """The Las Vegas date of the night an event belongs to."""
+    """The Las Vegas date of the night an event belongs to.
+
+    Posh sends the event's local wall-clock time with a "Z" suffix (a
+    10:30 PM Marquee show arrives as "…T22:30:00.000Z"), so the clock time
+    is read as Las Vegas time as-is, not converted from UTC.
+    """
     try:
-        start = datetime.fromisoformat(event_start.replace("Z", "+00:00"))
+        local = datetime.fromisoformat(event_start.strip()[:19])
     except (AttributeError, ValueError):
         return None
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=VEGAS)
-    local = start.astimezone(VEGAS)
     if local.hour < NIGHT_ROLLOVER_HOUR:
         local -= timedelta(days=1)
     return local.date()
+
+
+def ticket_counts(tickets):
+    """Posh lists every ticket in the order, comma-separated, e.g.
+    "Guest List - Female - Free Before 1AM,Guest List - Male - Free Before 1AM".
+    Returns (female, male, unknown_ticket_names)."""
+    female = male = 0
+    unknown = []
+    for item in (t.strip() for t in (tickets or "").split(",")):
+        if not item:
+            continue
+        gender = gender_from_ticket(item)
+        if gender == "female":
+            female += 1
+        elif gender == "male":
+            male += 1
+        else:
+            unknown.append(item)
+    return female, male, unknown
 
 
 def gender_from_ticket(ticket):
@@ -128,13 +149,12 @@ def parse_signup(message_id, body_text):
     venue = venue_from_event(posh.get("event_name"))
     fields["venues"] = [venue] if venue else []
 
-    gender = gender_from_ticket(posh.get("ticket"))
-    fields["female_count"] = "1" if gender == "female" else "0"
-    fields["male_count"] = "1" if gender == "male" else "0"
-    if not gender:
+    female, male, unknown = ticket_counts(posh.get("ticket"))
+    fields["female_count"], fields["male_count"] = str(female), str(male)
+    if unknown or not (female or male):
+        names = ", ".join(f'"{n}"' for n in unknown) or '"(none)"'
         fields["_action_needed"] = (
-            f"Posh ticket \"{posh.get('ticket') or '(none)'}\" doesn't say female or male, "
-            "so the guest-list type can't be chosen.",
+            f"Posh ticket {names} doesn't say female or male, so the guest-list type can't be chosen.",
             "Check the Posh order and register this guest manually.",
         )
 
