@@ -100,17 +100,20 @@ FOLLOW_UP_DELAY_DAYS = 7
 
 
 def follow_up_email(first_name):
-    """Sent once, FOLLOW_UP_DELAY_DAYS after a confirmed guest's last night
-    (owner-approved wording, Sept 28 2026)."""
-    greeting = f"Hi {first_name},\n\n" if first_name else ""
+    """Sent once, FOLLOW_UP_DELAY_DAYS after a confirmed guest's last night,
+    in the playmakerentertainment.com voice (premium, host-led, concise)."""
+    greeting = f"Hi {first_name}," if first_name else "Hi,"
+    subject = f"Until next time, {first_name}" if first_name else "Until next time"
     body = (
-        greeting
-        + "Vegas isn’t goodbye — it’s see you next time. 🎲\n"
-        "When you’re back, guestlist & VIP tables are handled.\n\n"
-        "Got friends coming to Vegas? Send them my way — I’ll make sure they’re VIP. 💯\n\n"
-        "Amy  | Playmaker Entertainment\n"
-        "PlaymakerEntertainment.com\n"
-        "📸 @playmaker.entertainment\n\n"
-        "Reply STOP and we won’t send these emails again."
+        f"{greeting}\n\n"
+        "Hope Vegas treated you right.\n\n"
+        "Whenever you’re back, your night is handled — guest lists, VIP tables, tickets, "
+        "birthdays and bachelor/bachelorette weekends, in Las Vegas and Scottsdale. "
+        "Real access, not just a name on a list.\n\n"
+        "Friends heading to Vegas? Send them our way and we’ll take care of them.\n\n"
+        "Text your host: 702-816-8948\n"
+        "PlaymakerEntertainment.com  ·  @Playmaker.Entertainment\n\n"
+        "Amy | Playmaker Entertainment\n\n"
+        "Reply STOP to opt out of these emails."
     )
-    return "See you next time in Vegas 🎲", body
+    return subject, body

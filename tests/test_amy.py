@@ -650,9 +650,11 @@ class FollowUpTests(unittest.TestCase):
 
     def test_wording(self):
         to, subject, body = self.run_on(5)[0]
-        self.assertTrue(body.startswith("Hi Mia,\n\nVegas isn’t goodbye — it’s see you next time. 🎲"))
-        self.assertIn("Amy  | Playmaker Entertainment", body)
-        self.assertIn("📸 @playmaker.entertainment", body)
+        self.assertEqual(subject, "Until next time, Mia")
+        self.assertTrue(body.startswith("Hi Mia,\n\nHope Vegas treated you right."))
+        self.assertIn("Real access, not just a name on a list.", body)
+        self.assertIn("Text your host: 702-816-8948", body)
+        self.assertIn("Amy | Playmaker Entertainment", body)
         self.assertIn("Reply STOP", body)
 
     def test_never_twice_and_respects_stop(self):
