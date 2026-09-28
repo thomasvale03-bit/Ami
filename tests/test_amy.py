@@ -420,3 +420,110 @@ class StartedEventTests(unittest.TestCase):
         self.assertFalse(main.event_has_started({"event_time": "11:30AM"}, date(2026, 10, 30), now))
         self.assertFalse(main.event_has_started({"event_time": "9:00 AM"}, date(2026, 10, 31), now))
         self.assertFalse(main.event_has_started({"event_time": None}, date(2026, 10, 30), now))
+
+
+POSH = (pathlib.Path(__file__).parent / "fixtures" / "posh_signup.txt").read_text()
+
+
+class PoshParseTests(unittest.TestCase):
+    """Layout copied from the Zapier "NEW POSH SIGNUP" test email (details replaced)."""
+
+    def test_recognised(self):
+        import posh
+        self.assertTrue(posh.is_posh_signup("NEW POSH SIGNUP", ""))
+        self.assertTrue(posh.is_posh_signup("", POSH))
+        self.assertFalse(posh.is_posh_signup("New contact form message", FIXTURE))
+
+    def test_fields_club_night_and_gender(self):
+        import posh
+        raw = posh.parse_signup("m1", POSH)
+        self.assertEqual((raw["first_name"], raw["last_name"], raw["email"]),
+                         ("Jane", "Sample", "jane.sample@example.com"))
+        self.assertEqual(raw["phone"], "+16025550100")
+        # 05:30 UTC Wed = 10:30 PM Tuesday night in Las Vegas.
+        self.assertEqual((raw["start_date"], raw["end_date"]), ("2026-10-06", "2026-10-06"))
+        self.assertEqual(raw["venues"], ["OMNIA Nightclub"])
+        self.assertEqual((raw["female_count"], raw["male_count"]), ("1", "0"))
+        self.assertEqual(raw["posh"]["order_number"], "1001")
+        self.assertEqual(raw["posh"]["promo_code"], "")
+        self.assertNotIn("_missing_required", raw)
+
+    def test_night_rollover_and_daytime(self):
+        import posh
+        from datetime import date
+        self.assertEqual(posh.night_of("2026-10-07T08:00:00Z"), date(2026, 10, 6))   # 1 AM -> previous night
+        self.assertEqual(posh.night_of("2026-10-07T18:00:00Z"), date(2026, 10, 7))   # 11 AM dayclub
+        self.assertIsNone(posh.night_of("not a date"))
+
+    def test_venue_detection(self):
+        import posh
+        self.assertEqual(posh.venue_from_event("Dawn 2 Dusk at Marquee Dayclub"), "Marquee Dayclub")
+        self.assertEqual(posh.venue_from_event("JEWEL Saturdays"), "JEWEL Nightclub")
+        self.assertIsNone(posh.venue_from_event("Playmaker Halloween Party"))
+
+    def test_gender_from_ticket(self):
+        import posh
+        self.assertEqual(posh.gender_from_ticket("Men's Guest List"), "male")
+        self.assertEqual(posh.gender_from_ticket("Female - Free Entry"), "female")
+        self.assertIsNone(posh.gender_from_ticket("General Admission"))
+
+    def test_unrendered_zapier_placeholders_are_empty(self):
+        import posh
+        raw = posh.parse_signup("m1", POSH.replace("jane.sample@example.com",
+                                                   '{{=gives["381629653"]["account_email"]}}'))
+        self.assertIn("email", raw["_missing_required"])
+
+
+class PoshFlowTests(unittest.TestCase):
+    LABELS = LiveFlowTests.LABELS
+
+    def run_posh(self, body, consent):
+        fake = FakeGmail(body)
+        listing = {"event": "OMNIA Night", "event_time": "10:30 PM", "listing_type": "Passes",
+                   "listing_url": "https://tickets.taogroup.com/e/guest-list/x"}
+        with mock.patch.dict("os.environ", {"POSH_CONSENT_ON_FILE": "true" if consent else ""}), \
+             mock.patch.multiple(gmail_client, **fake_module(fake)), \
+             mock.patch.object(main.tao_portal, "check_availability", side_effect=nightclubs_only(listing)), \
+             mock.patch.object(main.tao_portal, "submit_registration",
+                               return_value={"confirmation_id": "ORD-1", "verified": True}) as submit, \
+             mock.patch.object(main, "datetime") as dt:
+            dt.now.return_value.date.return_value = TODAY
+            outcome = main.handle_message(None, "msg-1", dry_run=False, labels=self.LABELS)
+        return outcome, fake, submit
+
+    def test_without_consent_setting_team_gets_the_plan_and_nothing_is_booked(self):
+        outcome, fake, submit = self.run_posh(POSH, consent=False)
+        self.assertEqual(outcome, gmail_client.EXCEPTION_LABEL)
+        submit.assert_not_called()
+        self.assertEqual([s["to"] for s in fake.sent], ["team@playmakerentertainment.com"])
+
+    def test_with_consent_setting_it_is_booked_and_confirmed(self):
+        outcome, fake, submit = self.run_posh(POSH, consent=True)
+        self.assertEqual(outcome, gmail_client.PROCESSED_LABEL)
+        self.assertTrue(submit.called)
+        self.assertEqual(fake.sent[0]["to"], "jane.sample@example.com")
+        self.assertEqual(fake.sent[0]["cc"], "team@playmakerentertainment.com")
+
+    def test_unknown_gender_goes_to_team(self):
+        outcome, fake, submit = self.run_posh(POSH.replace("Ladies Guest List", "General Admission"), consent=True)
+        self.assertEqual(outcome, gmail_client.EXCEPTION_LABEL)
+        submit.assert_not_called()
+
+
+class PoshSummaryTests(unittest.TestCase):
+    def test_team_email_includes_order_and_plan(self):
+        import posh
+        text = main.posh_summary(posh.parse_signup("m1", POSH))
+        self.assertIn("Event: Playmaker Tuesdays at OMNIA", text)
+        self.assertIn("Order number: 1001", text)
+        self.assertIn("Amy's nightclub plan for Tue Oct 06: OMNIA Nightclub", text)
+
+
+class PoshSubjectOnlyTests(unittest.TestCase):
+    def test_body_without_header_lines_is_recognised_by_subject(self):
+        import posh
+        body = "Name:TestUser\nEmail: t@example.com\nEvent:JEWEL Fridays\nEvent Date: 2026-10-10T05:30:00Z\nTicket: Men\n"
+        msg = {"payload": {"headers": [{"name": "Subject", "value": "NEW POSH SIGNUP"}]}}
+        self.assertTrue(posh.is_posh_signup(gmail_client.get_subject(msg), body))
+        raw = posh.parse_signup("m", body)
+        self.assertEqual((raw["start_date"], raw["venues"], raw["male_count"]), ("2026-10-09", ["JEWEL Nightclub"], "1"))

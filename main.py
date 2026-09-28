@@ -25,6 +25,7 @@ from rules_engine import (
 from config import rules
 from templates.emails import consolidated_confirmation, internal_processed_record, internal_action_needed
 import gmail_client
+import posh
 import tao_portal
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -179,12 +180,34 @@ def team_alert(service, message_id, raw, problems, dry_run):
     )
 
 
+def posh_summary(raw):
+    """Posh order details plus the nightclub Amy would book, for the team."""
+    p = raw.get("posh", {})
+    lines = ["", "", "POSH ORDER",
+             f"Event: {p.get('event_name') or '(none)'}",
+             f"Event start: {p.get('event_start') or '(none)'}",
+             f"Ticket: {p.get('ticket') or '(none)'}",
+             f"Order number: {p.get('order_number') or '(none)'}",
+             f"Phone: {p.get('phone') or '(none)'}"]
+    if raw.get("start_date"):
+        from datetime import date
+        from rules_engine import candidate_venues
+        night = date.fromisoformat(raw["start_date"])
+        plan = candidate_venues({"requested_venues": raw.get("venues") or []}, night)
+        lines.append(f"Amy's nightclub plan for {night:%a %b %d}: {plan[0] if plan else '(none)'}"
+                     f" (then {', '.join(plan[1:3])} if unavailable)")
+    return "\n".join(lines)
+
+
 def handle_message(service, message_id, dry_run, labels, allowlist=None):
     """Process one request email end to end. Returns the outcome label, or
     None when test mode skips a request that isn't from an allowlisted
     address (it is left completely untouched)."""
-    _, body = gmail_client.get_plain_text_body(service, message_id)
-    raw = gmail_client.parse_request(message_id, body)
+    msg, body = gmail_client.get_plain_text_body(service, message_id)
+    if posh.is_posh_signup(gmail_client.get_subject(msg or {}), body):
+        raw = posh.parse_signup(message_id, body)
+    else:
+        raw = gmail_client.parse_request(message_id, body)
 
     if allowlist is not None:
         guest = (raw.get("email") or "").lower()
@@ -199,6 +222,20 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
             issue=f"Request is missing required fields: {', '.join(raw['_missing_required'])}.",
             required_action="Read the original email and process manually.",
         )], dry_run)
+        return gmail_client.EXCEPTION_LABEL
+
+    if raw.get("_action_needed") or (raw.get("source") == "Posh" and not posh.consent_on_file()):
+        issue, action = raw.get("_action_needed") or (
+            "Posh signup: no documented 21+ confirmation and guest-list authorization "
+            "(required by the TAO authorization) — not booked automatically.",
+            "Register manually if appropriate, or set POSH_CONSENT_ON_FILE=true once the "
+            "Posh checkout collects that consent.")
+        details = posh_summary(raw) if raw.get("source") == "Posh" else ""
+        team_alert(service, message_id, raw, [internal_action_needed(
+            raw.get("name", "(unknown)"), raw.get("email", "(unknown)"),
+            venue=", ".join(raw.get("venues") or []) or "(none specified)",
+            date=raw.get("start_date", "(unknown)"), issue=issue, required_action=action,
+        ) + details], dry_run)
         return gmail_client.EXCEPTION_LABEL
 
     if not dry_run:

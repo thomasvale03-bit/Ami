@@ -30,7 +30,8 @@ EXCEPTION_LABEL = "Amy/Exception"
 # Not limited to unread mail: the team often opens requests on a phone
 # before Amy runs.
 SEARCH_QUERY = (
-    '(subject:"New guest list request submission" OR subject:"Guest List Request") '
+    '(subject:"New guest list request submission" OR subject:"Guest List Request" '
+    'OR subject:"NEW POSH SIGNUP") '
     f'newer_than:30d -in:trash -label:{PROCESSED_LABEL} -label:{EXCEPTION_LABEL}'
 )
 
@@ -131,6 +132,13 @@ def get_plain_text_body(service, message_id):
     else:
         body = decode(payload["body"].get("data", ""))
     return msg, body
+
+
+def get_subject(msg):
+    for header in msg.get("payload", {}).get("headers", []):
+        if header.get("name", "").lower() == "subject":
+            return header.get("value", "")
+    return ""
 
 
 def _form_block(body_text):

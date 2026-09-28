@@ -76,6 +76,20 @@ What `--live` does per request:
   that errors midway is labeled Exception and never retried automatically.
 - Nights that have already passed are skipped.
 
+## Posh signups
+"NEW POSH SIGNUP" emails (sent by Zapier from the intake inbox) go through
+the same workflow (`posh.py`):
+- Club: read from the Posh event name (e.g. "… at OMNIA"); otherwise that
+  night's usual club.
+- Night: the event start converted to Las Vegas time (starts before 6 AM
+  count as the previous night).
+- Party: 1 guest; female/male from the ticket name ("Ladies", "Men", …).
+  Unknown → sent to the team.
+- Consent: booked automatically only when `POSH_CONSENT_ON_FILE=true`
+  (Posh checkout collects 21+ and guest-list authorization, as the TAO
+  authorization requires). Until then each signup goes to the team with the
+  Posh order details and Amy's nightclub plan.
+
 ## Running on Railway (24/7)
 The `Dockerfile` builds on the official Playwright image and runs
 `python main.py --loop`, checking the inbox every `AMY_POLL_SECONDS`.
