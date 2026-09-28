@@ -35,6 +35,37 @@ SUBJECT_MARKERS = [
     "New contact form message for Playmaker Entertainment via Guest List Request",
 ]
 
+# Website/email venue names -> canonical names used in this config.
+VENUE_ALIASES = {
+    "omnia": "OMNIA Nightclub",
+    "omnia nightclub": "OMNIA Nightclub",
+    "hakkasan": "Hakkasan Nightclub",
+    "hakkasan nightclub": "Hakkasan Nightclub",
+    "jewel": "JEWEL Nightclub",
+    "jewel nightclub": "JEWEL Nightclub",
+    "marquee nightclub": "Marquee Nightclub",
+    "marquee": "Marquee Nightclub",
+    "marquee dayclub": "Marquee Dayclub",
+    "tao nightclub": "TAO Nightclub",
+    "tao": "TAO Nightclub",
+    "tao beach": "TAO Beach Dayclub",
+    "tao beach dayclub": "TAO Beach Dayclub",
+    "liquid pool lounge": "Liquid Pool Lounge",
+    "liquid": "Liquid Pool Lounge",
+    "palm tree beach club": "Palm Tree Beach Club",
+    "palm tree beach": "Palm Tree Beach Club",
+    "lavo party brunch": "LAVO Party Brunch",
+    "lavo": "LAVO Party Brunch",
+    "drai's": "Drai's",
+    "drais": "Drai's",
+}
+
+
+def normalize_venue_name(name):
+    key = name.strip().lower()
+    return VENUE_ALIASES.get(key, name.strip())
+
+
 # Fallback values ONLY used when TAO's form requires them and the guest
 # submission did not supply a usable value.
 FALLBACK_PHONE = "480-214-5268"
@@ -45,26 +76,20 @@ FALLBACK_BILLING_ZIP = "85306"
 
 DEFAULT_ROUTING = {
     "Monday":    {"primary": "Marquee Nightclub", "fallback": "best_available"},
-    # For the time being OMNIA is the only venue open on Tuesdays: no
-    # fallbacks, and requested venues / last resorts are not used. If OMNIA
-    # has no guest list, that night is skipped with no ACTION NEEDED record.
-    "Tuesday":   {"primary": "OMNIA Nightclub", "fallback": [], "only": True},
+    "Tuesday":   {"primary": "OMNIA Nightclub", "fallback": ["TAO Nightclub", "best_available"]},
     "Wednesday": {"primary": "Hakkasan Nightclub", "fallback": "Marquee Nightclub"},
     "Thursday":  {"primary": "Hakkasan Nightclub", "fallback": "TAO Nightclub"},
     "Friday":    {"primary": "JEWEL Nightclub", "fallback": "Hakkasan Nightclub"},
     "Saturday":  {"primary": "JEWEL Nightclub", "fallback": "Marquee Nightclub"},
-    "Sunday":    {"primary": "OMNIA Nightclub", "fallback": ["TAO Nightclub", "best_available"]},
+    "Sunday":    {"primary": "TAO Nightclub", "fallback": "best_available"},
 }
 
-# Last resorts, tried in this order on any night when neither the requested
-# venue nor the routed venues have a live Passes listing.
-LAST_RESORT_VENUES = ["JEWEL Nightclub", "Hakkasan Nightclub", "Marquee Nightclub"]
+# Tried after the weekday route, on every night except Tuesday, before giving
+# up on a night (owner decision 2026-09-27).
+EXTRA_BACKUP_NIGHTCLUBS = ["JEWEL Nightclub", "Hakkasan Nightclub", "Marquee Nightclub"]
+NO_EXTRA_BACKUP_DAYS = {"Tuesday"}
 
-# Where PROCESSED / ACTION NEEDED records are emailed in --live mode.
-TEAM_NOTIFICATION_EMAIL = PLAYMAKER_EMAIL
-
-# Never repeat the same nightclub Fri + Sat — this applies even when the
-# guest requested that venue for both nights. If Friday resolves to JEWEL,
+# Never repeat the same nightclub Fri + Sat. If Friday resolves to JEWEL,
 # prefer Hakkasan for Saturday when available (see rules_engine.apply_weekend_override).
 
 # --- Per-venue qualification notes (reference values; the LIVE Passes/
@@ -110,9 +135,4 @@ DAYLIFE_AUTO_VENUES_PAUSED_IN_OFFSEASON = {
     "TAO Beach Dayclub", "Marquee Dayclub", "Liquid Pool Lounge", "Palm Tree Beach Club"
 }
 
-# Promoter master link. Keep the utm_* parameters: they attribute bookings
-# to Playmaker.
-TAO_PROMOTER_URL = (
-    "https://tickets.taogroup.com/promoter/68d79ff5-3d04-4198-83d7-00330a1e6107"
-    "?utm_source=promoter&utm_id=68d79ff587c84397b19f00330a1e6107"
-)
+TAO_PROMOTER_URL = "https://tickets.taogroup.com/promoter/68d79ff5-3d04-4198-83d7-00330a1e6107"

@@ -15,33 +15,40 @@ class ActionNeeded(Exception):
         super().__init__(issue)
 
 
+def _to_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def normalize_guest_request(raw):
     """
     raw: dict parsed from the incoming email (see gmail_client.parse_request).
-    Applies the guest-count and promoter rules from section 3.
+    Applies the consent, guest-count, promoter and paused-venue rules.
     """
-    female = raw.get("female_count") or 0
-    male = raw.get("male_count") or 0
-    try:
-        female = int(female)
-    except (TypeError, ValueError):
-        female = 0
-    try:
-        male = int(male)
-    except (TypeError, ValueError):
-        male = 0
+    # Consent gate (TAO authorization sec. 3-4): never accept terms for a
+    # customer without documented consent from the intake form.
+    if str(raw.get("authorization", "")).strip().upper() != "YES":
+        raise ActionNeeded(
+            issue="Customer authorization/21+ confirmation is missing or not YES.",
+            required_action="Do not submit or accept terms. Get documented consent from the customer.",
+        )
+    if not raw.get("submitted_at"):
+        raise ActionNeeded(
+            issue="Submission timestamp missing, so consent cannot be documented.",
+            required_action="Check the original form submission in the Airo inbox.",
+        )
 
+    female = _to_int(raw.get("female_count"))
+    male = _to_int(raw.get("male_count"))
     if female == 0 and male == 0:
         raise ActionNeeded(
             issue="Both guest counts are zero — no party to register.",
             required_action="Confirm party size with the customer before processing.",
         )
 
-    requested_venues = raw.get("venues") or []
-    if isinstance(requested_venues, str):
-        requested_venues = requested_venues.split(",")
-    requested_venues = [canonical_venue(v) for v in requested_venues if v and v.strip()]
-
+    requested_venues = [rules.normalize_venue_name(v) for v in (raw.get("venues") or [])]
     for v in requested_venues:
         if v in rules.PAUSED_VENUES:
             raise ActionNeeded(
@@ -49,20 +56,8 @@ def normalize_guest_request(raw):
                 required_action="Do not submit. Wait for explicit reactivation.",
             )
 
-    try:
-        if date_range(raw["start_date"], raw["end_date"]) == []:
-            raise ActionNeeded(
-                issue=f"Visit end date {raw['end_date']} is before start date {raw['start_date']}.",
-                required_action="Confirm the correct visit dates with the customer.",
-            )
-    except ValueError:
-        raise ActionNeeded(
-            issue=f"Unreadable visit dates: {raw['start_date']!r} to {raw['end_date']!r}.",
-            required_action="Confirm the correct visit dates with the customer.",
-        )
-
     return {
-        "first_name": raw.get("first_name") or raw.get("name", "").split(" ")[0],
+        "first_name": raw.get("first_name") or (raw.get("name", "").split(" ")[0]),
         "last_name": raw.get("last_name", ""),
         "email": raw["email"],
         "phone": raw.get("phone") or rules.FALLBACK_PHONE,
@@ -74,26 +69,12 @@ def normalize_guest_request(raw):
         "male_count": male,
         "promoter": raw.get("promoter"),
         "source_message_id": raw["source_message_id"],
+        "consent": {
+            "authorization_accepted": True,
+            "submitted_at": raw["submitted_at"],
+            "originating_page": raw.get("originating_page"),
+        },
     }
-
-
-def canonical_venue(name):
-    """Map a submitted venue name onto the canonical name used in config/rules.py.
-
-    Matches case-insensitively, and accepts a short form such as "OMNIA" or
-    "Drai's" when it identifies exactly one known venue. Unknown names are
-    returned stripped but otherwise unchanged.
-    """
-    name = name.strip()
-    known = rules.ALL_AUTHORIZED_VENUES | rules.PAUSED_VENUES
-    lowered = name.lower()
-    for v in known:
-        if v.lower() == lowered:
-            return v
-    prefix_matches = [v for v in known if v.lower().startswith(lowered)]
-    if len(prefix_matches) == 1:
-        return prefix_matches[0]
-    return name
 
 
 def date_range(start_date, end_date):
@@ -111,94 +92,53 @@ def is_dayclub_season(date_obj):
 
 
 def default_route_for_date(date_obj):
-    day_name = date_obj.strftime("%A")
-    return rules.DEFAULT_ROUTING[day_name]
+    return rules.DEFAULT_ROUTING[date_obj.strftime("%A")]
 
 
-def routed_candidates(date_obj, previous_night_venue=None):
-    """Default-routing candidates for a date, in priority order.
-
-    Applies the weekend rule: never route the same nightclub on Friday and
-    Saturday, and prefer Hakkasan on Saturday when Friday was JEWEL.
-    "best_available" expands to every other authorized nightclub.
+def candidate_venues(request, date_obj, previous_night_venue=None):
     """
+    Ordered venue candidates for one date.
+    1. Customer-requested venues first. When several were requested, the
+       night's schedule decides which of them is tried first (owner decision
+       2026-09-27); requested venues the schedule doesn't list follow in
+       form order.
+    2. Then the night's schedule: the weekday primary/fallbacks, then the
+       extra backup nightclubs (not on Tuesday).
+    Weekend rule: never repeat the previous night's nightclub on Fri->Sat;
+    if Friday was JEWEL, prefer Hakkasan for Saturday.
+    """
+    day = date_obj.strftime("%A")
     route = default_route_for_date(date_obj)
-    fallback = route["fallback"]
-    fallback = fallback if isinstance(fallback, list) else [fallback]
+    fallback = route["fallback"] if isinstance(route["fallback"], list) else [route["fallback"]]
+    schedule = [route["primary"]] + fallback
+    if day not in rules.NO_EXTRA_BACKUP_DAYS:
+        schedule += rules.EXTRA_BACKUP_NIGHTCLUBS
+    if day == "Saturday" and previous_night_venue == "JEWEL Nightclub":
+        schedule.insert(0, "Hakkasan Nightclub")
 
-    ordered = []
-    for venue in [route["primary"]] + fallback:
-        if venue == "best_available":
-            ordered += rules.NIGHTCLUBS
-        else:
-            ordered.append(venue)
+    requested = list(request["requested_venues"])
+    ordered = [v for v in schedule if v in requested] + requested + schedule
 
-    if date_obj.strftime("%A") == "Saturday" and previous_night_venue:
-        ordered = [v for v in ordered if v != previous_night_venue]
-        if previous_night_venue == "JEWEL Nightclub":
-            ordered.insert(0, "Hakkasan Nightclub")
-
-    deduped = []
+    seen, result = set(), []
     for v in ordered:
-        if v not in deduped:
-            deduped.append(v)
-    return deduped
+        if v == "best_available" or v in rules.PAUSED_VENUES or v in seen:
+            continue
+        if date_obj.strftime("%A") == "Saturday" and v == previous_night_venue:
+            continue  # Fri+Sat duplicate-nightclub conflict
+        seen.add(v)
+        result.append(v)
+    return result
 
 
-def is_free_pass(listing):
-    """Guest lists are TAO's free "Passes". Anything that is not a Passes
-    listing with a confirmed price of 0 (paid tickets, table deposits, an
-    unknown price) is never used."""
-    if not listing or listing.get("listing_type") != "Passes":
-        return False
-    try:
-        return float(listing.get("price")) == 0
-    except (TypeError, ValueError):
-        return False
-
-
-def resolve_venue_for_date(request, date_obj, live_availability_checker,
-                           previous_night_venue=None):
+def resolve_venue_for_date(request, date_obj, live_availability_checker, previous_night_venue=None):
     """
     live_availability_checker(venue, date_obj) -> dict or None
-        Expected dict shape: {"event": str, "listing_type": "Passes"|"Tickets",
-                               "price": number (must be 0 to be used),
-                               "female_cutoff": str, "male_cutoff": str, ...}
-        Must return None if there is no live Passes/Guest List entry.
-
-    previous_night_venue: the venue already registered for the night before
-        (used only for the Friday/Saturday no-repeat rule).
-
-    Requested venues have first priority (section 4) — ordered by the night's
-    schedule when the guest picked several — then the default routing table,
-    then rules.LAST_RESORT_VENUES. The Fri/Sat no-repeat rule
-    overrides everything, including a venue the guest explicitly requested.
+        {"event": str, "listing_type": "Passes"|"Tickets", ...}
+        None means no live Passes/Guest List entry.
+    Only a 'Passes' listing is ever used; paid 'Tickets' never are.
     """
-    route = default_route_for_date(date_obj)
-    if route.get("only"):
-        # This night has a single open venue; nothing else is tried.
-        candidates = [route["primary"]]
-    else:
-        schedule = []
-        for v in routed_candidates(date_obj, previous_night_venue) + rules.LAST_RESORT_VENUES:
-            if v not in schedule:
-                schedule.append(v)
-        requested = list(request["requested_venues"])
-        # When the guest picked several venues, the night's schedule decides
-        # which of them comes first; picked venues the schedule doesn't
-        # mention follow in the guest's order, then the rest of the schedule.
-        candidates = [v for v in schedule if v in requested]
-        candidates += [v for v in requested if v not in candidates]
-        candidates += [v for v in schedule if v not in candidates]
-
-    if date_obj.strftime("%A") == "Saturday" and previous_night_venue:
-        candidates = [v for v in candidates if v != previous_night_venue]
-
-    for venue in candidates:
-        if venue in rules.PAUSED_VENUES:
-            continue
+    for venue in candidate_venues(request, date_obj, previous_night_venue):
         listing = live_availability_checker(venue, date_obj)
-        if is_free_pass(listing):
+        if listing and listing.get("listing_type") == "Passes":
             return venue, listing
-
     return None, None

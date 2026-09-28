@@ -23,6 +23,10 @@ Design contract with rules_engine.py:
 """
 from config.rules import TAO_PROMOTER_URL
 
+# Set to True only once check_availability() and submit_registration() are
+# filled in from a recorded TAO session. main.py refuses --live until then.
+READY = False
+
 
 def check_availability(venue, date_obj):
     from playwright.sync_api import sync_playwright

@@ -12,15 +12,16 @@ every few minutes. See README.md for hosting options.
 import argparse
 import json
 import logging
-import traceback
-from datetime import datetime, timedelta, timezone
+import os
+import sys
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from config import rules
 from rules_engine import (
     normalize_guest_request, ActionNeeded, date_range,
-    resolve_venue_for_date, default_route_for_date,
+    resolve_venue_for_date,
 )
+from config import rules
 from templates.emails import consolidated_confirmation, internal_processed_record, internal_action_needed
 import gmail_client
 import tao_portal
@@ -28,50 +29,38 @@ import tao_portal
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("amy")
 
-RECORDS_PATH = "amy_records.jsonl"
+
 VEGAS = ZoneInfo("America/Los_Angeles")
 
 
-def dry_run_availability(venue, date_obj):
-    """Stand-in for tao_portal.check_availability in dry runs: treats every
-    venue as having a live Passes listing so the routing decision is visible."""
-    return {
-        "event": "[would be read from live listing]",
-        "listing_type": "Passes",
-        "price": 0,
-        "arrival_text": "[would be read from live listing]",
-    }
-
-
-def process_one_request(raw, dry_run=True, availability_checker=None, today=None):
+def process_one_request(raw, dry_run=True, today=None):
     try:
         request = normalize_guest_request(raw)
     except ActionNeeded as e:
         return {"status": "action_needed", "issue": e.issue, "required_action": e.required_action}
 
-    if availability_checker is None:
-        availability_checker = dry_run_availability if dry_run else tao_portal.check_availability
-
     registrations = []
     exceptions = []
-    venue_by_date = {}
-    today = today or datetime.now(VEGAS).date()
+    previous_night_venue = None
 
+    def checker(venue, date_obj):
+        if dry_run:
+            # Simulated listing so routing logic can be exercised without
+            # touching the live TAO site.
+            return {"event": "[simulated]", "listing_type": "Passes"}
+        return tao_portal.check_availability(venue, date_obj)
+
+    today = today or datetime.now(VEGAS).date()
     for date_obj in date_range(request["start_date"], request["end_date"]):
         if date_obj < today:
-            log.info("Skipping %s: night has already passed", date_obj)
+            log.info("Skipping %s: that night has already passed", date_obj)
             continue
         venue, listing = resolve_venue_for_date(
-            request, date_obj,
-            live_availability_checker=availability_checker,
-            previous_night_venue=venue_by_date.get(date_obj - timedelta(days=1)),
+            request, date_obj, live_availability_checker=checker,
+            previous_night_venue=previous_night_venue,
         )
+        previous_night_venue = venue
         if not venue:
-            if default_route_for_date(date_obj).get("only"):
-                # Single-venue night (e.g. OMNIA-only Tuesday) with no guest
-                # list: by instruction, skip the night quietly — no exception.
-                log.info("No guest list at the only open venue on %s; skipping that night", date_obj)
-                continue
             exceptions.append({
                 "date": date_obj.isoformat(),
                 "issue": "No matching live Passes/Guest List event for requested or routed venues.",
@@ -79,12 +68,11 @@ def process_one_request(raw, dry_run=True, availability_checker=None, today=None
             continue
 
         if dry_run:
-            venue_by_date[date_obj] = venue
             registrations.append({
-                "venue": venue, "event": listing.get("event", ""),
+                "venue": venue, "event": "[would be read from live listing]",
                 "date": date_obj.isoformat(),
                 "female_count": request["female_count"], "male_count": request["male_count"],
-                "arrival_text": listing.get("arrival_text", ""),
+                "arrival_text": "[would be read from live listing]",
                 "confirmation_id": "[DRY RUN — not submitted]",
             })
             continue
@@ -94,7 +82,6 @@ def process_one_request(raw, dry_run=True, availability_checker=None, today=None
             exceptions.append({"date": date_obj.isoformat(), "issue": "Submission could not be verified."})
             continue
 
-        venue_by_date[date_obj] = venue
         registrations.append({
             "venue": venue, "event": listing.get("event", ""), "date": date_obj.isoformat(),
             "female_count": request["female_count"], "male_count": request["male_count"],
@@ -102,7 +89,7 @@ def process_one_request(raw, dry_run=True, availability_checker=None, today=None
             "confirmation_id": result["confirmation_id"],
         })
 
-    output = {"status": "ok", "request": request, "registrations": registrations, "exceptions": exceptions}
+    output = {"request": request, "registrations": registrations, "exceptions": exceptions}
 
     if registrations:
         date_label = request["start_date"] if request["start_date"] == request["end_date"] \
@@ -111,6 +98,10 @@ def process_one_request(raw, dry_run=True, availability_checker=None, today=None
             request["first_name"], request["email"], date_label, registrations
         )
         output["confirmation_email"] = {"subject": subject, "body": body}
+        output["internal_log"] = internal_processed_record(
+            f"{request['first_name']} {request['last_name']}", request["email"],
+            registrations, request.get("promoter"), "Not sent (dry run)" if dry_run else "Pending send",
+        )
 
     for exc in exceptions:
         output.setdefault("action_needed_records", []).append(
@@ -125,123 +116,129 @@ def process_one_request(raw, dry_run=True, availability_checker=None, today=None
     return output
 
 
-def processed_record(result, customer_email_status):
-    request = result["request"]
-    return internal_processed_record(
-        f"{request['first_name']} {request['last_name']}", request["email"],
-        result["registrations"], request.get("promoter"), customer_email_status,
+def team_alert(service, message_id, raw, problems, dry_run):
+    """One "needs attention" email to the team per source message, only when
+    a person has to look at something."""
+    name = raw.get("name") or raw.get("email") or "Unknown guest"
+    dates = f"{raw.get('start_date', '?')} to {raw.get('end_date', '?')}"
+    body = "\n\n".join(problems) + f"\n\nGmail message ID: {message_id}"
+    subject = f"Amy — needs attention: {name}, {dates}"
+    if dry_run:
+        log.info("[dry run] would email the team: %s\n%s", subject, body)
+        return
+    gmail_client.send_once(
+        service, f"amy-alert-{message_id}@playmakerentertainment.com",
+        rules.PLAYMAKER_EMAIL, subject, body, sender=rules.INTAKE_EMAIL,
     )
 
 
-def append_record(message_id, kind, text):
-    entry = {
-        "at": datetime.now(timezone.utc).isoformat(),
-        "message_id": message_id,
-        "kind": kind,
-        "record": text,
-    }
-    with open(RECORDS_PATH, "a") as f:
-        f.write(json.dumps(entry) + "\n")
-
-
-def handle_message(service, msg_ref, dry_run, labels):
-    """Process one inbox message. Returns the label name applied (or that
-    would be applied in a dry run)."""
-    message_id = msg_ref["id"]
-    _, body = gmail_client.get_form_text(service, message_id)
+def handle_message(service, message_id, dry_run, labels):
+    """Process one request email end to end. Returns the outcome label."""
+    _, body = gmail_client.get_plain_text_body(service, message_id)
     raw = gmail_client.parse_request(message_id, body)
 
     if raw.get("_missing_required"):
-        text = internal_action_needed(
+        team_alert(service, message_id, raw, [internal_action_needed(
             raw.get("name", "(unknown)"), raw.get("email", "(unknown)"), venue="(n/a)", date="(n/a)",
             issue=f"Request is missing required fields: {', '.join(raw['_missing_required'])}.",
             required_action="Read the original email and process manually.",
-        )
-        records = [("action_needed", text)]
-        label = gmail_client.EXCEPTION_LABEL
-    else:
-        result = process_one_request(raw, dry_run=dry_run)
-        records = []
-
-        if result["status"] == "action_needed":
-            text = internal_action_needed(
-                raw.get("name", "(unknown)"), raw.get("email", "(unknown)"),
-                venue=", ".join(raw.get("venues") or []) or "(none specified)",
-                date=f"{raw.get('start_date')} to {raw.get('end_date')}",
-                issue=result["issue"], required_action=result["required_action"],
-            )
-            records.append(("action_needed", text))
-            label = gmail_client.EXCEPTION_LABEL
-        else:
-            if result.get("confirmation_email"):
-                if dry_run:
-                    email_status = "Not sent (dry run)"
-                    log.info("Would send to %s:\n%s\n\n%s", result["request"]["email"],
-                             result["confirmation_email"]["subject"], result["confirmation_email"]["body"])
-                else:
-                    gmail_client.send_email(
-                        service, result["request"]["email"],
-                        result["confirmation_email"]["subject"], result["confirmation_email"]["body"],
-                        sender=rules.INTAKE_EMAIL,
-                    )
-                    email_status = "Sent"
-                records.append(("processed", processed_record(result, email_status)))
-            for text in result.get("action_needed_records", []):
-                records.append(("action_needed", text))
-            label = gmail_client.EXCEPTION_LABEL if result["exceptions"] else gmail_client.PROCESSED_LABEL
-
-    for kind, text in records:
-        log.info("%s record for %s:\n%s", kind, message_id, text)
-        if not dry_run:
-            append_record(message_id, kind, text)
-            gmail_client.send_email(
-                service, rules.TEAM_NOTIFICATION_EMAIL,
-                f"Amy: {text.splitlines()[0]} — {raw.get('name') or raw.get('email') or message_id}",
-                text, sender=rules.INTAKE_EMAIL,
-            )
+        )], dry_run)
+        return gmail_client.EXCEPTION_LABEL
 
     if not dry_run:
-        gmail_client.mark_processed(service, message_id, labels[label])
-    return label
+        gmail_client.set_labels(service, message_id, labels, add=[gmail_client.PROCESSING_LABEL])
+
+    result = process_one_request(raw, dry_run=dry_run)
+
+    if result.get("status") == "action_needed":
+        team_alert(service, message_id, raw, [internal_action_needed(
+            raw.get("name", "(unknown)"), raw.get("email", "(unknown)"),
+            venue=", ".join(raw.get("venues") or []) or "(none specified)",
+            date=f"{raw.get('start_date')} to {raw.get('end_date')}",
+            issue=result["issue"], required_action=result["required_action"],
+        )], dry_run)
+        return gmail_client.EXCEPTION_LABEL
+
+    request = result["request"]
+    if dry_run:
+        print(json.dumps({
+            "guest": f"{request['first_name']} {request['last_name']} <{request['email']}>",
+            "routing": [(r["date"], r["venue"]) for r in result.get("registrations", [])],
+            "consent": request.get("consent"),
+            "problems": result.get("action_needed_records"),
+        }, indent=2, default=str))
+
+    if "confirmation_email" in result:
+        email = result["confirmation_email"]
+        if dry_run:
+            print(f"[dry run] would email {request['email']} (cc {rules.PLAYMAKER_EMAIL}):")
+            print(email["subject"])
+            print(email["body"])
+        else:
+            gmail_client.send_once(
+                service, f"amy-confirm-{message_id}@playmakerentertainment.com",
+                request["email"], email["subject"], email["body"],
+                sender=rules.INTAKE_EMAIL, cc=rules.PLAYMAKER_EMAIL,
+            )
+
+    if result.get("action_needed_records"):
+        team_alert(service, message_id, raw, result["action_needed_records"], dry_run)
+        return gmail_client.EXCEPTION_LABEL
+    return gmail_client.PROCESSED_LABEL
 
 
 def main():
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--dry-run", action="store_true", help="Parse and decide only (default)")
+    mode.add_argument("--dry-run", action="store_true", help="Read and decide only (default)")
     mode.add_argument("--live", action="store_true", help="Actually submit + send email")
-    parser.add_argument("--token", default="token.json", help="Path to the Gmail OAuth token")
     args = parser.parse_args()
     dry_run = not args.live
 
-    service = gmail_client.get_service(args.token)
-    pending = gmail_client.list_pending_requests(service)
+    if not dry_run and not tao_portal.READY:
+        sys.exit("--live is disabled until tao_portal.py is filled in from a recorded TAO session.")
+
+    # Unix seconds; requests received earlier were handled by the previous
+    # process and must never be booked again. Required for --live.
+    start_after = os.environ.get("AMY_START_AFTER")
+    if not dry_run and not start_after:
+        sys.exit("--live needs AMY_START_AFTER (Unix time of go-live) so old requests are not re-booked.")
+
+    service = gmail_client.get_service()
+    account = gmail_client.get_account_email(service)
+    if account.lower() != rules.INTAKE_EMAIL:
+        sys.exit(f"Wrong Gmail account: signed in as {account}, expected {rules.INTAKE_EMAIL}.")
+
+    pending = gmail_client.list_pending_requests(service, start_after=start_after)
     log.info("Found %d pending guest-list request(s)%s", len(pending), " [DRY RUN]" if dry_run else "")
 
     labels = {}
     if not dry_run:
-        for name in (gmail_client.PROCESSED_LABEL, gmail_client.EXCEPTION_LABEL):
+        for name in (gmail_client.PROCESSING_LABEL, gmail_client.PROCESSED_LABEL, gmail_client.EXCEPTION_LABEL):
             labels[name] = gmail_client.get_or_create_label(service, name)
 
-    for msg_ref in pending:
+    for msg_ref in reversed(pending):  # oldest first
+        message_id = msg_ref["id"]
         try:
-            label = handle_message(service, msg_ref, dry_run, labels)
+            outcome = handle_message(service, message_id, dry_run, labels)
         except Exception:
-            log.exception("Failed while processing %s", msg_ref["id"])
-            if not dry_run:
-                # A TAO submission may already have gone through, so never let
-                # this message be picked up and resubmitted automatically.
-                gmail_client.mark_processed(service, msg_ref["id"], labels[gmail_client.EXCEPTION_LABEL])
-                gmail_client.send_email(
-                    service, rules.TEAM_NOTIFICATION_EMAIL,
-                    f"Amy: ACTION NEEDED — error processing message {msg_ref['id']}",
-                    f"ACTION NEEDED\n\nAmy hit an error on Gmail message {msg_ref['id']} and did not finish it.\n"
-                    "A TAO registration may or may not have gone through. Check TAO before re-submitting.\n\n"
-                    f"Error:\n{traceback.format_exc()}",
-                    sender=rules.INTAKE_EMAIL,
-                )
-            continue
-        log.info("Processed %s -> %s", msg_ref["id"], label)
+            log.exception("Failed while processing %s", message_id)
+            if dry_run:
+                continue
+            # A TAO submission may already have gone through, so never let
+            # this message be picked up and resubmitted automatically.
+            outcome = gmail_client.EXCEPTION_LABEL
+            team_alert(service, message_id, {}, [
+                "Amy hit an error partway through this request. A TAO registration may or may "
+                "not have gone through — check TAO before re-submitting."
+            ], dry_run)
+        log.info("%s -> %s", message_id, outcome)
+        if not dry_run:
+            gmail_client.set_labels(
+                service, message_id, labels,
+                add=[gmail_client.PROCESSED_LABEL] + ([outcome] if outcome == gmail_client.EXCEPTION_LABEL else []),
+                remove=[gmail_client.PROCESSING_LABEL],
+            )
 
 
 if __name__ == "__main__":

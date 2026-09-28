@@ -6,196 +6,167 @@ Uses the Gmail API (not IMAP) so it can run unattended with a refresh token.
 Auth: create a Google Cloud OAuth client (Desktop App type), enable the
 Gmail API, and run a one-time authorization flow to obtain token.json.
 See README.md for the exact steps.
+
+Email format (verified against a real GoDaddy/Airo notification, Sept 28 2026):
+every form field is one "Label: value" line inside the block that follows
+"Message: New guest list request submission".
 """
 import base64
+import os
 import re
 from email.message import EmailMessage
-from html.parser import HTMLParser
+
+from config.rules import normalize_venue_name
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
-# Not limited to unread mail: the team often opens these on a phone first.
-# The Processed/Exception labels are what mark a request as handled.
+# Not limited to unread mail: the team often opens requests on a phone
+# before Amy runs. The Processed/Exception labels mark a request as handled.
 SEARCH_QUERY = (
     '(subject:"New guest list request submission" OR subject:"Guest List Request") '
-    'newer_than:14d -label:Playmaker/Processed -label:Playmaker/Exception'
+    'newer_than:30d -in:trash -label:Playmaker/Processed -label:Playmaker/Exception'
 )
 
-# Form labels as they appear in the GoDaddy/Airo notification, mapped to
-# field names. Matched case-insensitively, ignoring any "(...)" suffix such as
-# "Female guests (free before 1am)" and a trailing colon.
-FIELD_LABELS = {
-    "name": "name",
-    "email": "email",
-    "phone": "phone",
-    "visit start date": "start_date",
-    "visit end date": "end_date",
-    "venues": "venues",
-    "female guests": "female_count",
-    "male guests": "male_count",
-    "referred by – promoter first name": "promoter_first",
-    "referred by - promoter first name": "promoter_first",
-    "referred by – promoter last name": "promoter_last",
-    "referred by - promoter last name": "promoter_last",
-    "promoter": "promoter",
-    "message": "message",
-    "submission date": "submission_date",
-}
-
-# A value must look like this to be accepted for the field.
-FIELD_VALUE_RE = {
-    "email": re.compile(r"^[\w\.\-\+]+@[\w\.\-]+$"),
-    "start_date": re.compile(r"^\d{4}-\d{2}-\d{2}$"),
-    "end_date": re.compile(r"^\d{4}-\d{2}-\d{2}$"),
-    "female_count": re.compile(r"^\d+$"),
-    "male_count": re.compile(r"^\d+$"),
-    "phone": re.compile(r"^[\d\-\+\(\) \.]+$"),
-}
-
-NOT_PROVIDED = {"", "not provided", "n/a", "none"}
-
-
-def _label_key(text):
-    """Return the field name if `text` is a form label, else None."""
-    text = re.sub(r"\s*\(.*\)\s*$", "", text.strip().rstrip(":")).strip().lower()
-    return FIELD_LABELS.get(text)
-
-
-class _TextExtractor(HTMLParser):
-    """Flatten the notification HTML into lines: one per label and per value."""
-    BREAKS = {"br", "p", "div", "td", "tr", "table", "h1", "h2", "h3", "li", "b"}
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.chunks = []
-        self._skip = 0
-
-    def handle_starttag(self, tag, attrs):
-        if tag in ("style", "script", "head"):
-            self._skip += 1
-        if tag in self.BREAKS:
-            self.chunks.append("\n")
-
-    def handle_endtag(self, tag):
-        if tag in ("style", "script", "head"):
-            self._skip = max(0, self._skip - 1)
-        if tag in self.BREAKS:
-            self.chunks.append("\n")
-
-    def handle_data(self, data):
-        if not self._skip:
-            self.chunks.append(data)
-
-
-def html_to_text(html):
-    parser = _TextExtractor()
-    parser.feed(html)
-    lines = (" ".join(line.split()) for line in "".join(parser.chunks).splitlines())
-    return "\n".join(line for line in lines if line)
-
-
+PROCESSING_LABEL = "Playmaker/Processing"
 PROCESSED_LABEL = "Playmaker/Processed"
 EXCEPTION_LABEL = "Playmaker/Exception"
 
+# Lowercased label -> internal field name. Older emails labeled the counts
+# "Female guests (free before 1am)", so counts are matched by prefix below.
+LABEL_TO_FIELD = {
+    "full name": "name",
+    "name": "name",
+    "email": "email",
+    "phone": "phone",
+    "zip code": "billing_zip",
+    "visit start date": "start_date",
+    "visit end date": "end_date",
+    "requested venues": "venues",
+    "venues": "venues",
+    "promoter first name": "promoter_first",
+    "promoter last name": "promoter_last",
+    "additional comments": "comments",
+    "authorization accepted": "authorization",
+    "originating page": "originating_page",
+    "submission date and time": "submitted_at",
+    "submission date": "submitted_at",
+}
+
+LINE_RE = re.compile(r"^[ \t]*([A-Za-z][A-Za-z \t\(\)/\-]*?)[ \t]*:[ \t]*(.*?)[ \t]*$", re.MULTILINE)
+
 
 def get_service(token_path="token.json"):
-    # Imported here so the parsing helpers can be used (and tested) without
-    # the Google client libraries installed.
+    """Gmail API client for the intake inbox.
+
+    Uses GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET / GMAIL_REFRESH_TOKEN from the
+    environment when set (how the server runs), otherwise token.json (from
+    authorize.py on a computer). Imported lazily so parsing can be tested
+    without the Google libraries.
+    """
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
 
-    creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-    if not creds.valid and creds.refresh_token:
+    if os.environ.get("GMAIL_REFRESH_TOKEN"):
+        creds = Credentials(
+            None,
+            refresh_token=os.environ["GMAIL_REFRESH_TOKEN"],
+            client_id=os.environ["GMAIL_CLIENT_ID"],
+            client_secret=os.environ["GMAIL_CLIENT_SECRET"],
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=SCOPES,
+        )
         creds.refresh(Request())
-        with open(token_path, "w") as f:
-            f.write(creds.to_json())
+    else:
+        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+        if not creds.valid and creds.refresh_token:
+            creds.refresh(Request())
     return build("gmail", "v1", credentials=creds)
 
 
-def list_pending_requests(service, max_results=25):
+def get_account_email(service):
+    return service.users().getProfile(userId="me").execute()["emailAddress"]
+
+
+def build_query(start_after=None):
+    """start_after: Unix seconds. Requests received before it (already
+    handled by the previous process) are never picked up."""
+    return f"{SEARCH_QUERY} after:{int(start_after)}" if start_after else SEARCH_QUERY
+
+
+def list_pending_requests(service, max_results=25, start_after=None):
     resp = service.users().messages().list(
-        userId="me", q=SEARCH_QUERY, maxResults=max_results
+        userId="me", q=build_query(start_after), maxResults=max_results
     ).execute()
     return resp.get("messages", [])
 
 
-def get_form_text(service, message_id):
-    """Return (message, text) for a request email.
-
-    The GoDaddy notification's text/plain part only carries name, email and
-    message; the visit dates, venues and guest counts are only in the HTML
-    part. So the HTML part is preferred and flattened to text.
-    """
+def get_plain_text_body(service, message_id):
     msg = service.users().messages().get(
         userId="me", id=message_id, format="full"
     ).execute()
 
-    found = {}
+    def decode(data):
+        return base64.urlsafe_b64decode(data).decode("utf-8", "ignore")
 
-    def walk(part):
-        mime = part.get("mimeType", "")
-        data = part.get("body", {}).get("data")
-        if data and mime in ("text/plain", "text/html") and mime not in found:
-            found[mime] = base64.urlsafe_b64decode(data).decode("utf-8", "ignore")
-        for sub in part.get("parts", []):
-            walk(sub)
+    def walk(parts):
+        for part in parts:
+            if part.get("mimeType") == "text/plain" and "data" in part.get("body", {}):
+                return decode(part["body"]["data"])
+            if "parts" in part:
+                found = walk(part["parts"])
+                if found:
+                    return found
+        return None
 
-    walk(msg["payload"])
-    if "text/html" in found:
-        return msg, html_to_text(found["text/html"])
-    return msg, found.get("text/plain", "")
+    payload = msg["payload"]
+    if "parts" in payload:
+        body = walk(payload["parts"]) or ""
+    else:
+        body = decode(payload["body"].get("data", ""))
+    return msg, body
+
+
+def _form_block(body_text):
+    """Only parse the submission block, not the 'From:/Email:' header GoDaddy
+    prepends (that header is the sender line, not form data)."""
+    marker = "Message:"
+    start = body_text.find(marker)
+    block = body_text[start + len(marker):] if start != -1 else body_text
+    end = block.find("\n---")
+    if end != -1:
+        block = block[:end]
+    return block
 
 
 def parse_request(message_id, body_text):
-    """Parse "Label" / "Value" lines (value on the next line, or after a
-    colon on the same line) into the dict rules_engine expects."""
     fields = {"source_message_id": message_id}
-    lines = [line.strip() for line in body_text.splitlines()]
 
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        key = _label_key(line)
-        value = None
-        if key:
-            # Value is the next non-empty line, unless that is another label
-            # (i.e. this field was left blank).
-            j = i + 1
-            while j < len(lines) and not lines[j]:
-                j += 1
-            if j < len(lines) and not _label_key(lines[j]):
-                value = lines[j]
-                i = j
-        elif ":" in line:
-            label, _, rest = line.partition(":")
-            key = _label_key(label)
-            value = rest.strip() if key else None
-        i += 1
-
-        if not key or value is None or key in fields:
-            continue
-        if value.lower() in NOT_PROVIDED:
-            continue
-        pattern = FIELD_VALUE_RE.get(key)
-        if pattern and not pattern.match(value):
-            continue
-        fields[key] = value
-
-    promoter = " ".join(fields.pop(k) for k in ("promoter_first", "promoter_last") if k in fields)
-    if promoter and "promoter" not in fields:
-        fields["promoter"] = promoter
+    for label, value in LINE_RE.findall(_form_block(body_text)):
+        key = label.lower().strip()
+        if key.startswith("female guests"):
+            fields["female_count"] = value
+        elif key.startswith("male guests"):
+            fields["male_count"] = value
+        elif key in LABEL_TO_FIELD:
+            fields.setdefault(LABEL_TO_FIELD[key], value)  # first occurrence wins
 
     if "name" in fields:
         parts = fields["name"].split(" ", 1)
         fields["first_name"] = parts[0]
         fields["last_name"] = parts[1] if len(parts) > 1 else ""
 
-    if "venues" in fields:
-        fields["venues"] = [v.strip() for v in fields["venues"].split(",") if v.strip()]
+    promoter = f"{fields.pop('promoter_first', '')} {fields.pop('promoter_last', '')}".strip()
+    fields["promoter"] = promoter or None
 
-    required = ["email", "start_date", "end_date"]
-    missing = [f for f in required if f not in fields]
+    if fields.get("venues"):
+        fields["venues"] = [
+            normalize_venue_name(v) for v in fields["venues"].split(",") if v.strip()
+        ]
+    else:
+        fields["venues"] = []
+
+    missing = [f for f in ("email", "start_date", "end_date") if not fields.get(f)]
     if missing:
         fields["_missing_required"] = missing
 
@@ -214,23 +185,43 @@ def get_or_create_label(service, name):
     return created["id"]
 
 
-def mark_processed(service, message_id, label_id):
+def set_labels(service, message_id, label_ids, add=(), remove=()):
+    """label_ids maps label name -> Gmail label id."""
     service.users().messages().modify(
-        userId="me", id=message_id, body={"addLabelIds": [label_id], "removeLabelIds": ["UNREAD"]}
+        userId="me", id=message_id,
+        body={
+            "addLabelIds": [label_ids[name] for name in add],
+            "removeLabelIds": [label_ids[name] for name in remove],
+        },
     ).execute()
 
 
-def build_message(to, subject, body, sender=None):
+def build_message(to, subject, body, sender, cc=None, message_id=None):
     msg = EmailMessage()
+    msg["From"] = f"Playmaker Entertainment <{sender}>"
     msg["To"] = to
+    if cc:
+        msg["Cc"] = cc
     msg["Subject"] = subject
-    if sender:
-        msg["From"] = sender
+    if message_id:
+        msg["Message-ID"] = f"<{message_id}>"
     msg.set_content(body)
     return {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")}
 
 
-def send_email(service, to, subject, body, sender=None):
-    return service.users().messages().send(
-        userId="me", body=build_message(to, subject, body, sender)
+def already_sent(service, message_id):
+    resp = service.users().messages().list(
+        userId="me", q=f"in:sent rfc822msgid:{message_id}", maxResults=1
     ).execute()
+    return bool(resp.get("messages"))
+
+
+def send_once(service, message_id, to, subject, body, sender, cc=None):
+    """Send unless a message with this Message-ID was already sent, so a
+    restarted run never emails the same person twice. Returns True if sent."""
+    if already_sent(service, message_id):
+        return False
+    service.users().messages().send(
+        userId="me", body=build_message(to, subject, body, sender, cc, message_id)
+    ).execute()
+    return True
