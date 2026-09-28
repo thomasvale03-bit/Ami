@@ -76,6 +76,12 @@ What `--live` does per request:
   that errors midway is labeled Exception and never retried automatically.
 - Nights that have already passed are skipped.
 
+## One-week follow-up
+Once an hour Amy checks recent guest-list confirmations (hers and the
+previous process's) and, 7 days after the guest's last night, sends one
+"see you next time" email (`templates/emails.py: follow_up_email`). Fixed
+Message-IDs prevent repeats; guests who reply STOP/unsubscribe are skipped.
+
 ## Posh signups
 "NEW POSH SIGNUP" emails (sent by Zapier from the intake inbox) go through
 the same workflow (`posh.py`):

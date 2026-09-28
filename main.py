@@ -13,9 +13,10 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from rules_engine import (
@@ -23,7 +24,10 @@ from rules_engine import (
     resolve_dayclub_for_date, resolve_venue_for_date,
 )
 from config import rules
-from templates.emails import consolidated_confirmation, internal_processed_record, internal_action_needed
+from templates.emails import (
+    FOLLOW_UP_DELAY_DAYS, consolidated_confirmation, follow_up_email, internal_action_needed,
+    internal_processed_record,
+)
 import gmail_client
 import posh
 import tao_portal
@@ -297,6 +301,48 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
     return gmail_client.PROCESSED_LABEL
 
 
+def last_night_from_subject(subject):
+    """The guest's last night, from a confirmation subject. Amy's own:
+    "… — 2026-09-28" / "… — 2026-09-28 to 2026-09-30". The previous
+    process's: "… — September 26, 2026" / "… — September 25–29, 2026"."""
+    dates = re.findall(r"\d{4}-\d{2}-\d{2}", subject or "")
+    if dates:
+        return datetime.fromisoformat(dates[-1]).date()
+    m = re.search(r"([A-Z][a-z]+)\s+(\d{1,2})(?:\s*[–-]\s*(?:([A-Z][a-z]+)\s+)?(\d{1,2}))?,\s*(\d{4})",
+                  subject or "")
+    if not m:
+        return None
+    month = m.group(3) or m.group(1)
+    day = m.group(4) or m.group(2)
+    try:
+        return datetime.strptime(f"{month} {day} {m.group(5)}", "%B %d %Y").date()
+    except ValueError:
+        return None
+
+
+def send_follow_ups(service, mode, allowlist=None, today=None):
+    """One "see you next time" email per confirmed visit, FOLLOW_UP_DELAY_DAYS
+    after the guest's last night. Fixed Message-IDs mean never twice."""
+    today = today or datetime.now(VEGAS).date()
+    for conf in gmail_client.recent_confirmations(service):
+        last_night = last_night_from_subject(conf["subject"])
+        address = re.sub(r".*<([^>]+)>.*", r"\1", conf["to"]).strip().lower()
+        if not last_night or not address or today < last_night + timedelta(days=FOLLOW_UP_DELAY_DAYS):
+            continue
+        if allowlist is not None and address not in allowlist:
+            continue
+        if gmail_client.has_opted_out(service, address):
+            log.info("Follow-up skipped for %s: they asked to stop", address)
+            continue
+        subject, body = follow_up_email(conf["first_name"])
+        if mode == "dry-run":
+            log.info("[dry run] would send follow-up to %s (last night %s)", address, last_night)
+            continue
+        if gmail_client.send_once(service, f"amy-followup-{conf['id']}@playmakerentertainment.com",
+                                  address, subject, body, sender=rules.INTAKE_EMAIL):
+            log.info("Follow-up sent to %s (last night %s)", address, last_night)
+
+
 def run_once(service, mode, labels, allowlist=None, start_after=None):
     dry_run = mode == "dry-run"
     pending = gmail_client.list_pending_requests(service, start_after=start_after)
@@ -375,9 +421,13 @@ def main():
             labels[name] = gmail_client.get_or_create_label(service, name)
 
     poll_seconds = max(int(os.environ.get("AMY_POLL_SECONDS", "120")), 30)
+    last_follow_up_check = 0.0
     while True:
         try:
             run_once(service, mode, labels, allowlist, start_after)
+            if time.time() - last_follow_up_check >= 3600:  # follow-ups: hourly is plenty
+                send_follow_ups(service, mode, allowlist)
+                last_follow_up_check = time.time()
         except Exception:
             if not args.loop:
                 raise

@@ -613,3 +613,67 @@ class RealPoshOrderTests(unittest.TestCase):
         raw = parsed(FIXTURE.replace("2026-10-30", "2026-09-01").replace("2026-10-31", "2026-09-02"))
         result = main.process_one_request(raw, dry_run=True, today=TODAY)
         self.assertEqual(result["status"], "action_needed")
+
+
+class FollowUpTests(unittest.TestCase):
+    """One "see you next time" email, 7 days after the guest's last night."""
+
+    CONFS = [
+        {"id": "c1", "to": "Mia <mia@example.com>", "first_name": "Mia",
+         "subject": "Playmaker Guest List Confirmation — 2026-09-28"},
+        {"id": "c2", "to": "tom@example.com", "first_name": "Tom",
+         "subject": "Playmaker Guest List Confirmation — 2026-09-28 to 2026-10-02"},
+    ]
+
+    def run_on(self, day, mode="live", allowlist=None, opted_out=(), sent_ids=()):
+        from datetime import date
+        sent, done = [], set(sent_ids)
+
+        def send_once(service, message_id, to, subject, body, sender, cc=None):
+            if message_id in done:
+                return False
+            done.add(message_id)
+            sent.append((to, subject, body))
+            return True
+
+        with mock.patch.object(gmail_client, "recent_confirmations", return_value=self.CONFS), \
+             mock.patch.object(gmail_client, "has_opted_out", side_effect=lambda s, a: a in opted_out), \
+             mock.patch.object(gmail_client, "send_once", side_effect=send_once):
+            main.send_follow_ups(None, mode, allowlist, today=date(2026, 10, day))
+        return sent
+
+    def test_sent_7_days_after_the_last_night_only(self):
+        self.assertEqual(self.run_on(4), [])                              # 6 days after Sep 28
+        sent = self.run_on(5)                                             # 7 days after Sep 28
+        self.assertEqual([s[0] for s in sent], ["mia@example.com"])       # Tom's last night is Oct 2
+        self.assertEqual([s[0] for s in self.run_on(9)], ["mia@example.com", "tom@example.com"])
+
+    def test_wording(self):
+        to, subject, body = self.run_on(5)[0]
+        self.assertTrue(body.startswith("Hi Mia,\n\nVegas isn’t goodbye — it’s see you next time. 🎲"))
+        self.assertIn("Amy  | Playmaker Entertainment", body)
+        self.assertIn("📸 @playmaker.entertainment", body)
+        self.assertIn("Reply STOP", body)
+
+    def test_never_twice_and_respects_stop(self):
+        self.assertEqual(self.run_on(5, sent_ids={"amy-followup-c1@playmakerentertainment.com"}), [])
+        self.assertEqual(self.run_on(9, opted_out={"mia@example.com"})[0][0], "tom@example.com")
+
+    def test_dry_run_and_test_mode(self):
+        self.assertEqual(self.run_on(9, mode="dry-run"), [])
+        self.assertEqual([s[0] for s in self.run_on(9, mode="test", allowlist={"tom@example.com"})],
+                         ["tom@example.com"])
+
+    def test_last_night_from_subject(self):
+        from datetime import date
+        self.assertEqual(main.last_night_from_subject("Playmaker Guest List Confirmation — 2026-09-28 to 2026-09-30"),
+                         date(2026, 9, 30))
+        self.assertIsNone(main.last_night_from_subject("Something else"))
+        # Subjects from the previous process (real examples).
+        self.assertEqual(main.last_night_from_subject("Your Playmaker Guest List Confirmation — September 26, 2026"),
+                         date(2026, 9, 26))
+        self.assertEqual(main.last_night_from_subject("Playmaker Guest List Confirmation — September 25–29, 2026"),
+                         date(2026, 9, 29))
+        self.assertEqual(main.last_night_from_subject("Guest List Confirmation — September 30–October 2, 2026"),
+                         date(2026, 10, 2))
+        self.assertIsNone(main.last_night_from_subject("Playmaker Guest List Confirmation"))

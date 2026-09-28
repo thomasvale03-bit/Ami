@@ -155,6 +155,34 @@ def posh_order_already_handled(service, order_number, exclude_message_id):
     return False
 
 
+CONFIRMATION_SUBJECT = "Playmaker Guest List Confirmation"
+
+
+def recent_confirmations(service, days=45):
+    """Confirmation emails Amy sent recently: [{"id", "to", "subject", "first_name"}]."""
+    resp = service.users().messages().list(
+        userId="me", q=f'in:sent subject:"{CONFIRMATION_SUBJECT}" newer_than:{days}d', maxResults=200,
+    ).execute()
+    out = []
+    for ref in resp.get("messages", []):
+        msg = service.users().messages().get(
+            userId="me", id=ref["id"], format="metadata", metadataHeaders=["To", "Subject"],
+        ).execute()
+        headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
+        first = re.match(r"\s*Hi ([^,\s]+),", msg.get("snippet", ""))
+        out.append({"id": ref["id"], "to": headers.get("to", ""), "subject": headers.get("subject", ""),
+                    "first_name": first.group(1) if first else ""})
+    return out
+
+
+def has_opted_out(service, address):
+    """True if this guest ever replied asking to stop or unsubscribe."""
+    resp = service.users().messages().list(
+        userId="me", q=f"from:{address} (stop OR unsubscribe) -in:sent", maxResults=1,
+    ).execute()
+    return bool(resp.get("messages"))
+
+
 def get_subject(msg):
     for header in msg.get("payload", {}).get("headers", []):
         if header.get("name", "").lower() == "subject":
