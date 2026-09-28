@@ -40,6 +40,13 @@ class ParseTests(unittest.TestCase):
         self.assertIsNone(raw["promoter"])
         self.assertNotIn("_missing_required", raw)
 
+    def test_windows_line_endings(self):
+        # Real notifications arrive with CRLF line endings.
+        raw = parsed(FIXTURE.replace("\n", "\r\n"))
+        self.assertEqual((raw["start_date"], raw["end_date"]), ("2026-10-30", "2026-10-31"))
+        self.assertEqual(raw["email"], "jane.sample@example.com")
+        self.assertEqual(normalize_guest_request(raw)["female_count"], 2)
+
     def test_header_email_is_not_used_as_form_data(self):
         text = FIXTURE.replace("Email: jane.sample@example.com\n\nSubmitted", "Email: header@example.com\n\nSubmitted")
         self.assertEqual(parsed(text)["email"], "jane.sample@example.com")

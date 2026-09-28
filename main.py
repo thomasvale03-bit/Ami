@@ -222,9 +222,7 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
 
 def run_once(service, mode, labels, allowlist=None, start_after=None):
     dry_run = mode == "dry-run"
-    # Test mode may pick up allowlisted requests from before go-live.
-    pending = gmail_client.list_pending_requests(
-        service, start_after=None if mode == "test" else start_after)
+    pending = gmail_client.list_pending_requests(service, start_after=start_after)
     log.info("Found %d pending guest-list request(s) [%s]", len(pending), mode)
 
     for msg_ref in reversed(pending):  # oldest first
@@ -281,9 +279,11 @@ def main():
 
     # Unix seconds; requests received earlier were handled by the previous
     # process and must never be booked again. Required for live mode.
+    # Required for test and live: requests the previous process may already
+    # have booked (including earlier test submissions) are never re-booked.
     start_after = os.environ.get("AMY_START_AFTER")
-    if mode == "live" and not start_after:
-        sys.exit("Live mode needs AMY_START_AFTER (Unix time of go-live) so old requests are not re-booked.")
+    if mode != "dry-run" and not start_after:
+        sys.exit(f"{mode} mode needs AMY_START_AFTER (Unix time to start from) so old requests are not re-booked.")
 
     service = gmail_client.get_service()
     account = gmail_client.get_account_email(service)

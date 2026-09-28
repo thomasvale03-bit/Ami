@@ -63,11 +63,14 @@ than valeconsultingaz@gmail.com.
 `AMY_START_AFTER` (Unix time of go-live) is set, so requests the previous
 process already handled are never booked again.
 
+Amy uses her own Gmail labels (`Amy/...`) because the previous process
+already uses `Playmaker/...` labels in the same inbox.
+
 What `--live` does per request:
-- Labels it `Playmaker/Processing`, books each night, then emails the guest
+- Labels it `Amy/Processing`, books each night, then emails the guest
   one confirmation from "Playmaker Entertainment" with
   team@playmakerentertainment.com CC'd.
-- Labels it `Playmaker/Processed`, plus `Playmaker/Exception` if anything
+- Labels it `Amy/Processed`, plus `Amy/Exception` if anything
   needs a person — and only then emails the team a "needs attention" note.
 - Emails use fixed Message-IDs, so a restart never sends one twice. A request
   that errors midway is labeled Exception and never retried automatically.
@@ -83,7 +86,7 @@ Set these in the Railway service's Variables (see `.env.example`):
 | `AMY_MODE` | `dry-run` first, then `test`, then `live` |
 | `TEST_GUEST_EMAIL_ALLOWLIST` | `valeconsultingaz@gmail.com` (test mode books only for these) |
 | `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN` | from the Google OAuth setup |
-| `AMY_START_AFTER` | Unix time of go-live; required for `live` |
+| `AMY_START_AFTER` | Unix time to start from; required for `test` and `live` (older requests are never booked) |
 
 Keep exactly one instance running. Rollout: `dry-run` (watch the logs) →
 `test` (one real booking for the owner's own request, confirm it appears in

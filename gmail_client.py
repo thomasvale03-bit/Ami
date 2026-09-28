@@ -20,16 +20,19 @@ from config.rules import normalize_venue_name
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
+# Amy's own labels. The previous guest-list process already uses
+# Playmaker/Processed, Playmaker/Exception etc. in this inbox, so Amy never
+# reads or writes those; only her own labels mark a request as handled.
+PROCESSING_LABEL = "Amy/Processing"
+PROCESSED_LABEL = "Amy/Processed"
+EXCEPTION_LABEL = "Amy/Exception"
+
 # Not limited to unread mail: the team often opens requests on a phone
-# before Amy runs. The Processed/Exception labels mark a request as handled.
+# before Amy runs.
 SEARCH_QUERY = (
     '(subject:"New guest list request submission" OR subject:"Guest List Request") '
-    'newer_than:30d -in:trash -label:Playmaker/Processed -label:Playmaker/Exception'
+    f'newer_than:30d -in:trash -label:{PROCESSED_LABEL} -label:{EXCEPTION_LABEL}'
 )
-
-PROCESSING_LABEL = "Playmaker/Processing"
-PROCESSED_LABEL = "Playmaker/Processed"
-EXCEPTION_LABEL = "Playmaker/Exception"
 
 # Lowercased label -> internal field name. Older emails labeled the counts
 # "Female guests (free before 1am)", so counts are matched by prefix below.
@@ -144,6 +147,9 @@ def _form_block(body_text):
 
 def parse_request(message_id, body_text):
     fields = {"source_message_id": message_id}
+    # Real notifications use CRLF line endings; a stray "\r" would otherwise
+    # end up inside every value (e.g. dates).
+    body_text = body_text.replace("\r\n", "\n").replace("\r", "\n")
 
     for label, value in LINE_RE.findall(_form_block(body_text)):
         key = label.lower().strip()
