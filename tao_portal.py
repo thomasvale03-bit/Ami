@@ -65,6 +65,24 @@ TERMS_TEXT = re.compile(r"terms|conditions|privacy|21\+|\bage\b", re.I)
 PARENT_TEXT_JS = "n => (n.parentElement ? n.parentElement.innerText : '')"
 
 
+# TAO order confirmation pages live at /orders/confirmation/<order id>
+# (order IDs are UUIDs, e.g. 6aba738b-b670-47ec-b34b-54e80a1e60a9).
+UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+CONFIRMATION_URL = re.compile(r"/orders/confirmation/(" + UUID + r")", re.I)
+
+
+def order_id_from(url, body):
+    """The TAO order ID from the success page address, else from its text."""
+    m = CONFIRMATION_URL.search(url or "")
+    if m:
+        return m.group(1)
+    m = re.search(r"order\s*(?:id|number|#)\s*[:#]?\s*(" + UUID + r"|[A-Z0-9][A-Z0-9-]{5,})", body or "", re.I)
+    if m:
+        return m.group(1)
+    m = re.search(UUID, body or "", re.I)
+    return m.group() if m else None
+
+
 class SubmissionUncertain(Exception):
     """The final submit click happened but success could not be confirmed."""
 
@@ -427,18 +445,24 @@ def submit_registration(listing, guest, rehearse=False):
             button.click()
             # From here on the order may exist: never report a plain failure.
             try:
+                # TAO redirects to /orders/confirmation/<order id> once the
+                # order exists; give it time, then read whatever page we're on.
+                try:
+                    page.wait_for_url(CONFIRMATION_URL, timeout=30_000)
+                except Exception:
+                    pass
                 page.wait_for_load_state("domcontentloaded")
                 page.wait_for_timeout(1500)
                 body = page.locator("body").inner_text()
             except Exception as exc:
                 raise SubmissionUncertain(f"Page failed after submit: {exc}") from exc
-            if not (SUCCESS_TEXT.search(body) or re.search(r"confirmation|ordered=true", page.url, re.I)):
-                raise SubmissionUncertain("TAO did not show a success page after submit")
-            m = re.search(r"order\s*(?:id|number|#)\s*[:#]?\s*([A-Z0-9-]{4,})", body, re.I)
-            if not m:
-                raise SubmissionUncertain("TAO success page had no order ID")
+            order_id = order_id_from(page.url, body)
+            if not order_id:
+                if not (SUCCESS_TEXT.search(body) or re.search(r"confirmation|ordered=true", page.url, re.I)):
+                    raise SubmissionUncertain("TAO did not show a success page after submit")
+                raise SubmissionUncertain(f"TAO success page had no order ID ({page.url})")
             return {
-                "confirmation_id": m.group(1),
+                "confirmation_id": order_id,
                 "verified": True,
                 "confirmation_url": page.url,
                 "event": listing.get("event"),

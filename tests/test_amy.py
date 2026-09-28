@@ -353,3 +353,23 @@ class TestModeTests(unittest.TestCase):
         self.assertEqual(outcome, gmail_client.PROCESSED_LABEL)
         self.assertTrue(submit.called)
         self.assertEqual(fake.sent[0]["to"], "valeconsultingaz@gmail.com")
+
+
+class OrderIdTests(unittest.TestCase):
+    """TAO's real order page: https://tickets.taogroup.com/orders/confirmation/<uuid>."""
+
+    def test_from_confirmation_url(self):
+        import tao_portal as t
+        url = "https://tickets.taogroup.com/orders/confirmation/6aba738b-b670-47ec-b34b-54e80a1e60a9"
+        self.assertEqual(t.order_id_from(url, "Thank you for your order!"), "6aba738b-b670-47ec-b34b-54e80a1e60a9")
+
+    def test_from_page_text(self):
+        import tao_portal as t
+        self.assertEqual(t.order_id_from("https://tickets.taogroup.com/x",
+                                         "Order Details\nOrder ID\n6aba738b-b670-47ec-b34b-54e80a1e60a9\nView"),
+                         "6aba738b-b670-47ec-b34b-54e80a1e60a9")
+        self.assertEqual(t.order_id_from("", "Order Number: TD-778812"), "TD-778812")
+
+    def test_no_id_found(self):
+        import tao_portal as t
+        self.assertIsNone(t.order_id_from("https://tickets.taogroup.com/e/x/tickets", "Something went wrong"))
