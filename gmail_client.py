@@ -193,6 +193,9 @@ def get_subject(msg):
     return ""
 
 
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
 def _form_block(body_text):
     """Only parse the submission block, not the 'From:/Email:' header GoDaddy
     prepends (that header is the sender line, not form data)."""
@@ -219,6 +222,18 @@ def parse_request(message_id, body_text):
             fields["male_count"] = value
         elif key in LABEL_TO_FIELD:
             fields.setdefault(LABEL_TO_FIELD[key], value)  # first occurrence wins
+
+    # Some deliveries run fields together and add link text, e.g.
+    # "Email: mailto:guest@icloud.com Phone: 7757221489". Keep only the address.
+    raw_email = fields.get("email", "")
+    found = EMAIL_RE.search(raw_email)
+    if found:
+        fields["email"] = found.group(0)
+        phone = re.search(r"Phone:\s*([+\d][\d\s().-]{6,}\d)", raw_email, re.I)
+        if phone and not fields.get("phone"):
+            fields["phone"] = phone.group(1).strip()
+    elif raw_email:
+        fields.pop("email")  # not an address: treat as missing, never book it
 
     if "name" in fields:
         parts = fields["name"].split(" ", 1)

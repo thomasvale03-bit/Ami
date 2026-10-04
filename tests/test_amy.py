@@ -52,6 +52,18 @@ class ParseTests(unittest.TestCase):
         text = FIXTURE.replace("Email: jane.sample@example.com\n\nSubmitted", "Email: header@example.com\n\nSubmitted")
         self.assertEqual(parsed(text)["email"], "jane.sample@example.com")
 
+    def test_email_run_together_with_phone(self):
+        # Seen Oct 3 2026: "Email: mailto:guest@icloud.com Phone: 7757221489"
+        text = FIXTURE.replace("Email: jane.sample@example.com\nPhone: 6025550100\n",
+                               "Email: mailto:jane.sample@example.com Phone: 6025550100\n")
+        raw = parsed(text)
+        self.assertEqual(raw["email"], "jane.sample@example.com")
+        self.assertEqual(raw["phone"], "6025550100")
+
+    def test_garbage_email_counts_as_missing(self):
+        raw = parsed(FIXTURE.replace("Email: jane.sample@example.com\nPhone", "Email: not an address\nPhone"))
+        self.assertIn("email", raw["_missing_required"])
+
     def test_missing_consent_needs_action(self):
         with self.assertRaises(ActionNeeded):
             normalize_guest_request(parsed(FIXTURE.replace("Authorization accepted: YES", "Authorization accepted: NO")))
