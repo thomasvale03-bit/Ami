@@ -159,7 +159,8 @@ CONFIRMATION_SUBJECT = "Playmaker Guest List Confirmation"
 
 
 def recent_confirmations(service, days=45):
-    """Confirmation emails Amy sent recently: [{"id", "to", "subject", "first_name"}]."""
+    """Confirmation emails Amy sent recently:
+    [{"id", "to", "subject", "first_name", "venues"}] (venues as listed in the email)."""
     resp = service.users().messages().list(
         userId="me", q=f'in:sent subject:"{CONFIRMATION_SUBJECT}" newer_than:{days}d', maxResults=200,
     ).execute()
@@ -170,8 +171,10 @@ def recent_confirmations(service, days=45):
         ).execute()
         headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
         first = re.match(r"\s*Hi ([^,\s]+),", msg.get("snippet", ""))
+        body = get_plain_text_body(service, ref["id"]).replace("\r\n", "\n")
+        venues = [v.split(":")[0].strip() for v in re.findall(r" — (.+)\nOrder ID:", body)]
         out.append({"id": ref["id"], "to": headers.get("to", ""), "subject": headers.get("subject", ""),
-                    "first_name": first.group(1) if first else ""})
+                    "first_name": first.group(1) if first else "", "venues": venues})
     return out
 
 

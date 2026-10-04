@@ -322,7 +322,8 @@ def last_night_from_subject(subject):
 
 
 # Matches every follow-up wording used so far.
-FOLLOW_UP_SEARCH = '(subject:"Until next time" OR subject:"See you next time in Vegas")'
+FOLLOW_UP_SEARCH = ('(subject:"Until next time" OR subject:"See you next time in Vegas" '
+                    'OR subject:"Hope you had fun in Vegas")')
 
 
 def send_follow_ups(service, mode, allowlist=None, today=None):
@@ -339,7 +340,7 @@ def send_follow_ups(service, mode, allowlist=None, today=None):
         if gmail_client.has_opted_out(service, address):
             log.info("Follow-up skipped for %s: they asked to stop", address)
             continue
-        subject, body = follow_up_email(conf["first_name"])
+        subject, body = follow_up_email(conf["first_name"], conf.get("venues", []))
         if mode == "dry-run":
             log.info("[dry run] would send follow-up to %s (last night %s)", address, last_night)
             continue

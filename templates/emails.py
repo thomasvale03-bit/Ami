@@ -99,21 +99,30 @@ def internal_action_needed(guest_name, guest_email, venue, date, issue, required
 FOLLOW_UP_DELAY_DAYS = 7
 
 
-def follow_up_email(first_name):
-    """Sent once, FOLLOW_UP_DELAY_DAYS after a confirmed guest's last night,
-    in the playmakerentertainment.com voice (premium, host-led, concise)."""
+def _clubs(venues):
+    """ "the nightclub", "the nightclubs and dayclub", ... from the venues booked."""
+    from config import rules
+    day = sum(1 for v in venues if v in rules.DAYCLUB_PRIORITY or "dayclub" in v.lower())
+    night = len(venues) - day
+    kinds = [f"{w}{'s' if n > 1 else ''}" for n, w in ((night, "nightclub"), (day, "dayclub")) if n]
+    return "the " + " and ".join(kinds) if kinds else "Vegas"
+
+
+def follow_up_email(first_name, venues=()):
+    """Sent once, FOLLOW_UP_DELAY_DAYS after a confirmed guest's last night.
+    Owner's wording (Oct 4 2026): thank them, ask for referrals, point to
+    the website and Instagram. No phone number."""
     greeting = f"Hi {first_name}," if first_name else "Hi,"
-    subject = f"Until next time, {first_name}" if first_name else "Until next time"
+    subject = f"Hope you had fun in Vegas, {first_name}" if first_name else "Hope you had fun in Vegas"
     body = (
         f"{greeting}\n\n"
-        "Hope Vegas treated you right.\n\n"
-        "Whenever you’re back, your night is handled — guest lists, VIP tables, tickets, "
-        "birthdays and bachelor/bachelorette weekends, in Las Vegas and Scottsdale. "
-        "Real access, not just a name on a list.\n\n"
-        "Friends heading to Vegas? Send them our way and we’ll take care of them.\n\n"
-        "Text your host: 702-816-8948\n"
-        "PlaymakerEntertainment.com  ·  @Playmaker.Entertainment\n\n"
-        "Amy | Playmaker Entertainment\n\n"
-        "Reply STOP to opt out of these emails."
+        f"Hope you had fun at {_clubs(venues)}!\n\n"
+        "If you have any friends or family coming into town, send them to "
+        "PlaymakerEntertainment.com. We’ll make sure they have a great time.\n\n"
+        "Have a question, or want to stay up to date with us? "
+        "Follow us on Instagram @Playmaker.Entertainment.\n\n"
+        "We can’t wait to connect with you again!\n\n"
+        "Playmaker Entertainment\n\n"
+        "If you’d rather not get emails like this, just reply STOP."
     )
     return subject, body

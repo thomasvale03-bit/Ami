@@ -621,7 +621,7 @@ class FollowUpTests(unittest.TestCase):
 
     CONFS = [
         {"id": "c1", "to": "Mia <mia@example.com>", "first_name": "Mia",
-         "subject": "Playmaker Guest List Confirmation — 2026-09-28"},
+         "subject": "Playmaker Guest List Confirmation — 2026-09-28", "venues": ["TAO"]},
         {"id": "c2", "to": "tom@example.com", "first_name": "Tom",
          "subject": "Playmaker Guest List Confirmation — 2026-09-28 to 2026-10-02"},
     ]
@@ -651,12 +651,21 @@ class FollowUpTests(unittest.TestCase):
 
     def test_wording(self):
         to, subject, body = self.run_on(5)[0]
-        self.assertEqual(subject, "Until next time, Mia")
-        self.assertTrue(body.startswith("Hi Mia,\n\nHope Vegas treated you right."))
-        self.assertIn("Real access, not just a name on a list.", body)
-        self.assertIn("Text your host: 702-816-8948", body)
-        self.assertIn("Amy | Playmaker Entertainment", body)
-        self.assertIn("Reply STOP", body)
+        self.assertEqual(subject, "Hope you had fun in Vegas, Mia")
+        self.assertTrue(body.startswith("Hi Mia,\n\nHope you had fun at the nightclub!"))
+        self.assertIn("friends or family coming into town", body)
+        self.assertIn("PlaymakerEntertainment.com", body)
+        self.assertIn("@Playmaker.Entertainment", body)
+        self.assertNotIn("702", body)
+        self.assertIn("reply STOP", body)
+
+    def test_mentions_dayclubs_only_when_they_went(self):
+        from templates.emails import follow_up_email
+        line = lambda v: follow_up_email("Mia", v)[1].split("\n\n")[1]
+        self.assertEqual(line(["TAO"]), "Hope you had fun at the nightclub!")
+        self.assertEqual(line(["JEWEL", "Hakkasan"]), "Hope you had fun at the nightclubs!")
+        self.assertEqual(line(["Marquee", "TAO Beach Dayclub"]), "Hope you had fun at the nightclub and dayclub!")
+        self.assertEqual(line(["Marquee Dayclub"]), "Hope you had fun at the dayclub!")
 
     def test_never_twice_and_respects_stop(self):
         self.assertEqual(self.run_on(5, sent_ids={"amy-followup-c1@playmakerentertainment.com"}), [])
