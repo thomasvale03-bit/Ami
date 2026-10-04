@@ -275,17 +275,25 @@ def build_message(to, subject, body, sender, cc=None, message_id=None):
     return {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")}
 
 
-def already_sent(service, message_id):
+def already_sent(service, query):
+    """True if the Sent folder has a message matching this Gmail search.
+
+    (Searching by our own Message-ID header doesn't work: Gmail replaces it
+    on messages sent through the API, which let the 2026-10-03 follow-up go
+    out every hour. Each caller passes a search on what the email visibly
+    contains instead.)"""
     resp = service.users().messages().list(
-        userId="me", q=f"in:sent rfc822msgid:{message_id}", maxResults=1
+        userId="me", q=f"in:sent {query}", maxResults=1
     ).execute()
     return bool(resp.get("messages"))
 
 
-def send_once(service, message_id, to, subject, body, sender, cc=None):
-    """Send unless a message with this Message-ID was already sent, so a
+def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None):
+    """Send unless the Sent folder already has a matching email (dedupe_query,
+    a Gmail search; default: same recipient and exact subject), so a
     restarted run never emails the same person twice. Returns True if sent."""
-    if already_sent(service, message_id):
+    query = dedupe_query or f'to:{to} subject:"{subject}"'
+    if already_sent(service, query):
         return False
     service.users().messages().send(
         userId="me", body=build_message(to, subject, body, sender, cc, message_id)

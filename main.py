@@ -189,6 +189,7 @@ def team_alert(service, message_id, raw, problems, dry_run):
     gmail_client.send_once(
         service, f"amy-alert-{message_id}@playmakerentertainment.com",
         rules.PLAYMAKER_EMAIL, subject, body, sender=rules.INTAKE_EMAIL,
+        dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Gmail message ID: {message_id}"',
     )
 
 
@@ -320,6 +321,10 @@ def last_night_from_subject(subject):
         return None
 
 
+# Matches every follow-up wording used so far.
+FOLLOW_UP_SEARCH = '(subject:"Until next time" OR subject:"See you next time in Vegas")'
+
+
 def send_follow_ups(service, mode, allowlist=None, today=None):
     """One "see you next time" email per confirmed visit, FOLLOW_UP_DELAY_DAYS
     after the guest's last night. Fixed Message-IDs mean never twice."""
@@ -338,8 +343,10 @@ def send_follow_ups(service, mode, allowlist=None, today=None):
         if mode == "dry-run":
             log.info("[dry run] would send follow-up to %s (last night %s)", address, last_night)
             continue
+        # Any follow-up to this guest in the last 60 days counts: never again.
         if gmail_client.send_once(service, f"amy-followup-{conf['id']}@playmakerentertainment.com",
-                                  address, subject, body, sender=rules.INTAKE_EMAIL):
+                                  address, subject, body, sender=rules.INTAKE_EMAIL,
+                                  dedupe_query=f'to:{address} {FOLLOW_UP_SEARCH} newer_than:60d'):
             log.info("Follow-up sent to %s (last night %s)", address, last_night)
 
 

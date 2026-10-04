@@ -1,6 +1,7 @@
 import base64
 import email
 import pathlib
+import re
 import unittest
 from datetime import date
 from unittest import mock
@@ -109,7 +110,7 @@ def fake_module(fake):
     def get_plain_text_body(service, message_id):
         return {}, fake.body
 
-    def send_once(service, message_id, to, subject, body, sender, cc=None):
+    def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None):
         if message_id in fake.sent_ids:
             return False
         fake.sent_ids.add(message_id)
@@ -629,7 +630,7 @@ class FollowUpTests(unittest.TestCase):
         from datetime import date
         sent, done = [], set(sent_ids)
 
-        def send_once(service, message_id, to, subject, body, sender, cc=None):
+        def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None):
             if message_id in done:
                 return False
             done.add(message_id)
@@ -679,3 +680,63 @@ class FollowUpTests(unittest.TestCase):
         self.assertEqual(main.last_night_from_subject("Guest List Confirmation — September 30–October 2, 2026"),
                          date(2026, 10, 2))
         self.assertIsNone(main.last_night_from_subject("Playmaker Guest List Confirmation"))
+
+
+class FakeSentFolder:
+    """Mimics the Gmail API as it really behaves: our Message-ID header is
+    NOT kept, so only visible content (recipient, subject, body) can be
+    searched. This is what let the follow-up repeat every hour."""
+
+    def __init__(self):
+        self.sent, self._q = [], None
+
+    def users(self): return self
+    def messages(self): return self
+
+    def send(self, userId, body):
+        import email as email_lib
+        import email.policy
+        msg = email_lib.message_from_bytes(base64.urlsafe_b64decode(body["raw"]), policy=email.policy.default)
+        self.sent.append({"to": msg["To"], "subject": str(msg["Subject"]), "body": msg.get_content()})
+        self._q = None
+        return self
+
+    def list(self, userId, q, maxResults):
+        self._q = q
+        return self
+
+    def execute(self):
+        if self._q is None:
+            return {}
+        q = self._q
+        if "rfc822msgid:" in q:  # Gmail rewrote our Message-ID: never matches
+            return {}
+        def matches(m):
+            to = re.search(r"to:(\S+)", q)
+            subj = re.findall(r'subject:"([^"]+)"', q)
+            phrases = re.findall(r'"([^"]+)"', re.sub(r'subject:"[^"]+"', "", q))
+            return ((not to or to.group(1) in m["to"])
+                    and (not subj or any(s in m["subject"] for s in subj))
+                    and all(p in m["body"] for p in phrases))
+        return {"messages": [{"id": str(i)} for i, m in enumerate(self.sent) if matches(m)]}
+
+
+class NeverTwiceTests(unittest.TestCase):
+    def test_follow_up_is_sent_once_even_though_gmail_drops_our_message_id(self):
+        api = FakeSentFolder()
+        from datetime import date
+        confs = [{"id": "c1", "to": "mia@example.com", "first_name": "Mia",
+                  "subject": "Playmaker Guest List Confirmation — 2026-09-28"}]
+        with mock.patch.object(gmail_client, "recent_confirmations", return_value=confs), \
+             mock.patch.object(gmail_client, "has_opted_out", return_value=False):
+            for _ in range(5):  # five hourly checks
+                main.send_follow_ups(api, "live", today=date(2026, 10, 6))
+        self.assertEqual(len(api.sent), 1)
+
+    def test_customer_confirmation_and_team_alert_are_sent_once(self):
+        api = FakeSentFolder()
+        for _ in range(3):
+            gmail_client.send_once(api, "x@y", "guest@example.com", "Playmaker Guest List Confirmation — 2026-10-05",
+                                   "Hi", sender="valeconsultingaz@gmail.com")
+            main.team_alert(api, "msg-42", {"name": "A"}, ["problem"], dry_run=False)
+        self.assertEqual(len(api.sent), 2)
