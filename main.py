@@ -151,11 +151,18 @@ def process_one_request(raw, dry_run=True, today=None, now=None):
 
     output = {"request": request, "registrations": registrations, "exceptions": exceptions}
 
-    if registrations:
+    drais_nights = [d.isoformat() for d in date_range(request["start_date"], request["end_date"])
+                    if d >= today] if request.get("drais") else []
+    if registrations or drais_nights:
         date_label = request["start_date"] if request["start_date"] == request["end_date"] \
             else f"{request['start_date']} to {request['end_date']}"
         subject, body = consolidated_confirmation(
-            request["first_name"], request["email"], date_label, registrations
+            request["first_name"], request["email"], date_label, registrations,
+            drais=drais_nights and {
+                "name": f"{request['first_name']} {request['last_name']}".strip(),
+                "female_count": request["female_count"], "male_count": request["male_count"],
+                "nights": drais_nights,
+            },
         )
         output["confirmation_email"] = {"subject": subject, "body": body}
         output["internal_log"] = internal_processed_record(

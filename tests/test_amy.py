@@ -628,6 +628,40 @@ class RealPoshOrderTests(unittest.TestCase):
         self.assertEqual(result["status"], "action_needed")
 
 
+class DraisTests(unittest.TestCase):
+    """Drai's After Hours has no portal: the confirmation is the guest's pass."""
+
+    def run_request(self, venues):
+        raw = parsed(FIXTURE.replace("Requested venues: Omnia Nightclub", f"Requested venues: {venues}"))
+        return main.process_one_request(raw, dry_run=True, today=TODAY)
+
+    def test_drais_text_added_and_nightclub_still_booked(self):
+        result = self.run_request("Drai's Nightclub, Hakkasan Nightclub")
+        body = result["confirmation_email"]["body"]
+        self.assertTrue(result["registrations"])
+        self.assertNotIn("Drai's", [r["venue"] for r in result["registrations"]])
+        self.assertIn("Order ID:", body)
+        self.assertIn("show this email at the door", body)
+        self.assertIn("Playmaker Entertainment’s\nGUESTLIST", body)
+        self.assertIn("Name: Jane Sample\nParty: 2 female guests and 1 male guest", body)
+        self.assertIn("Nights: Friday, October 30, Saturday, October 31", body)
+        self.assertIn("Drai’s After Hours @ Vanderpump Hotel, opens at 1 AM", body)
+        self.assertIn("@playmaker.entertainment", body)
+        self.assertFalse(result.get("action_needed_records"))
+
+    def test_no_drais_text_unless_requested(self):
+        body = self.run_request("Hakkasan Nightclub")["confirmation_email"]["body"]
+        self.assertNotIn("Drai", body)
+
+    def test_drais_only_email_when_no_tao_booking(self):
+        from templates.emails import consolidated_confirmation
+        _, body = consolidated_confirmation("Jane", "j@x.com", "2026-10-30", [], drais={
+            "name": "Jane Sample", "female_count": 2, "male_count": 0, "nights": ["2026-10-30"]})
+        self.assertNotIn("TAO", body)
+        self.assertIn("Night: Friday, October 30", body)
+        self.assertIn("21+", body)
+
+
 class FollowUpTests(unittest.TestCase):
     """One "see you next time" email, 7 days after the guest's last night."""
 

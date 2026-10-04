@@ -49,6 +49,8 @@ def normalize_guest_request(raw):
         )
 
     requested_venues = [rules.normalize_venue_name(v) for v in (raw.get("venues") or [])]
+    drais = any(rules.is_drais(v) for v in requested_venues)
+    requested_venues = [v for v in requested_venues if not rules.is_drais(v)]
     for v in requested_venues:
         if v in rules.PAUSED_VENUES:
             raise ActionNeeded(
@@ -65,6 +67,7 @@ def normalize_guest_request(raw):
         "start_date": raw["start_date"],
         "end_date": raw["end_date"],
         "requested_venues": requested_venues,
+        "drais": drais,
         "female_count": female,
         "male_count": male,
         "promoter": raw.get("promoter"),

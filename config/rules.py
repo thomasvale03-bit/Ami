@@ -25,6 +25,12 @@ DAYLIFE_VENUES = [
 
 PAUSED_VENUES = {"Drai's"}  # never submit unless explicitly reactivated
 
+
+def is_drais(name):
+    """Drai's has no TAO portal: guests get the Drai's After Hours guest-list
+    text in their confirmation instead (owner, Oct 4 2026)."""
+    return "drai" in (name or "").lower().replace("’", "").replace("'", "")
+
 ALL_AUTHORIZED_VENUES = set(NIGHTCLUBS) | set(DAYLIFE_VENUES)
 
 # --- Intake -------------------------------------------------------------

@@ -43,27 +43,60 @@ def _event_line(r):
     return f"{when} — {what}\nOrder ID: {r['confirmation_id']}"
 
 
-def consolidated_confirmation(first_name, guest_email, date_label, registrations):
+def drais_guestlist(drais):
+    """Drai's After Hours has no portal: guests show this at the door
+    (owner's text, Oct 4 2026). drais: name, female_count, male_count, nights."""
+    nights = ", ".join(_long_date(n) for n in drais["nights"])
+    return (
+        "Playmaker Entertainment’s\n"
+        "GUESTLIST\n\n"
+        f"Name: {drais['name']}\n"
+        f"Party: {party_phrase(drais['female_count'], drais['male_count'])}\n"
+        f"Night{'s' if len(drais['nights']) > 1 else ''}: {nights}\n\n"
+        "Drai’s After Hours @ Vanderpump Hotel, opens at 1 AM\n"
+        "Free champagne for ladies 1–2 AM\n"
+        "Ladies free until 3 AM\n"
+        "Guys: even ratio (at least one girl per guy) free until 3 AM\n"
+        "Reduced cover after 3 AM\n\n"
+        "Tag me on IG so I can repost your story\n"
+        "@playmaker.entertainment"
+    )
+
+
+def consolidated_confirmation(first_name, guest_email, date_label, registrations, drais=None):
     """One email for all verified registrations of a request (owner-approved
     wording, Sept 28 2026). registrations: dicts with venue, event,
-    event_time (optional), date, female_count, male_count, confirmation_id."""
-    first = registrations[0]
-    body = (
-        f"Hi {first_name},\n\n"
-        f"Your Playmaker Entertainment guest-list registrations are confirmed for "
-        f"{party_phrase(first['female_count'], first['male_count'])}:\n\n"
-        + "\n\n".join(_event_line(r) for r in registrations) +
-        "\n\nPlease arrive early and bring a current, valid government-issued photo ID. "
-        "All guests must be 21+.\n\n"
-        "Your passes will be in the TAO ticket wallet:\n"
-        f"1. Download the TAO Group Hospitality Rewards app: {TAO_APP_URL}\n"
-        f"2. Sign up using the same email address used for the guest list: {guest_email}\n"
-        "3. Open the Ticket Wallet section to view your passes once they're issued.\n\n"
+    event_time (optional), date, female_count, male_count, confirmation_id.
+    drais: see drais_guestlist; added when the guest asked for Drai's."""
+    parts = [f"Hi {first_name},"]
+    if registrations:
+        first = registrations[0]
+        parts += [
+            f"Your Playmaker Entertainment guest-list registrations are confirmed for "
+            f"{party_phrase(first['female_count'], first['male_count'])}:",
+            "\n\n".join(_event_line(r) for r in registrations),
+            "Please arrive early and bring a current, valid government-issued photo ID. "
+            "All guests must be 21+.",
+            "Your passes will be in the TAO ticket wallet:\n"
+            f"1. Download the TAO Group Hospitality Rewards app: {TAO_APP_URL}\n"
+            f"2. Sign up using the same email address used for the guest list: {guest_email}\n"
+            "3. Open the Ticket Wallet section to view your passes once they're issued.",
+        ]
+    if drais:
+        parts += [
+            "You’re on the guest list for Drai’s After Hours. There’s no ticket for Drai’s: "
+            "show this email at the door to get in.",
+            drais_guestlist(drais),
+        ]
+        if not registrations:
+            parts.append("Please bring a current, valid government-issued photo ID. All guests must be 21+.")
+    parts += [
         "Guest-list admission is subject to each venue’s posted rules, arrival requirements, "
-        "dress code, and capacity.\n\n"
-        "Enjoy Las Vegas!\n\n"
-        "Playmaker Entertainment"
-    )
+        "dress code, and capacity.",
+        "Enjoy Las Vegas!",
+        "Playmaker Entertainment",
+    ]
+    body = "\n\n".join(parts)
     subject = f"Playmaker Guest List Confirmation — {date_label}"
     return subject, body
 
@@ -100,12 +133,12 @@ FOLLOW_UP_DELAY_DAYS = 7
 
 
 def _clubs(venues):
-    """ "the nightclub", "the nightclubs and dayclub", ... from the venues booked."""
+    """ "at the nightclub", "at the nightclubs and dayclub", ... from the venues booked."""
     from config import rules
     day = sum(1 for v in venues if v in rules.DAYCLUB_PRIORITY or "dayclub" in v.lower())
     night = len(venues) - day
     kinds = [f"{w}{'s' if n > 1 else ''}" for n, w in ((night, "nightclub"), (day, "dayclub")) if n]
-    return "the " + " and ".join(kinds) if kinds else "Vegas"
+    return "at the " + " and ".join(kinds) if kinds else "in Vegas"
 
 
 def follow_up_email(first_name, venues=()):
@@ -116,7 +149,7 @@ def follow_up_email(first_name, venues=()):
     subject = f"Hope you had fun in Vegas, {first_name}" if first_name else "Hope you had fun in Vegas"
     body = (
         f"{greeting}\n\n"
-        f"Hope you had fun at {_clubs(venues)}!\n\n"
+        f"Hope you had fun {_clubs(venues)}!\n\n"
         "If you have any friends or family coming into town, send them to "
         "PlaymakerEntertainment.com. We’ll make sure they have a great time.\n\n"
         "Have a question, or want to stay up to date with us? "
