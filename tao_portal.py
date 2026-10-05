@@ -28,12 +28,15 @@ READY stays False until the selectors have been checked against the live
 site (read-only) and one test registration for valeconsultingaz@gmail.com
 has succeeded. main.py refuses --live until then.
 """
+import logging
 import os
 import re
 from datetime import date
 from urllib.parse import urlparse
 
 from config.rules import TAO_AUTOMATION_AUTHORIZATION, TAO_PROMOTER_URL
+
+log = logging.getLogger("amy.tao")
 
 # Checked against the live site on 2026-09-28 (read-only listing plus a
 # full form rehearsal stopped before "Submit Order"). The first real
@@ -187,12 +190,36 @@ def _settle(page):
         page.wait_for_load_state("load")
 
 
+def _open_promoter_page(page):
+    """Open the promoter page and wait out TAO's intermittent security check.
+
+    The check is not shown every time. When it appears, we simply wait and
+    reload a few times (like refreshing the page) and let it clear on its
+    own. If it will not clear, raise TaoBlocked so the team is told to book
+    by hand. We never try to defeat or fake the check."""
+    waits = max(int(os.environ.get("TAO_CHALLENGE_RETRIES", "4")), 1)
+    pause = max(int(os.environ.get("TAO_CHALLENGE_WAIT_SECONDS", "12")), 3)
+    for attempt in range(waits):
+        if attempt == 0:
+            page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
+        _settle(page)
+        if not is_security_check(page.title(), page.locator("body").inner_text()):
+            return
+        log.info("TAO security check showing; waiting %ss then retrying (%d/%d)",
+                 pause, attempt + 1, waits)
+        page.wait_for_timeout(pause * 1000)
+        try:
+            page.reload(wait_until="domcontentloaded")
+        except Exception:
+            page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
+    raise TaoBlocked("TAO's website kept showing a security check (Cloudflare) and it did not clear")
+
+
 def _open_via_promoter(page, url):
     """Reach an event page the way a customer does, so Playmaker gets the
     promoter credit: open the promoter link first, then click that event's
     Pass link on it. Returns False if the link is no longer on the page."""
-    page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
-    _settle(page)
+    _open_promoter_page(page)
     hrefs = page.locator("a").evaluate_all("els => els.map(a => a.href)")
     if url not in hrefs:
         return False
@@ -265,10 +292,7 @@ def _load_catalog():
     with sync_playwright() as p:
         browser, page = _browser_page(p)
         try:
-            page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
-            _settle(page)
-            if is_security_check(page.title(), page.locator("body").inner_text()):
-                raise TaoBlocked("TAO's website showed a security check (Cloudflare) instead of the guest lists")
+            _open_promoter_page(page)
             links = page.locator("a").evaluate_all(
                 "els => els.map(a => ({text: (a.textContent || '').replace(/\\s+/g, ' ').trim(), href: a.href}))")
             cards = page.locator("a").evaluate_all(f"els => els.map({CARD_TEXT_JS})")

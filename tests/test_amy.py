@@ -630,6 +630,44 @@ class RealPoshOrderTests(unittest.TestCase):
         self.assertEqual(result["status"], "action_needed")
 
 
+class ChallengeRetryTests(unittest.TestCase):
+    """TAO's security check is intermittent; Amy waits and reloads, never fakes it."""
+
+    class FakePage:
+        def __init__(self, titles):
+            self.titles_seq = list(titles)
+            self.i = -1
+            self.goto_calls = self.reload_calls = self.waits = 0
+        def _advance(self):
+            self.i = min(self.i + 1, len(self.titles_seq) - 1)
+        def goto(self, url, **k): self.goto_calls += 1; self._advance()
+        def reload(self, **k): self.reload_calls += 1; self._advance()
+        def wait_for_timeout(self, ms): self.waits += ms
+        def wait_for_load_state(self, *a, **k): pass
+        def title(self): return self.titles_seq[self.i]
+        class _Body:
+            def inner_text(self): return ""
+        def locator(self, *a): return self._Body()
+
+    def setUp(self):
+        self._settle = tao_portal._settle
+        tao_portal._settle = lambda page: None
+        self.addCleanup(setattr, tao_portal, "_settle", self._settle)
+
+    def test_clears_after_a_couple_reloads(self):
+        page = self.FakePage(["Just a moment...", "Just a moment...", "TAO Group Hospitality"])
+        with mock.patch.dict(os.environ, {"TAO_CHALLENGE_WAIT_SECONDS": "3", "TAO_CHALLENGE_RETRIES": "4"}):
+            tao_portal._open_promoter_page(page)  # does not raise
+        self.assertEqual(page.goto_calls, 1)
+        self.assertEqual(page.reload_calls, 2)
+
+    def test_gives_up_and_reports_blocked(self):
+        page = self.FakePage(["Just a moment..."])
+        with mock.patch.dict(os.environ, {"TAO_CHALLENGE_WAIT_SECONDS": "3", "TAO_CHALLENGE_RETRIES": "3"}):
+            with self.assertRaises(tao_portal.TaoBlocked):
+                tao_portal._open_promoter_page(page)
+
+
 class AccessHeaderTests(unittest.TestCase):
     """TAO's chosen method is allowlisting; Amy can send a token they allowlist."""
 
