@@ -668,6 +668,38 @@ class ChallengeRetryTests(unittest.TestCase):
                 tao_portal._open_promoter_page(page)
 
 
+class BrowserProfileTests(unittest.TestCase):
+    """AMY_BROWSER_PROFILE makes Amy reuse one profile so a cleared check sticks."""
+
+    class FakeChromium:
+        def __init__(self): self.persistent = self.ephemeral = None
+        def launch_persistent_context(self, profile, **k):
+            self.persistent = (profile, k)
+            return mock.MagicMock(pages=[mock.MagicMock()])
+        def launch(self, **k):
+            self.ephemeral = k
+            return mock.MagicMock()
+
+    def _run(self, env):
+        pw = mock.MagicMock(); pw.chromium = self.FakeChromium()
+        with mock.patch.dict(os.environ, env, clear=True):
+            tao_portal._browser_page(pw)
+        return pw.chromium
+
+    def test_persistent_when_profile_set(self):
+        import tempfile, os as _os
+        d = tempfile.mkdtemp()
+        chromium = self._run({"AMY_BROWSER_PROFILE": d})
+        self.assertIsNotNone(chromium.persistent)
+        self.assertEqual(chromium.persistent[0], d)
+        self.assertIsNone(chromium.ephemeral)
+
+    def test_ephemeral_when_no_profile(self):
+        chromium = self._run({})
+        self.assertIsNone(chromium.persistent)
+        self.assertIsNotNone(chromium.ephemeral)
+
+
 class AccessHeaderTests(unittest.TestCase):
     """TAO's chosen method is allowlisting; Amy can send a token they allowlist."""
 

@@ -173,9 +173,25 @@ def access_headers():
 
 
 def _browser_page(playwright):
+    """Returns (closable, page). closable.close() shuts it down either way.
+
+    With AMY_BROWSER_PROFILE set to a folder, Amy reuses one saved browser
+    profile, so once TAO's security check is cleared the pass (its cookie)
+    carries over to later runs instead of being thrown away each time. Put
+    that folder on a Railway volume so it also survives redeploys."""
+    profile = os.environ.get("AMY_BROWSER_PROFILE", "").strip()
+    opts = dict(locale="en-US", timezone_id="America/Los_Angeles",
+                extra_http_headers=access_headers())
+    exe = os.environ.get("CHROMIUM_PATH") or None
+    if profile:
+        os.makedirs(profile, exist_ok=True)
+        context = playwright.chromium.launch_persistent_context(
+            profile, headless=True, executable_path=exe, **opts)
+        page = context.pages[0] if context.pages else context.new_page()
+        page.set_default_timeout(15_000)
+        return context, page
     browser = launch_browser(playwright)
-    context = browser.new_context(locale="en-US", timezone_id="America/Los_Angeles",
-                                  extra_http_headers=access_headers())
+    context = browser.new_context(**opts)
     page = context.new_page()
     page.set_default_timeout(15_000)
     return browser, page
