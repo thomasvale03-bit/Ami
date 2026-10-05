@@ -1,4 +1,5 @@
 import base64
+import os
 import email
 import pathlib
 import re
@@ -627,6 +628,18 @@ class RealPoshOrderTests(unittest.TestCase):
         raw = parsed(FIXTURE.replace("2026-10-30", "2026-09-01").replace("2026-10-31", "2026-09-02"))
         result = main.process_one_request(raw, dry_run=True, today=TODAY)
         self.assertEqual(result["status"], "action_needed")
+
+
+class AccessHeaderTests(unittest.TestCase):
+    """TAO's chosen method is allowlisting; Amy can send a token they allowlist."""
+
+    def test_no_header_without_token(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(tao_portal.access_headers(), {})
+
+    def test_header_sent_when_token_set(self):
+        with mock.patch.dict(os.environ, {"TAO_ACCESS_TOKEN": "secret123"}):
+            self.assertEqual(tao_portal.access_headers(), {"X-Playmaker-Access": "secret123"})
 
 
 class TaoBlockedTests(unittest.TestCase):

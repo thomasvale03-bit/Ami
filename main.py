@@ -404,6 +404,18 @@ def run_once(service, mode, labels, allowlist=None, start_after=None):
             )
 
 
+def outbound_ip():
+    """Amy's public IP, for TAO to allowlist. Best-effort; never fatal."""
+    import urllib.request
+    for url in ("https://api.ipify.org", "https://checkip.amazonaws.com"):
+        try:
+            with urllib.request.urlopen(url, timeout=5) as r:
+                return r.read().decode().strip()
+        except Exception:
+            continue
+    return "unknown (check Railway's networking page)"
+
+
 def main():
     parser = argparse.ArgumentParser()
     mode_flags = parser.add_mutually_exclusive_group()
@@ -444,6 +456,10 @@ def main():
         sys.exit(f"Wrong Gmail account: signed in as {account}, expected {rules.INTAKE_EMAIL}.")
     log.info("Amy started as %s in %s mode%s", account, mode,
              f" (allowlist: {', '.join(sorted(allowlist))})" if allowlist else "")
+    # So TAO can allowlist Amy by IP: print the server's outbound address once.
+    log.info("Amy outbound IP (give this to TAO to allowlist): %s", outbound_ip())
+    if os.environ.get("TAO_ACCESS_TOKEN", "").strip():
+        log.info("Sending TAO access token header on every request (TAO_ACCESS_TOKEN is set).")
 
     labels = {}
     if mode != "dry-run":

@@ -162,9 +162,17 @@ def launch_browser(playwright):
     return playwright.chromium.launch(headless=True, executable_path=os.environ.get("CHROMIUM_PATH") or None)
 
 
+def access_headers():
+    """Header TAO allowlists for Amy, if they gave us a token to send
+    (TAO_ACCESS_TOKEN). Empty when none is set, so nothing changes."""
+    token = os.environ.get("TAO_ACCESS_TOKEN", "").strip()
+    return {"X-Playmaker-Access": token} if token else {}
+
+
 def _browser_page(playwright):
     browser = launch_browser(playwright)
-    context = browser.new_context(locale="en-US", timezone_id="America/Los_Angeles")
+    context = browser.new_context(locale="en-US", timezone_id="America/Los_Angeles",
+                                  extra_http_headers=access_headers())
     page = context.new_page()
     page.set_default_timeout(15_000)
     return browser, page
