@@ -59,7 +59,6 @@ def process_one_request(raw, dry_run=True, today=None, now=None):
 
     registrations = []
     exceptions = []
-    previous_night_venue = None
 
     def checker(venue, date_obj):
         if dry_run:
@@ -125,6 +124,21 @@ def process_one_request(raw, dry_run=True, today=None, now=None):
             log.info("Skipping %s on %s: it started at %s", venue, date_obj, listing["event_time"])
             return None
         return listing
+
+    try:
+        _book_nights(request, today, checker, dayclub_checker, book, exceptions)
+    except tao_portal.TaoBlocked as exc:
+        # Blocked before anything was read, so nothing was submitted.
+        return {"status": "action_needed", "issue": f"Amy could not book: {exc}. Nothing was submitted.",
+                "required_action": "Book this guest manually on TAO."}
+
+    output = {"request": request, "registrations": registrations, "exceptions": exceptions}
+    return _confirmation_and_records(output, request, today, dry_run)
+
+
+def _book_nights(request, today, checker, dayclub_checker, book, exceptions):
+    """Book each requested night (dayclub first, then the nightclub)."""
+    previous_night_venue = None
     for date_obj in date_range(request["start_date"], request["end_date"]):
         if date_obj < today:
             log.info("Skipping %s: that night has already passed", date_obj)
@@ -149,8 +163,9 @@ def process_one_request(raw, dry_run=True, today=None, now=None):
         # Only a confirmed nightclub counts for the Fri/Sat no-repeat rule.
         previous_night_venue = venue if book(venue, listing, date_obj, "nightclub") else None
 
-    output = {"request": request, "registrations": registrations, "exceptions": exceptions}
 
+def _confirmation_and_records(output, request, today, dry_run):
+    registrations, exceptions = output["registrations"], output["exceptions"]
     drais_nights = [d.isoformat() for d in date_range(request["start_date"], request["end_date"])
                     if d >= today] if request.get("drais") else []
     if registrations or drais_nights:

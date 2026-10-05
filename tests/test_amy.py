@@ -8,6 +8,7 @@ from unittest import mock
 
 import gmail_client
 import main
+import tao_portal
 from rules_engine import ActionNeeded, candidate_venues, normalize_guest_request
 
 FIXTURE = (pathlib.Path(__file__).parent / "fixtures" / "new_form.txt").read_text()
@@ -626,6 +627,26 @@ class RealPoshOrderTests(unittest.TestCase):
         raw = parsed(FIXTURE.replace("2026-10-30", "2026-09-01").replace("2026-10-31", "2026-09-02"))
         result = main.process_one_request(raw, dry_run=True, today=TODAY)
         self.assertEqual(result["status"], "action_needed")
+
+
+class TaoBlockedTests(unittest.TestCase):
+    """Oct 5 2026: TAO's site started showing a Cloudflare check to Amy."""
+
+    def test_security_page_is_recognized(self):
+        self.assertTrue(tao_portal.is_security_check(
+            "Just a moment...", "Performing security verification\nThis website uses a security service"))
+        self.assertFalse(tao_portal.is_security_check("TAO Group Hospitality", "Marquee Nightclub Passes"))
+
+    def test_blocked_says_so_instead_of_no_guest_list(self):
+        raw = parsed()
+        with mock.patch.object(tao_portal, "check_availability",
+                               side_effect=tao_portal.TaoBlocked("TAO's website showed a security check")), \
+             mock.patch.object(tao_portal, "submit_registration") as submit:
+            result = main.process_one_request(raw, dry_run=False, today=TODAY)
+        self.assertEqual(result["status"], "action_needed")
+        self.assertIn("security check", result["issue"])
+        self.assertIn("Nothing was submitted", result["issue"])
+        submit.assert_not_called()
 
 
 class DraisTests(unittest.TestCase):

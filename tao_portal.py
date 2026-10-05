@@ -83,6 +83,16 @@ def order_id_from(url, body):
     return m.group() if m else None
 
 
+class TaoBlocked(Exception):
+    """TAO's site showed a bot/security check instead of its listings."""
+
+
+def is_security_check(title, body):
+    text = f"{title}\n{body}".lower()
+    return ("just a moment" in text or "performing security verification" in text
+            or "verify you are human" in text)
+
+
 class SubmissionUncertain(Exception):
     """The final submit click happened but success could not be confirmed."""
 
@@ -249,6 +259,8 @@ def _load_catalog():
         try:
             page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
             _settle(page)
+            if is_security_check(page.title(), page.locator("body").inner_text()):
+                raise TaoBlocked("TAO's website showed a security check (Cloudflare) instead of the guest lists")
             links = page.locator("a").evaluate_all(
                 "els => els.map(a => ({text: (a.textContent || '').replace(/\\s+/g, ' ').trim(), href: a.href}))")
             cards = page.locator("a").evaluate_all(f"els => els.map({CARD_TEXT_JS})")
