@@ -205,3 +205,32 @@ def manual_confirmation_draft(request, nights, drais=None):
         else f"{request['start_date']} to {request['end_date']}"
     return consolidated_confirmation(
         request["first_name"], request["email"], date_label, placeholders, drais=drais)
+
+
+def guest_signup_links_email(first_name, nights, promoter_url, drais=None):
+    """Email to the guest with their free guest-list link for each night.
+    nights: [{"date": iso, "venue": str, "url": str|None, "options": [str]}].
+    When url is present the guest taps straight through; otherwise they get the
+    promoter link and the clubs to pick, in order."""
+    greeting = f"Hi {first_name}," if first_name else "Hi,"
+    parts = [greeting,
+             "You're on the list with Playmaker Entertainment. Tap your link for each "
+             "night and add your name — it's free and it's our guest list:"]
+    for n in nights:
+        when = _long_date(n["date"])
+        if n.get("url"):
+            parts.append(f"{when} — {n['venue']}\n{n['url']}")
+        else:
+            opts = ", ".join(n.get("options", [])[:3]) or "any open club"
+            parts.append(f"{when} — open our guest list and pick {opts}:\n{promoter_url}")
+    if drais:
+        parts.append("Drai’s After Hours — no link needed, just show this at the door:\n\n"
+                     + drais_guestlist(drais))
+    parts += [
+        "Arrive early and bring a valid, government-issued 21+ photo ID. Guest-list "
+        "admission is subject to each venue’s rules, dress code, and capacity.",
+        "Enjoy Las Vegas!",
+        "Playmaker Entertainment",
+    ]
+    subject = f"Your Vegas guest list is ready, {first_name}" if first_name else "Your Vegas guest list is ready"
+    return subject, "\n\n".join(parts)

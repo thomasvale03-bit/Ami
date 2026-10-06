@@ -668,6 +668,40 @@ class ChallengeRetryTests(unittest.TestCase):
                 tao_portal._open_promoter_page(page)
 
 
+class SendLinksTests(unittest.TestCase):
+    """AMY_SEND_LINKS: Amy emails the guest their direct guest-list links."""
+
+    def _handle(self, catalog, text=FIXTURE):
+        from datetime import date as _date
+        sent = []
+        svc = mock.MagicMock()
+        with mock.patch.dict(os.environ, {"AMY_SEND_LINKS": "true"}), \
+             mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, text)), \
+             mock.patch.object(tao_portal, "catalog_snapshot", return_value=catalog), \
+             mock.patch.object(gmail_client, "send_once",
+                               side_effect=lambda *a, **k: sent.append((a, k)) or True), \
+             mock.patch.object(main, "datetime") as dt:
+            dt.now.return_value = __import__("datetime").datetime(2026, 10, 29, 12, 0)
+            out = main.handle_message(svc, "m1", dry_run=False, labels={})
+        return out, sent
+
+    def test_direct_link_when_event_is_live(self):
+        from datetime import date
+        catalog = {("OMNIA Nightclub", date(2026, 10, 30)): {"url": "https://tao/e/omnia-10-30"},
+                   ("JEWEL Nightclub", date(2026, 10, 31)): {"url": "https://tao/e/jewel-10-31"}}
+        out, sent = self._handle(catalog)
+        self.assertEqual(out, gmail_client.PROCESSED_LABEL)
+        body = sent[0][0][4]
+        self.assertIn("https://tao/e/omnia-10-30", body)
+        self.assertEqual(sent[0][0][2], "jane.sample@example.com")  # to the guest
+
+    def test_falls_back_to_promoter_link_when_check_is_up(self):
+        out, sent = self._handle({})  # empty catalog = blocked
+        body = sent[0][0][4]
+        self.assertIn("open our guest list and pick", body)
+        self.assertIn("tickets.taogroup.com", body)
+
+
 class ManualBookingTests(unittest.TestCase):
     """AMY_MANUAL_BOOKING: Amy emails a work order + saves a draft; no TAO."""
 

@@ -375,6 +375,15 @@ def _fill_first(page, selectors, value):
 
 # --- Public API -------------------------------------------------------------
 
+def catalog_snapshot():
+    """The current promoter-page listings {(venue, date): {url, event, event_time}},
+    or {} if TAO's security check is up. Read-only; never submits anything."""
+    try:
+        return dict(_load_catalog())
+    except TaoBlocked:
+        return {}
+
+
 def check_availability(venue, date_obj):
     entry = _load_catalog().get((venue, date_obj))
     if not entry:

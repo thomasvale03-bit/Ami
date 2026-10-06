@@ -28,6 +28,7 @@ from config import rules
 from templates.emails import (
     FOLLOW_UP_DELAY_DAYS, consolidated_confirmation, follow_up_email, internal_action_needed,
     internal_processed_record, manual_work_order, manual_confirmation_draft,
+    guest_signup_links_email,
 )
 import gmail_client
 import posh
@@ -235,6 +236,67 @@ def posh_summary(raw):
     return "\n".join(lines)
 
 
+def send_links_on():
+    """AMY_SEND_LINKS=true: Amy emails the guest their direct free guest-list
+    link for each night (picked by the rules). The guest taps it and signs
+    themselves up, which clears TAO's check as a person and credits Playmaker."""
+    return os.environ.get("AMY_SEND_LINKS", "").strip().lower() in ("1", "true", "yes")
+
+
+def send_signup_links(service, message_id, raw, dry_run):
+    try:
+        request = normalize_guest_request(raw)
+    except ActionNeeded as e:
+        team_alert(service, message_id, raw, [internal_action_needed(
+            raw.get("name", "(unknown)"), raw.get("email", "(unknown)"),
+            venue=", ".join(raw.get("venues") or []) or "(none specified)",
+            date=f"{raw.get('start_date')} to {raw.get('end_date')}",
+            issue=e.issue, required_action=e.required_action)], dry_run)
+        return gmail_client.EXCEPTION_LABEL
+
+    today = datetime.now(VEGAS).date()
+    if request["end_date"] < today.isoformat():
+        team_alert(service, message_id, raw, [internal_action_needed(
+            request["first_name"], request["email"], venue="(n/a)",
+            date=f"{request['start_date']} to {request['end_date']}",
+            issue="Every requested night has already passed.",
+            required_action="Confirm the night with the guest and send the link manually.")], dry_run)
+        return gmail_client.EXCEPTION_LABEL
+
+    catalog = tao_portal.catalog_snapshot()  # {} if TAO's check is up
+    nights, prev = [], None
+    for d in date_range(request["start_date"], request["end_date"]):
+        if d < today:
+            continue
+        options = candidate_venues(request, d, prev)
+        chosen = url = None
+        for venue in options:
+            entry = catalog.get((venue, d))
+            if entry:
+                chosen, url = venue, entry["url"]
+                break
+        nights.append({"date": d.isoformat(), "venue": chosen or (options[0] if options else None),
+                       "url": url, "options": options})
+        prev = chosen or (options[0] if options else None)
+
+    drais_nights = [n["date"] for n in nights] if request.get("drais") else []
+    drais = {"name": f"{request['first_name']} {request['last_name']}".strip(),
+             "female_count": request["female_count"], "male_count": request["male_count"],
+             "nights": drais_nights} if drais_nights else None
+
+    subject, body = guest_signup_links_email(
+        request["first_name"], nights, rules.TAO_PROMOTER_URL, drais=drais)
+
+    if dry_run:
+        print(f"[dry run] guest links to {request['email']} (cc {rules.PLAYMAKER_EMAIL}):\n{subject}\n{body}")
+        return None
+
+    gmail_client.send_once(
+        service, f"amy-links-{message_id}@playmakerentertainment.com",
+        request["email"], subject, body, sender=rules.INTAKE_EMAIL, cc=rules.PLAYMAKER_EMAIL)
+    return gmail_client.PROCESSED_LABEL
+
+
 def manual_booking_on():
     """AMY_MANUAL_BOOKING=true: Amy doesn't touch TAO. She emails the team a
     ready-to-book work order and saves a draft confirmation, and a person does
@@ -347,6 +409,9 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
             date=raw.get("start_date", "(unknown)"), issue=issue, required_action=action,
         ) + details], dry_run)
         return gmail_client.EXCEPTION_LABEL
+
+    if send_links_on():
+        return send_signup_links(service, message_id, raw, dry_run)
 
     if manual_booking_on():
         return manual_handoff(service, message_id, raw, dry_run)
