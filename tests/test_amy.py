@@ -668,6 +668,44 @@ class ChallengeRetryTests(unittest.TestCase):
                 tao_portal._open_promoter_page(page)
 
 
+class ManualBookingTests(unittest.TestCase):
+    """AMY_MANUAL_BOOKING: Amy emails a work order + saves a draft; no TAO."""
+
+    def _handle(self, text=FIXTURE):
+        sent, drafts = [], []
+        svc = mock.MagicMock()
+        with mock.patch.dict(os.environ, {"AMY_MANUAL_BOOKING": "true"}), \
+             mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, text)), \
+             mock.patch.object(gmail_client, "send_once",
+                               side_effect=lambda *a, **k: sent.append((a, k)) or True), \
+             mock.patch.object(gmail_client, "draft_once",
+                               side_effect=lambda *a, **k: drafts.append((a, k)) or True), \
+             mock.patch.object(tao_portal, "submit_registration") as submit, \
+             mock.patch.object(main, "datetime") as dt:
+            dt.now.return_value = __import__("datetime").datetime(2026, 10, 29, 12, 0)
+            out = main.handle_message(svc, "m1", dry_run=False, labels={})
+        return out, sent, drafts, submit
+
+    def test_work_order_and_draft_no_tao(self):
+        out, sent, drafts, submit = self._handle()
+        self.assertEqual(out, gmail_client.PROCESSED_LABEL)
+        submit.assert_not_called()
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(drafts), 1)
+        body = sent[0][0][4]  # positional: service,id,to,subject,body
+        self.assertIn("MANUAL BOOKING", body)
+        self.assertIn("jane.sample@example.com", body)
+        self.assertIn("OMNIA Nightclub", body)
+        self.assertIn("Ref: m1", body)
+
+    def test_draft_confirmation_has_blanks(self):
+        out, sent, drafts, submit = self._handle()
+        cbody = drafts[0][1]["body"]
+        self.assertIn("[club booked]", cbody)
+        self.assertIn("[Order ID]", cbody)
+        self.assertIn("jane.sample@example.com", cbody)
+
+
 class BrowserProfileTests(unittest.TestCase):
     """AMY_BROWSER_PROFILE makes Amy reuse one profile so a cleared check sticks."""
 

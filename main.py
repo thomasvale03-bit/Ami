@@ -22,11 +22,12 @@ from zoneinfo import ZoneInfo
 from rules_engine import (
     normalize_guest_request, ActionNeeded, date_range,
     resolve_dayclub_for_date, resolve_venue_for_date,
+    candidate_venues, dayclub_candidates, is_dayclub_season,
 )
 from config import rules
 from templates.emails import (
     FOLLOW_UP_DELAY_DAYS, consolidated_confirmation, follow_up_email, internal_action_needed,
-    internal_processed_record,
+    internal_processed_record, manual_work_order, manual_confirmation_draft,
 )
 import gmail_client
 import posh
@@ -234,6 +235,71 @@ def posh_summary(raw):
     return "\n".join(lines)
 
 
+def manual_booking_on():
+    """AMY_MANUAL_BOOKING=true: Amy doesn't touch TAO. She emails the team a
+    ready-to-book work order and saves a draft confirmation, and a person does
+    the TAO booking (clearing the security check by hand). Flip it off once
+    TAO lets Amy in directly."""
+    return os.environ.get("AMY_MANUAL_BOOKING", "").strip().lower() in ("1", "true", "yes")
+
+
+def manual_handoff(service, message_id, raw, dry_run):
+    """Build and send the manual work order + draft confirmation for one
+    request. No live TAO: the clubs are Amy's routed order, booker picks the
+    first that's open."""
+    try:
+        request = normalize_guest_request(raw)
+    except ActionNeeded as e:
+        team_alert(service, message_id, raw, [internal_action_needed(
+            raw.get("name", "(unknown)"), raw.get("email", "(unknown)"),
+            venue=", ".join(raw.get("venues") or []) or "(none specified)",
+            date=f"{raw.get('start_date')} to {raw.get('end_date')}",
+            issue=e.issue, required_action=e.required_action)], dry_run)
+        return gmail_client.EXCEPTION_LABEL
+
+    today = datetime.now(VEGAS).date()
+    if request["end_date"] < today.isoformat():
+        team_alert(service, message_id, raw, [internal_action_needed(
+            request["first_name"], request["email"], venue="(n/a)",
+            date=f"{request['start_date']} to {request['end_date']}",
+            issue="Every requested night has already passed.",
+            required_action="Confirm the night with the guest and book manually.")], dry_run)
+        return gmail_client.EXCEPTION_LABEL
+
+    nights, prev = [], None
+    for d in date_range(request["start_date"], request["end_date"]):
+        if d < today:
+            continue
+        clubs = candidate_venues(request, d, prev)
+        nights.append({"date": d.isoformat(), "nightclubs": clubs,
+                       "dayclubs": dayclub_candidates(request) if is_dayclub_season(d) else []})
+        prev = clubs[0] if clubs else None
+
+    drais_nights = [n["date"] for n in nights] if request.get("drais") else []
+    drais = {"name": f"{request['first_name']} {request['last_name']}".strip(),
+             "female_count": request["female_count"], "male_count": request["male_count"],
+             "nights": drais_nights} if drais_nights else None
+
+    subject, body = manual_work_order(request, nights, rules.TAO_PROMOTER_URL, drais_nights)
+    body += f"\n\nRef: {message_id}"
+    csubject, cbody = manual_confirmation_draft(request, nights, drais=drais)
+
+    if dry_run:
+        print(f"[dry run] manual work order to {rules.PLAYMAKER_EMAIL}:\n{subject}\n{body}")
+        print(f"[dry run] draft confirmation to {request['email']} (cc {rules.PLAYMAKER_EMAIL}):\n{csubject}")
+        return None
+
+    gmail_client.send_once(
+        service, f"amy-manual-{message_id}@playmakerentertainment.com",
+        rules.PLAYMAKER_EMAIL, subject, body, sender=rules.INTAKE_EMAIL,
+        dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Ref: {message_id}"')
+    gmail_client.draft_once(
+        service, dedupe_query=f'to:{request["email"]} subject:"{csubject}"',
+        to=request["email"], subject=csubject, body=cbody,
+        sender=rules.INTAKE_EMAIL, cc=rules.PLAYMAKER_EMAIL)
+    return gmail_client.PROCESSED_LABEL
+
+
 def handle_message(service, message_id, dry_run, labels, allowlist=None):
     """Process one request email end to end. Returns the outcome label, or
     None when test mode skips a request that isn't from an allowlisted
@@ -281,6 +347,9 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
             date=raw.get("start_date", "(unknown)"), issue=issue, required_action=action,
         ) + details], dry_run)
         return gmail_client.EXCEPTION_LABEL
+
+    if manual_booking_on():
+        return manual_handoff(service, message_id, raw, dry_run)
 
     if not dry_run:
         gmail_client.set_labels(service, message_id, labels, add=[gmail_client.PROCESSING_LABEL])

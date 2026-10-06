@@ -159,3 +159,49 @@ def follow_up_email(first_name, venues=()):
         "If you’d rather not get emails like this, just reply STOP."
     )
     return subject, body
+
+
+def manual_work_order(request, nights, promoter_url, drais_nights=()):
+    """Team email for a request Amy can't auto-submit (TAO security check up).
+    nights: [{"date": iso, "nightclubs": [...], "dayclubs": [...]}] in order.
+    The team opens the promoter link, clears the check as a human, and books."""
+    name = f"{request['first_name']} {request['last_name']}".strip()
+    lines = [
+        "MANUAL BOOKING — TAO's security check is up, so book this one by hand.",
+        "",
+        f"Guest: {name}",
+        f"Email: {request['email']}",
+        f"Phone: {request.get('phone') or '(none)'}",
+        f"Party: {party_phrase(request['female_count'], request['male_count'])}",
+        "",
+        "Open this link, clear the “I’m human” check, then book each night:",
+        promoter_url,
+        "",
+    ]
+    for n in nights:
+        clubs = ", ".join(n["nightclubs"][:5]) or "(no routed club)"
+        lines.append(f"{_long_date(n['date'])} — book the first that's open: {clubs}")
+        if n.get("dayclubs"):
+            lines.append(f"    dayclub (only if a free Pass is live): {', '.join(n['dayclubs'][:3])}")
+    if drais_nights:
+        lines += ["", "Drai’s After Hours: no booking needed — the guest’s confirmation "
+                  "already carries the door text."]
+    lines += ["", "When it's booked, open the draft confirmation Amy saved "
+              "(to the guest, team CC’d), fill in the club and Order ID, and send it."]
+    subject = f"Amy — book by hand: {name}, {request['start_date']}" + (
+        f" to {request['end_date']}" if request['end_date'] != request['start_date'] else "")
+    return subject, "\n".join(lines)
+
+
+def manual_confirmation_draft(request, nights, drais=None):
+    """A confirmation pre-written for the guest, with the club and Order ID
+    left as blanks for the booker to fill after booking by hand."""
+    placeholders = [{
+        "venue": "[club booked]", "event": "", "event_time": None,
+        "date": n["date"], "female_count": request["female_count"],
+        "male_count": request["male_count"], "confirmation_id": "[Order ID]",
+    } for n in nights]
+    date_label = request["start_date"] if request["start_date"] == request["end_date"] \
+        else f"{request['start_date']} to {request['end_date']}"
+    return consolidated_confirmation(
+        request["first_name"], request["email"], date_label, placeholders, drais=drais)

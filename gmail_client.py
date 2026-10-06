@@ -293,6 +293,19 @@ def build_message(to, subject, body, sender, cc=None, message_id=None):
     return {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")}
 
 
+def draft_once(service, dedupe_query, to, subject, body, sender, cc=None):
+    """Save a Gmail draft unless one (or a sent copy) already matches
+    dedupe_query, so a restart doesn't pile up duplicate drafts. Returns
+    True if a draft was created."""
+    resp = service.users().messages().list(
+        userId="me", q=f"(in:draft OR in:sent) {dedupe_query}", maxResults=1).execute()
+    if resp.get("messages"):
+        return False
+    service.users().drafts().create(
+        userId="me", body={"message": build_message(to, subject, body, sender, cc)}).execute()
+    return True
+
+
 def already_sent(service, query):
     """True if the Sent folder has a message matching this Gmail search.
 
