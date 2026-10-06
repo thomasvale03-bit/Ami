@@ -285,13 +285,13 @@ def concierge_handoff(service, message_id, raw, dry_run):
     tbody += f"\n\nRef: {message_id}"
 
     if dry_run:
-        print(f"[dry run] guest confirmation to {request['email']} (cc {rules.PLAYMAKER_EMAIL}):\n{gsub}\n{gbody}")
+        print(f"[dry run] guest confirmation to {request['email']}:\n{gsub}\n{gbody}")
         print(f"[dry run] Jose sign-up to {rules.PLAYMAKER_EMAIL}:\n{tsub}\n{tbody}")
         return None
 
     gmail_client.send_once(
         service, f"amy-confirm-{message_id}@playmakerentertainment.com",
-        request["email"], gsub, gbody, sender=rules.INTAKE_EMAIL, cc=rules.PLAYMAKER_EMAIL,
+        request["email"], gsub, gbody, sender=rules.INTAKE_EMAIL,
         dedupe_query=f'to:{request["email"]} subject:"{gsub}" newer_than:3d')
     gmail_client.send_once(
         service, f"amy-signup-{message_id}@playmakerentertainment.com",
