@@ -28,7 +28,7 @@ from config import rules
 from templates.emails import (
     FOLLOW_UP_DELAY_DAYS, consolidated_confirmation, follow_up_email, internal_action_needed,
     internal_processed_record, manual_work_order, manual_confirmation_draft,
-    guest_signup_links_email,
+    guest_signup_links_email, guest_confirmation, jose_signup_order,
 )
 import gmail_client
 import posh
@@ -202,7 +202,11 @@ def _confirmation_and_records(output, request, today, dry_run):
 
 def team_alert(service, message_id, raw, problems, dry_run):
     """One "needs attention" email to the team per source message, only when
-    a person has to look at something."""
+    a person has to look at something. Suppressed while concierge mode is on
+    (the owner turned these off 2026-10-06)."""
+    if concierge_on():
+        log.info("[needs-attention off] not emailing the team about %s", message_id)
+        return
     name = raw.get("name") or raw.get("email") or "Unknown guest"
     dates = f"{raw.get('start_date', '?')} to {raw.get('end_date', '?')}"
     body = "\n\n".join(problems) + f"\n\nGmail message ID: {message_id}"
@@ -234,6 +238,66 @@ def posh_summary(raw):
         lines.append(f"Amy's nightclub plan for {night:%a %b %d}: {plan[0] if plan else '(none)'}"
                      f" (then {', '.join(plan[1:3])} if unavailable)")
     return "\n".join(lines)
+
+
+def concierge_on():
+    """AMY_CONCIERGE=true: Amy emails the guest a plain confirmation (no link,
+    just the clubs they're set for) and a separate sign-up to-do to the team
+    (Jose) to register them on TAO. Also turns off the old "needs attention"
+    emails. The owner clicks nothing; the admin does the TAO signup."""
+    return os.environ.get("AMY_CONCIERGE", "").strip().lower() in ("1", "true", "yes")
+
+
+def concierge_handoff(service, message_id, raw, dry_run):
+    """Guest confirmation + Jose sign-up order. No TAO, no needs-attention.
+    Unprocessable or all-past requests are labeled and dropped quietly."""
+    if raw.get("_missing_required"):
+        log.info("%s: missing %s; concierge skip (no team alert)", message_id, raw["_missing_required"])
+        return gmail_client.EXCEPTION_LABEL
+    try:
+        request = normalize_guest_request(raw)
+    except ActionNeeded as e:
+        log.info("%s: %s; concierge skip (no team alert)", message_id, e.issue)
+        return gmail_client.EXCEPTION_LABEL
+
+    today = datetime.now(VEGAS).date()
+    nights, prev = [], None
+    for d in date_range(request["start_date"], request["end_date"]):
+        if d < today:
+            continue
+        opts = candidate_venues(request, d, prev)
+        if not opts:
+            continue
+        nights.append({"date": d.isoformat(), "venue": opts[0], "backups": opts[1:4],
+                       "dayclubs": dayclub_candidates(request)[:3] if is_dayclub_season(d) else []})
+        prev = opts[0]
+
+    drais_nights = [n["date"] for n in nights] if request.get("drais") else []
+    if not nights and not drais_nights:
+        log.info("%s: every requested night has passed; concierge skip", message_id)
+        return gmail_client.EXCEPTION_LABEL
+
+    drais = {"name": f"{request['first_name']} {request['last_name']}".strip(),
+             "female_count": request["female_count"], "male_count": request["male_count"],
+             "nights": drais_nights} if drais_nights else None
+    gsub, gbody = guest_confirmation(request["first_name"], nights, drais=drais)
+    tsub, tbody = jose_signup_order(request, nights, drais_nights)
+    tbody += f"\n\nRef: {message_id}"
+
+    if dry_run:
+        print(f"[dry run] guest confirmation to {request['email']} (cc {rules.PLAYMAKER_EMAIL}):\n{gsub}\n{gbody}")
+        print(f"[dry run] Jose sign-up to {rules.PLAYMAKER_EMAIL}:\n{tsub}\n{tbody}")
+        return None
+
+    gmail_client.send_once(
+        service, f"amy-confirm-{message_id}@playmakerentertainment.com",
+        request["email"], gsub, gbody, sender=rules.INTAKE_EMAIL, cc=rules.PLAYMAKER_EMAIL,
+        dedupe_query=f'to:{request["email"]} subject:"{gsub}" newer_than:3d')
+    gmail_client.send_once(
+        service, f"amy-signup-{message_id}@playmakerentertainment.com",
+        rules.PLAYMAKER_EMAIL, tsub, tbody, sender=rules.INTAKE_EMAIL,
+        dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Ref: {message_id}"')
+    return gmail_client.PROCESSED_LABEL
 
 
 def send_links_on():
@@ -409,6 +473,9 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
             date=raw.get("start_date", "(unknown)"), issue=issue, required_action=action,
         ) + details], dry_run)
         return gmail_client.EXCEPTION_LABEL
+
+    if concierge_on():
+        return concierge_handoff(service, message_id, raw, dry_run)
 
     if send_links_on():
         return send_signup_links(service, message_id, raw, dry_run)

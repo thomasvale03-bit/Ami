@@ -668,6 +668,42 @@ class ChallengeRetryTests(unittest.TestCase):
                 tao_portal._open_promoter_page(page)
 
 
+class ConciergeTests(unittest.TestCase):
+    """AMY_CONCIERGE: guest confirmation (no link) + Jose sign-up; no needs-attention."""
+
+    def _handle(self, text=FIXTURE):
+        sent = []
+        svc = mock.MagicMock()
+        with mock.patch.dict(os.environ, {"AMY_CONCIERGE": "true"}), \
+             mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, text)), \
+             mock.patch.object(gmail_client, "send_once",
+                               side_effect=lambda *a, **k: sent.append((a, k)) or True), \
+             mock.patch.object(tao_portal, "submit_registration") as submit, \
+             mock.patch.object(main, "datetime") as dt:
+            dt.now.return_value = __import__("datetime").datetime(2026, 10, 29, 12, 0)
+            out = main.handle_message(svc, "m1", dry_run=False, labels={})
+        return out, sent, submit
+
+    def test_two_emails_guest_confirmation_and_jose(self):
+        out, sent, submit = self._handle()
+        self.assertEqual(out, gmail_client.PROCESSED_LABEL)
+        submit.assert_not_called()
+        self.assertEqual(len(sent), 2)
+        guest = next(a for a, k in sent if a[2] == "jane.sample@example.com")
+        self.assertEqual(guest[3], "You're on the list — Playmaker Entertainment")
+        self.assertNotIn("http", guest[4])  # no link in the guest email
+        jose = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)
+        self.assertIn("Jose", jose[4])
+        self.assertIn("Ref: m1", jose[4])
+
+    def test_needs_attention_is_suppressed(self):
+        # A request missing its email would normally trigger a team alert.
+        text = FIXTURE.replace("Email: jane.sample@example.com\nPhone", "Email: \nPhone")
+        out, sent, submit = self._handle(text)
+        self.assertEqual(out, gmail_client.EXCEPTION_LABEL)
+        self.assertEqual(sent, [])  # nothing emailed, no needs-attention
+
+
 class SendLinksTests(unittest.TestCase):
     """AMY_SEND_LINKS: Amy emails the guest their direct guest-list links."""
 

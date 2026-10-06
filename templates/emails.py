@@ -234,3 +234,47 @@ def guest_signup_links_email(first_name, nights, promoter_url, drais=None):
     ]
     subject = f"Your Vegas guest list is ready, {first_name}" if first_name else "Your Vegas guest list is ready"
     return subject, "\n\n".join(parts)
+
+
+def guest_confirmation(first_name, nights, drais=None):
+    """Plain 'you're on the list' confirmation for the guest. No signup link;
+    it just states the clubs they're set for. nights: [{'date','venue'}]."""
+    greeting = f"Hi {first_name}," if first_name else "Hi,"
+    parts = [greeting, "You're on the Playmaker Entertainment guest list. Here's what you're set for:"]
+    for n in nights:
+        parts.append(f"{_long_date(n['date'])} — {n['venue']}")
+    if drais:
+        parts.append("Drai’s After Hours — just show this at the door:\n\n" + drais_guestlist(drais))
+    parts += [
+        "Arrive early and bring a valid, government-issued 21+ photo ID. Guest-list admission "
+        "is subject to each venue’s rules, dress code, and capacity.",
+        "See you in Vegas!",
+        "Playmaker Entertainment",
+    ]
+    return "You're on the list — Playmaker Entertainment", "\n\n".join(parts)
+
+
+def jose_signup_order(request, nights, drais_nights=()):
+    """Team email telling the admin (Jose) exactly who to sign up on TAO,
+    through the promoter dashboard so it credits Playmaker. nights carry the
+    primary club, backups, and any dayclub to add."""
+    name = f"{request['first_name']} {request['last_name']}".strip()
+    lines = [
+        "Jose — please sign this guest up on TAO through your promoter dashboard "
+        "(so it credits Thomas / Playmaker), then mark done.", "",
+        f"Guest: {name}", f"Email: {request['email']}", f"Phone: {request.get('phone') or '(none)'}",
+        f"Party: {party_phrase(request['female_count'], request['male_count'])}", "",
+    ]
+    for n in nights:
+        line = f"{_long_date(n['date'])} — {n['venue']}"
+        if n.get("backups"):
+            line += f"  (backups if full: {', '.join(n['backups'])})"
+        lines.append(line)
+        if n.get("dayclubs"):
+            lines.append(f"    dayclub if a free pass is live: {', '.join(n['dayclubs'])}")
+    if drais_nights:
+        lines += ["", "Drai’s After Hours: no signup needed — the guest’s "
+                  "confirmation carries the door text."]
+    subject = f"Sign up — {name}, {request['start_date']}" + (
+        f" to {request['end_date']}" if request['end_date'] != request['start_date'] else "")
+    return subject, "\n".join(lines)
