@@ -242,7 +242,11 @@ def guest_confirmation(first_name, nights, drais=None):
     greeting = f"Hi {first_name}," if first_name else "Hi,"
     parts = [greeting, "You're on the Playmaker Entertainment guest list. Here's what you're set for:"]
     for n in nights:
-        parts.append(f"{_long_date(n['date'])} — {n['venue']}")
+        line = f"{_long_date(n['date'])} — {n['venue']}"
+        if n.get("rerouted_from"):
+            line += (f"\n({n['rerouted_from']}'s guest list was already closed for same-day "
+                     f"sign-ups, so we moved you to {n['venue']}.)")
+        parts.append(line)
     if drais:
         parts.append("Drai’s After Hours — just show this at the door:\n\n" + drais_guestlist(drais))
     parts += [
@@ -270,6 +274,9 @@ def jose_signup_order(request, nights, drais_nights=()):
         if n.get("backups"):
             line += f"  (backups if full: {', '.join(n['backups'])})"
         lines.append(line)
+        if n.get("rerouted_from"):
+            lines.append(f"    note: {n['rerouted_from']} skipped — its guest list is closed for "
+                         f"same-day sign-ups on Fri/Sat.")
         if n.get("dayclubs"):
             lines.append(f"    dayclub if a free pass is live: {', '.join(n['dayclubs'])}")
     if drais_nights:

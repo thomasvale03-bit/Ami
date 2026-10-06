@@ -98,6 +98,13 @@ def default_route_for_date(date_obj):
     return rules.DEFAULT_ROUTING[date_obj.strftime("%A")]
 
 
+def omnia_closed_for_same_day(date_obj, today):
+    """OMNIA's Friday and Saturday guest lists close, so a signup made on that
+    same day can't be honored. Requested in advance, OMNIA stays open. Only
+    OMNIA, only Fri/Sat, only when the event is today (owner rule 2026-10-06)."""
+    return date_obj == today and date_obj.weekday() in (4, 5)  # Fri=4, Sat=5
+
+
 def candidate_venues(request, date_obj, previous_night_venue=None):
     """
     Ordered venue candidates for one date.

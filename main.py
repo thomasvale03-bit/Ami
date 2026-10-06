@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from rules_engine import (
     normalize_guest_request, ActionNeeded, date_range,
     resolve_dayclub_for_date, resolve_venue_for_date,
-    candidate_venues, dayclub_candidates, is_dayclub_season,
+    candidate_venues, dayclub_candidates, is_dayclub_season, omnia_closed_for_same_day,
 )
 from config import rules
 from templates.emails import (
@@ -266,10 +266,15 @@ def concierge_handoff(service, message_id, raw, dry_run):
         if d < today:
             continue
         opts = candidate_venues(request, d, prev)
+        rerouted_from = None
+        if omnia_closed_for_same_day(d, today) and opts and opts[0] == "OMNIA Nightclub":
+            rerouted_from = "OMNIA Nightclub"
+            opts = [v for v in opts if v != "OMNIA Nightclub"]
         if not opts:
             continue
         nights.append({"date": d.isoformat(), "venue": opts[0], "backups": opts[1:4],
-                       "dayclubs": dayclub_candidates(request)[:3] if is_dayclub_season(d) else []})
+                       "dayclubs": dayclub_candidates(request)[:3] if is_dayclub_season(d) else [],
+                       "rerouted_from": rerouted_from})
         prev = opts[0]
 
     drais_nights = [n["date"] for n in nights] if request.get("drais") else []

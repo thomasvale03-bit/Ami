@@ -696,6 +696,30 @@ class ConciergeTests(unittest.TestCase):
         self.assertIn("Jose", jose[4])
         self.assertIn("Ref: m1", jose[4])
 
+    def _nights(self, year, month, day):
+        """Run concierge with a fixed 'today' and return the parsed guest email body."""
+        sent = []
+        with mock.patch.dict(os.environ, {"AMY_CONCIERGE": "true"}), \
+             mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, FIXTURE)), \
+             mock.patch.object(gmail_client, "send_once",
+                               side_effect=lambda *a, **k: sent.append((a, k)) or True), \
+             mock.patch.object(main, "datetime") as dt:
+            dt.now.return_value = __import__("datetime").datetime(year, month, day, 12, 0)
+            main.handle_message(mock.MagicMock(), "m1", dry_run=False, labels={})
+        return next(a[4] for a, k in sent if a[2] == "jane.sample@example.com")
+
+    def test_omnia_same_day_fri_is_rerouted(self):
+        # FIXTURE is OMNIA for Fri Oct 30 + Sat Oct 31. Processed ON Friday:
+        body = self._nights(2026, 10, 30)
+        self.assertIn("guest list was already closed for same-day", body)
+        self.assertNotIn("Friday, October 30 — OMNIA Nightclub", body)  # Friday moved off OMNIA
+        self.assertIn("Saturday, October 31 — OMNIA Nightclub", body)   # Saturday (not same-day) kept
+
+    def test_omnia_in_advance_stays_open(self):
+        body = self._nights(2026, 10, 29)  # Thursday, in advance
+        self.assertNotIn("closed for same-day", body)
+        self.assertIn("Friday, October 30 — OMNIA Nightclub", body)
+
     def test_needs_attention_is_suppressed(self):
         # A request missing its email would normally trigger a team alert.
         text = FIXTURE.replace("Email: jane.sample@example.com\nPhone", "Email: \nPhone")
