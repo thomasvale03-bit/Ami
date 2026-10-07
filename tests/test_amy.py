@@ -695,6 +695,7 @@ class ConciergeTests(unittest.TestCase):
         jose = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)
         self.assertIn("Jose", jose[4])
         self.assertIn("Ref: m1", jose[4])
+        self.assertIn("Promoter:", jose[4])  # promoter name carried to the sign-up email
 
     def _nights(self, year, month, day):
         """Run concierge with a fixed 'today' and return the parsed guest email body."""

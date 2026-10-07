@@ -267,7 +267,9 @@ def jose_signup_order(request, nights, drais_nights=()):
         "Jose — please sign this guest up on TAO through your promoter dashboard "
         "(so it credits Thomas / Playmaker), then mark done.", "",
         f"Guest: {name}", f"Email: {request['email']}", f"Phone: {request.get('phone') or '(none)'}",
-        f"Party: {party_phrase(request['female_count'], request['male_count'])}", "",
+        f"Party: {party_phrase(request['female_count'], request['male_count'])}",
+        f"Promoter: {request['promoter']}" if request.get("promoter") else "Promoter: (none given)",
+        "",
     ]
     for n in nights:
         line = f"{_long_date(n['date'])} — {n['venue']}"
