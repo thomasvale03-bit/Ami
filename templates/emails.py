@@ -243,6 +243,8 @@ def guest_confirmation(first_name, nights, drais=None):
     parts = [greeting, "You're on the Playmaker Entertainment guest list. Here's what you're set for:"]
     for n in nights:
         line = f"{_long_date(n['date'])} — {n['venue']}"
+        if n.get("headliner"):
+            line += f" ({n['headliner']})"
         if n.get("dayclub"):
             line += f"  +  {n['dayclub']} (daytime)"
         if n.get("rerouted_from"):
@@ -275,6 +277,8 @@ def jose_signup_order(request, nights, drais_nights=()):
     ]
     for n in nights:
         line = f"{_long_date(n['date'])} — {n['venue']}"
+        if n.get("headliner"):
+            line += f" ({n['headliner']})"
         if n.get("backups"):
             line += f"  (backups if full: {', '.join(n['backups'])})"
         lines.append(line)

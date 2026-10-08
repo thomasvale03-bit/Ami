@@ -1089,3 +1089,29 @@ class TicketSauceFeedTests(unittest.TestCase):
         import ticketsauce
         with mock.patch.object(ticketsauce, "_fetch", side_effect=OSError("boom")):
             self.assertEqual(ticketsauce.live_catalog(), {})
+
+
+class HeadlinerTests(unittest.TestCase):
+    """Flyer-derived headliners are added to the confirmation and sign-up."""
+
+    def test_headliner_in_confirmation_and_jose(self):
+        from datetime import date
+        import headliners
+        from templates.emails import guest_confirmation, jose_signup_order
+        with mock.patch.object(headliners, "_cache",
+                               {"2026-10-09": {"OMNIA Nightclub": "Steve Aoki"}}):
+            hl = headliners.headliner("OMNIA Nightclub", date(2026, 10, 9))
+        self.assertEqual(hl, "Steve Aoki")
+        nights = [{"date": "2026-10-09", "venue": "OMNIA Nightclub", "headliner": hl}]
+        self.assertIn("OMNIA Nightclub (Steve Aoki)", guest_confirmation("Mia", nights)[1])
+        req = {"first_name": "Mia", "last_name": "R", "email": "m@x.com", "phone": "1",
+               "female_count": 1, "male_count": 0, "start_date": "2026-10-09",
+               "end_date": "2026-10-09", "promoter": None}
+        self.assertIn("OMNIA Nightclub (Steve Aoki)", jose_signup_order(req, nights)[1])
+
+    def test_missing_headliner_is_silent(self):
+        from templates.emails import guest_confirmation
+        nights = [{"date": "2026-10-09", "venue": "TAO Nightclub", "headliner": None}]
+        body = guest_confirmation("Mia", nights)[1]
+        self.assertIn("TAO Nightclub", body)
+        self.assertNotIn("()", body)

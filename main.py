@@ -33,6 +33,7 @@ from templates.emails import (
 import gmail_client
 import posh
 import tao_portal
+import headliners
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("amy")
@@ -287,7 +288,8 @@ def concierge_handoff(service, message_id, raw, dry_run):
         nights.append({"date": d.isoformat(), "venue": chosen,
                        "backups": [v for v in opts if v != chosen][:3],
                        "dayclub": dayclub, "rerouted_from": rerouted_from,
-                       "unverified": not live, "none_live": none_live})
+                       "unverified": not live, "none_live": none_live,
+                       "headliner": headliners.headliner(chosen, d)})
         prev = chosen
 
     drais_nights = [n["date"] for n in nights] if request.get("drais") else []
