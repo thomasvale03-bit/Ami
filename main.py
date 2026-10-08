@@ -623,11 +623,16 @@ def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=F
     never lands, Amy still sends (text-only) once the hour arrives."""
     now = datetime.now(VEGAS)
     today = today or now.date()
-    # A committed sentinel file (data/flyers/.send_now) forces one send on the
-    # next deploy regardless of day/hour — how we fire a live test through
-    # Railway. It's still deduped, so it goes out once; remove it after.
-    sentinel = os.path.join(flyers_dir, ".send_now")
-    force = force or os.path.exists(sentinel)
+    # A committed sentinel file (data/flyers/.send_now) holding today's Vegas date
+    # forces one send regardless of day/hour — how we fire a live test through
+    # Railway. It's date-scoped so a leftover file can't disturb the Monday 9am
+    # schedule, and still deduped so it goes out once.
+    try:
+        with open(os.path.join(flyers_dir, ".send_now")) as fh:
+            if fh.read().strip() == today.isoformat():
+                force = True
+    except OSError:
+        pass
     if not force:
         if today.weekday() != 0:  # Monday only
             return
