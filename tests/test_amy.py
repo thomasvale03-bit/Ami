@@ -930,11 +930,12 @@ class DraisTests(unittest.TestCase):
 class FollowUpTests(unittest.TestCase):
     """One "see you next time" email, 7 days after the guest's last night."""
 
+    from datetime import date as _date
     CONFS = [
         {"id": "c1", "to": "Mia <mia@example.com>", "first_name": "Mia",
-         "subject": "Playmaker Guest List Confirmation — 2026-09-28", "venues": ["TAO"]},
+         "venues": ["TAO Nightclub"], "last_night": _date(2026, 9, 28)},
         {"id": "c2", "to": "tom@example.com", "first_name": "Tom",
-         "subject": "Playmaker Guest List Confirmation — 2026-09-28 to 2026-10-02"},
+         "venues": ["OMNIA Nightclub"], "last_night": _date(2026, 10, 2)},
     ]
 
     def run_on(self, day, mode="live", allowlist=None, opted_out=(), sent_ids=()):
@@ -1046,7 +1047,7 @@ class NeverTwiceTests(unittest.TestCase):
         api = FakeSentFolder()
         from datetime import date
         confs = [{"id": "c1", "to": "mia@example.com", "first_name": "Mia",
-                  "subject": "Playmaker Guest List Confirmation — 2026-09-28"}]
+                  "venues": ["TAO Nightclub"], "last_night": date(2026, 9, 28)}]
         with mock.patch.object(gmail_client, "recent_confirmations", return_value=confs), \
              mock.patch.object(gmail_client, "has_opted_out", return_value=False):
             for _ in range(5):  # five hourly checks
@@ -1115,3 +1116,25 @@ class HeadlinerTests(unittest.TestCase):
         body = guest_confirmation("Mia", nights)[1]
         self.assertIn("TAO Nightclub", body)
         self.assertNotIn("()", body)
+
+
+class RecentConfirmationsTests(unittest.TestCase):
+    """recent_confirmations reads last night + clubs from the concierge email body."""
+
+    def test_parses_last_night_and_venues_from_body(self):
+        from datetime import date
+        body = ("Hi Ava,\n\nYou're on the Playmaker Entertainment guest list. Here's what you're set for:\n\n"
+                "Friday, October 9 — OMNIA Nightclub (Steve Aoki)\n\n"
+                "Saturday, October 10 — JEWEL Nightclub\n\nSee you in Vegas!\nPlaymaker Entertainment")
+        sent_ms = str(int(__import__("datetime").datetime(2026, 10, 7).timestamp() * 1000))
+        svc = mock.MagicMock()
+        svc.users().messages().list().execute.return_value = {"messages": [{"id": "x1"}]}
+        svc.users().messages().get().execute.return_value = {
+            "internalDate": sent_ms,
+            "payload": {"headers": [{"name": "To", "value": "Ava <ava@example.com>"}]}}
+        with mock.patch.object(gmail_client, "get_plain_text_body", return_value=body):
+            confs = gmail_client.recent_confirmations(svc)
+        self.assertEqual(confs[0]["last_night"], date(2026, 10, 10))
+        self.assertEqual(confs[0]["first_name"], "Ava")
+        self.assertIn("OMNIA Nightclub", confs[0]["venues"])
+        self.assertIn("JEWEL Nightclub", confs[0]["venues"])

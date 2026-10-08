@@ -574,7 +574,7 @@ def send_follow_ups(service, mode, allowlist=None, today=None):
     after the guest's last night. Fixed Message-IDs mean never twice."""
     today = today or datetime.now(VEGAS).date()
     for conf in gmail_client.recent_confirmations(service):
-        last_night = last_night_from_subject(conf["subject"])
+        last_night = conf.get("last_night")
         address = re.sub(r".*<([^>]+)>.*", r"\1", conf["to"]).strip().lower()
         if not last_night or not address or today < last_night + timedelta(days=FOLLOW_UP_DELAY_DAYS):
             continue

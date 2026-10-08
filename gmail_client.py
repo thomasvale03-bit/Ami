@@ -14,8 +14,10 @@ every form field is one "Label: value" line inside the block that follows
 import base64
 import os
 import re
+from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 
+from config import rules
 from config.rules import normalize_venue_name
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
@@ -156,25 +158,56 @@ def posh_order_already_handled(service, order_number, exclude_message_id):
 
 
 CONFIRMATION_SUBJECT = "Playmaker Guest List Confirmation"
+# Concierge-era guest confirmation subject (what Amy sends now).
+CONFIRMATION_SUBJECT_CONCIERGE = "You're on the list"
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["January", "February", "March", "April", "May", "June", "July",
+     "August", "September", "October", "November", "December"], start=1)}
+
+
+def _resolve_date(month_name, day, reference):
+    """A confirmation body shows 'Friday, October 9' (no year). Pick the year
+    so the night falls on/after when the email was sent (the visit is upcoming),
+    handling the Dec->Jan rollover."""
+    month = _MONTHS.get(month_name)
+    if not month:
+        return None
+    for year in (reference.year, reference.year + 1):
+        try:
+            candidate = date(year, month, int(day))
+        except ValueError:
+            return None
+        if candidate >= reference - timedelta(days=7):
+            return candidate
+    return None
 
 
 def recent_confirmations(service, days=45):
-    """Confirmation emails Amy sent recently:
-    [{"id", "to", "subject", "first_name", "venues"}] (venues as listed in the email)."""
+    """Guest confirmations Amy sent recently, for the 7-day follow-up:
+    [{"id", "to", "first_name", "venues", "last_night"}]. Reads the clubs and
+    the guest's last night out of the email body (the concierge confirmation
+    subject carries no dates)."""
     resp = service.users().messages().list(
-        userId="me", q=f'in:sent subject:"{CONFIRMATION_SUBJECT}" newer_than:{days}d', maxResults=200,
+        userId="me",
+        q=f'in:sent subject:"{CONFIRMATION_SUBJECT_CONCIERGE}" newer_than:{days}d', maxResults=200,
     ).execute()
     out = []
     for ref in resp.get("messages", []):
         msg = service.users().messages().get(
-            userId="me", id=ref["id"], format="metadata", metadataHeaders=["To", "Subject"],
+            userId="me", id=ref["id"], format="metadata", metadataHeaders=["To"],
         ).execute()
         headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
-        first = re.match(r"\s*Hi ([^,\s]+),", msg.get("snippet", ""))
+        sent = datetime.fromtimestamp(int(msg.get("internalDate", "0")) / 1000, tz=timezone.utc).date()
         body = get_plain_text_body(service, ref["id"]).replace("\r\n", "\n")
-        venues = [v.split(":")[0].strip() for v in re.findall(r" — (.+)\nOrder ID:", body)]
-        out.append({"id": ref["id"], "to": headers.get("to", ""), "subject": headers.get("subject", ""),
-                    "first_name": first.group(1) if first else "", "venues": venues})
+        first = re.search(r"\bHi ([^,\s]+),", body)
+        venues = [v for v in rules.ALL_AUTHORIZED_VENUES if v in body]
+        dates = [d for d in (_resolve_date(m, day, sent)
+                             for _wd, m, day in re.findall(r"([A-Z][a-z]+), ([A-Z][a-z]+) (\d{1,2})", body))
+                 if d]
+        out.append({"id": ref["id"], "to": headers.get("to", ""),
+                    "first_name": first.group(1) if first else "",
+                    "venues": venues, "last_night": max(dates) if dates else None})
     return out
 
 
