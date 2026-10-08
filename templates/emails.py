@@ -243,6 +243,8 @@ def guest_confirmation(first_name, nights, drais=None):
     parts = [greeting, "You're on the Playmaker Entertainment guest list. Here's what you're set for:"]
     for n in nights:
         line = f"{_long_date(n['date'])} — {n['venue']}"
+        if n.get("dayclub"):
+            line += f"  +  {n['dayclub']} (daytime)"
         if n.get("rerouted_from"):
             line += (f"\n({n['rerouted_from']}'s guest list was already closed for same-day "
                      f"sign-ups, so we moved you to {n['venue']}.)")
@@ -276,11 +278,17 @@ def jose_signup_order(request, nights, drais_nights=()):
         if n.get("backups"):
             line += f"  (backups if full: {', '.join(n['backups'])})"
         lines.append(line)
+        if n.get("dayclub"):
+            lines.append(f"    dayclub: {n['dayclub']} — live on the master link, add it too.")
         if n.get("rerouted_from"):
             lines.append(f"    note: {n['rerouted_from']} skipped — its guest list is closed for "
                          f"same-day sign-ups on Fri/Sat.")
-        if n.get("dayclubs"):
-            lines.append(f"    dayclub if a free pass is live: {', '.join(n['dayclubs'])}")
+        if n.get("none_live"):
+            lines.append("    note: none of the usual clubs show a live guest list tonight on the "
+                         "master link — check it for what's open.")
+        elif n.get("unverified"):
+            lines.append("    note: couldn't read the master link just now — confirm this night "
+                         "is open before signing up.")
     if drais_nights:
         lines += ["", "Drai’s After Hours: no signup needed — the guest’s "
                   "confirmation carries the door text."]

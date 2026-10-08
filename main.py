@@ -261,6 +261,11 @@ def concierge_handoff(service, message_id, raw, dry_run):
         return gmail_client.EXCEPTION_LABEL
 
     today = datetime.now(VEGAS).date()
+    # Read the master link (promoter page) to see what's actually live, so we
+    # don't route to a club that's dark that night (e.g. JEWEL on Sunday) and
+    # so we offer a dayclub when its free pass is live. {} if it can't be read.
+    catalog = tao_portal.catalog_snapshot()
+    live = bool(catalog)
     nights, prev = [], None
     for d in date_range(request["start_date"], request["end_date"]):
         if d < today:
@@ -272,10 +277,18 @@ def concierge_handoff(service, message_id, raw, dry_run):
             opts = [v for v in opts if v != "OMNIA Nightclub"]
         if not opts:
             continue
-        nights.append({"date": d.isoformat(), "venue": opts[0], "backups": opts[1:4],
-                       "dayclubs": dayclub_candidates(request)[:3] if is_dayclub_season(d) else [],
-                       "rerouted_from": rerouted_from})
-        prev = opts[0]
+        # Prefer a club that shows a live guest list on the master link.
+        chosen = next((v for v in opts if (v, d) in catalog), None) if live else None
+        none_live = live and chosen is None
+        if chosen is None:
+            chosen = opts[0]
+        # Dayclub: only when its free pass is actually live that day.
+        dayclub = next((dv for dv in dayclub_candidates(request) if (dv, d) in catalog), None) if live else None
+        nights.append({"date": d.isoformat(), "venue": chosen,
+                       "backups": [v for v in opts if v != chosen][:3],
+                       "dayclub": dayclub, "rerouted_from": rerouted_from,
+                       "unverified": not live, "none_live": none_live})
+        prev = chosen
 
     drais_nights = [n["date"] for n in nights] if request.get("drais") else []
     if not nights and not drais_nights:

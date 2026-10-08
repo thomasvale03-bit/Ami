@@ -376,11 +376,13 @@ def _fill_first(page, selectors, value):
 # --- Public API -------------------------------------------------------------
 
 def catalog_snapshot():
-    """The current promoter-page listings {(venue, date): {url, event, event_time}},
-    or {} if TAO's security check is up. Read-only; never submits anything."""
+    """The current promoter-page (master link) listings
+    {(venue, date): {url, event, event_time}}, or {} if the page can't be read
+    (security check up, network error, etc.). Read-only; never submits."""
     try:
         return dict(_load_catalog())
-    except TaoBlocked:
+    except Exception as exc:  # noqa: BLE001 - any read failure means "unknown", not a crash
+        log.info("Could not read the master link listings: %s", exc)
         return {}
 
 

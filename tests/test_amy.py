@@ -671,6 +671,8 @@ class ChallengeRetryTests(unittest.TestCase):
 class ConciergeTests(unittest.TestCase):
     """AMY_CONCIERGE: guest confirmation (no link) + Jose sign-up; no needs-attention."""
 
+    catalog = {}  # default: master link unreadable (rules-only fallback)
+
     def _handle(self, text=FIXTURE):
         sent = []
         svc = mock.MagicMock()
@@ -679,6 +681,7 @@ class ConciergeTests(unittest.TestCase):
              mock.patch.object(gmail_client, "send_once",
                                side_effect=lambda *a, **k: sent.append((a, k)) or True), \
              mock.patch.object(tao_portal, "submit_registration") as submit, \
+             mock.patch.object(tao_portal, "catalog_snapshot", return_value=self.catalog), \
              mock.patch.object(main, "datetime") as dt:
             dt.now.return_value = __import__("datetime").datetime(2026, 10, 29, 12, 0)
             out = main.handle_message(svc, "m1", dry_run=False, labels={})
@@ -704,6 +707,7 @@ class ConciergeTests(unittest.TestCase):
              mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, FIXTURE)), \
              mock.patch.object(gmail_client, "send_once",
                                side_effect=lambda *a, **k: sent.append((a, k)) or True), \
+             mock.patch.object(tao_portal, "catalog_snapshot", return_value=self.catalog), \
              mock.patch.object(main, "datetime") as dt:
             dt.now.return_value = __import__("datetime").datetime(year, month, day, 12, 0)
             main.handle_message(mock.MagicMock(), "m1", dry_run=False, labels={})
@@ -720,6 +724,30 @@ class ConciergeTests(unittest.TestCase):
         body = self._nights(2026, 10, 29)  # Thursday, in advance
         self.assertNotIn("closed for same-day", body)
         self.assertIn("Friday, October 30 — OMNIA Nightclub", body)
+
+    def test_reads_master_link_for_live_clubs_and_dayclub(self):
+        from datetime import date
+        # FIXTURE: OMNIA requested, Fri Oct 30 + Sat Oct 31. Master link shows
+        # OMNIA dark Friday but JEWEL live, and a live Marquee Dayclub Friday.
+        self.catalog = {
+            ("JEWEL Nightclub", date(2026, 10, 30)): {"url": "u1"},
+            ("Marquee Dayclub", date(2026, 10, 30)): {"url": "u2"},
+            ("OMNIA Nightclub", date(2026, 10, 31)): {"url": "u3"},
+        }
+        try:
+            out, sent, submit = self._handle()
+        finally:
+            self.catalog = {}
+        guest = next(a for a, k in sent if a[2] == "jane.sample@example.com")[4]
+        self.assertIn("Friday, October 30 — JEWEL Nightclub", guest)   # OMNIA dark -> live JEWEL
+        self.assertIn("Marquee Dayclub (daytime)", guest)              # live dayclub offered
+        self.assertIn("Saturday, October 31 — OMNIA Nightclub", guest) # OMNIA live Saturday
+
+    def test_unverified_note_when_master_link_unreadable(self):
+        self.catalog = {}
+        out, sent, submit = self._handle()
+        jose = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)[4]
+        self.assertIn("couldn't read the master link", jose)
 
     def test_needs_attention_is_suppressed(self):
         # A request missing its email would normally trigger a team alert.
