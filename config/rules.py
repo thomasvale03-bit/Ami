@@ -37,6 +37,14 @@ ALL_AUTHORIZED_VENUES = set(NIGHTCLUBS) | set(DAYLIFE_VENUES)
 
 INTAKE_EMAIL = "valeconsultingaz@gmail.com"
 PLAYMAKER_EMAIL = "team@playmakerentertainment.com"
+
+# Address Amy sends FROM. Defaults to the intake Gmail. Set AMY_SENDER_EMAIL
+# to team@playmakerentertainment.com once that address is verified as a
+# "Send mail as" alias (via Zoho SMTP) in the intake Gmail account, so
+# confirmations are signed by the real domain and Apple/iCloud stop silently
+# dropping them. Until then this stays the Gmail address so sends keep working.
+import os as _os
+SENDER_EMAIL = _os.environ.get("AMY_SENDER_EMAIL", "").strip() or INTAKE_EMAIL
 SUBJECT_MARKERS = [
     "New guest list request submission",
     "New contact form message for Playmaker Entertainment via Guest List Request",

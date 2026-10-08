@@ -216,7 +216,7 @@ def team_alert(service, message_id, raw, problems, dry_run):
         return
     gmail_client.send_once(
         service, f"amy-alert-{message_id}@playmakerentertainment.com",
-        rules.PLAYMAKER_EMAIL, subject, body, sender=rules.INTAKE_EMAIL,
+        rules.PLAYMAKER_EMAIL, subject, body, sender=rules.SENDER_EMAIL,
         dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Gmail message ID: {message_id}"',
     )
 
@@ -296,11 +296,11 @@ def concierge_handoff(service, message_id, raw, dry_run):
 
     gmail_client.send_once(
         service, f"amy-confirm-{message_id}@playmakerentertainment.com",
-        request["email"], gsub, gbody, sender=rules.INTAKE_EMAIL,
+        request["email"], gsub, gbody, sender=rules.SENDER_EMAIL,
         dedupe_query=f'to:{request["email"]} subject:"{gsub}" newer_than:3d')
     gmail_client.send_once(
         service, f"amy-signup-{message_id}@playmakerentertainment.com",
-        rules.PLAYMAKER_EMAIL, tsub, tbody, sender=rules.INTAKE_EMAIL,
+        rules.PLAYMAKER_EMAIL, tsub, tbody, sender=rules.SENDER_EMAIL,
         dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Ref: {message_id}"')
     return gmail_client.PROCESSED_LABEL
 
@@ -362,7 +362,7 @@ def send_signup_links(service, message_id, raw, dry_run):
 
     gmail_client.send_once(
         service, f"amy-links-{message_id}@playmakerentertainment.com",
-        request["email"], subject, body, sender=rules.INTAKE_EMAIL, cc=rules.PLAYMAKER_EMAIL)
+        request["email"], subject, body, sender=rules.SENDER_EMAIL, cc=rules.PLAYMAKER_EMAIL)
     return gmail_client.PROCESSED_LABEL
 
 
@@ -422,12 +422,12 @@ def manual_handoff(service, message_id, raw, dry_run):
 
     gmail_client.send_once(
         service, f"amy-manual-{message_id}@playmakerentertainment.com",
-        rules.PLAYMAKER_EMAIL, subject, body, sender=rules.INTAKE_EMAIL,
+        rules.PLAYMAKER_EMAIL, subject, body, sender=rules.SENDER_EMAIL,
         dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Ref: {message_id}"')
     gmail_client.draft_once(
         service, dedupe_query=f'to:{request["email"]} subject:"{csubject}"',
         to=request["email"], subject=csubject, body=cbody,
-        sender=rules.INTAKE_EMAIL, cc=rules.PLAYMAKER_EMAIL)
+        sender=rules.SENDER_EMAIL, cc=rules.PLAYMAKER_EMAIL)
     return gmail_client.PROCESSED_LABEL
 
 
@@ -521,7 +521,7 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
             gmail_client.send_once(
                 service, f"amy-confirm-{message_id}@playmakerentertainment.com",
                 request["email"], email["subject"], email["body"],
-                sender=rules.INTAKE_EMAIL, cc=rules.PLAYMAKER_EMAIL,
+                sender=rules.SENDER_EMAIL, cc=rules.PLAYMAKER_EMAIL,
             )
 
     if result.get("action_needed_records"):
@@ -574,7 +574,7 @@ def send_follow_ups(service, mode, allowlist=None, today=None):
             continue
         # Any follow-up to this guest in the last 60 days counts: never again.
         if gmail_client.send_once(service, f"amy-followup-{conf['id']}@playmakerentertainment.com",
-                                  address, subject, body, sender=rules.INTAKE_EMAIL,
+                                  address, subject, body, sender=rules.SENDER_EMAIL,
                                   dedupe_query=f'to:{address} {FOLLOW_UP_SEARCH} newer_than:60d'):
             log.info("Follow-up sent to %s (last night %s)", address, last_night)
 
