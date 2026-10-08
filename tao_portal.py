@@ -157,6 +157,7 @@ def gender_of(context):
 # --- Browser plumbing -------------------------------------------------------
 
 _catalog = None  # {(venue, date): url}, loaded once per run
+_snapshot = None  # cached live catalog (TicketSauce feed) per cycle
 
 
 def launch_browser(playwright):
@@ -321,9 +322,10 @@ def _load_catalog():
 
 
 def reset_catalog():
-    """Forget the cached promoter-page listings (called between cycles)."""
-    global _catalog
+    """Forget the cached listings (called between cycles)."""
+    global _catalog, _snapshot
     _catalog = None
+    _snapshot = None
 
 
 def _catalog_urls():
@@ -376,14 +378,25 @@ def _fill_first(page, selectors, value):
 # --- Public API -------------------------------------------------------------
 
 def catalog_snapshot():
-    """The current promoter-page (master link) listings
-    {(venue, date): {url, event, event_time}}, or {} if the page can't be read
-    (security check up, network error, etc.). Read-only; never submits."""
-    try:
-        return dict(_load_catalog())
-    except Exception as exc:  # noqa: BLE001 - any read failure means "unknown", not a crash
-        log.info("Could not read the master link listings: %s", exc)
-        return {}
+    """Live guest-list listings {(venue, date): {url, event, event_time}}.
+
+    Reads TicketSauce's public events feed first (same data as the promoter
+    master link, no security check); falls back to scraping the promoter page
+    only if the feed is unavailable. Cached per cycle. {} if nothing can be
+    read. Read-only; never submits."""
+    global _snapshot
+    if _snapshot is not None:
+        return _snapshot
+    import ticketsauce
+    catalog = ticketsauce.live_catalog()
+    if not catalog:
+        try:
+            catalog = dict(_load_catalog())
+        except Exception as exc:  # noqa: BLE001 - any read failure means "unknown"
+            log.info("Could not read live listings (feed and master link): %s", exc)
+            catalog = {}
+    _snapshot = catalog
+    return _snapshot
 
 
 def check_availability(venue, date_obj):

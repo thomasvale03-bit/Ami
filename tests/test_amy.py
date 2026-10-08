@@ -1060,3 +1060,32 @@ class NeverTwiceTests(unittest.TestCase):
                                    "Hi", sender="valeconsultingaz@gmail.com")
             main.team_alert(api, "msg-42", {"name": "A"}, ["problem"], dry_run=False)
         self.assertEqual(len(api.sent), 2)
+
+
+class TicketSauceFeedTests(unittest.TestCase):
+    """The public TicketSauce feed is parsed into a live guest-list catalog."""
+
+    SAMPLE = {"data": {
+        "a": {"Event": {"name": "Guest List - DJ Bonics", "location": "Hakkasan Nightclub",
+                        "start": "2026-10-08 22:30:00", "tickets_active": True,
+                        "url": "https://tickets.taogroup.com/e/guest-list-hakkasan-10-8"}},
+        "b": {"Event": {"name": "DJ Bonics", "location": "Hakkasan Nightclub",   # not a guest list
+                        "start": "2026-10-08 22:30:00", "tickets_active": True, "url": "x"}},
+        "c": {"Event": {"name": "Guest List - Closed", "location": "Marquee Dayclub",
+                        "start": "2026-10-08 11:00:00", "tickets_active": False, "url": "y"}},  # inactive
+    }}
+
+    def test_only_active_guest_lists(self):
+        import ticketsauce
+        with mock.patch.object(ticketsauce, "_fetch", return_value=self.SAMPLE):
+            cat = ticketsauce.live_catalog()
+        from datetime import date
+        self.assertIn(("Hakkasan Nightclub", date(2026, 10, 8)), cat)
+        self.assertNotIn(("Marquee Dayclub", date(2026, 10, 8)), cat)  # inactive dropped
+        self.assertEqual(len(cat), 1)  # the plain "DJ Bonics" (no "Guest List") excluded
+        self.assertEqual(cat[("Hakkasan Nightclub", date(2026, 10, 8))]["event_time"], "10:30 PM")
+
+    def test_feed_failure_is_empty(self):
+        import ticketsauce
+        with mock.patch.object(ticketsauce, "_fetch", side_effect=OSError("boom")):
+            self.assertEqual(ticketsauce.live_catalog(), {})
