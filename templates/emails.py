@@ -306,3 +306,33 @@ def jose_signup_order(request, nights, drais_nights=()):
     subject = f"Sign up — {name}, {request['start_date']}" + (
         f" to {request['end_date']}" if request['end_date'] != request['start_date'] else "")
     return subject, "\n".join(lines)
+
+
+def weekly_lineup_email(week_start, days, attached=False):
+    """Monday "here's the week" email to the team.
+
+    week_start: ISO date (the Monday). days: list of
+    {"date": iso, "venues": [(venue, headliner_or_None), ...]} for Mon–Sun.
+    attached: True when flyer images are attached, so the body says so.
+    """
+    lines = [f"Here's the lineup for the week of {_long_date(week_start)}.", ""]
+    any_events = False
+    for day in days:
+        header = _long_date(day["date"])
+        venues = day.get("venues") or []
+        if not venues:
+            lines.append(f"{header} — (nothing live on the master link yet)")
+            continue
+        any_events = True
+        lines.append(f"{header}:")
+        for venue, headliner in venues:
+            lines.append(f"  • {venue}" + (f" — {headliner}" if headliner else ""))
+        lines.append("")
+    if not any_events:
+        lines.append("(Nothing is showing live on the master link for this week yet — "
+                     "it usually fills in as the week gets closer.)")
+    if attached:
+        lines += ["", "This week's flyers are attached."]
+    lines += ["", "— Amy", "Playmaker Entertainment"]
+    subject = f"This week's lineup — week of {_long_date(week_start)}"
+    return subject, "\n".join(lines).replace("\n\n\n", "\n\n").strip() + "\n"

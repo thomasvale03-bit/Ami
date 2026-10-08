@@ -12,6 +12,7 @@ every form field is one "Label: value" line inside the block that follows
 "Message: New guest list request submission".
 """
 import base64
+import logging
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -19,6 +20,8 @@ from email.message import EmailMessage
 
 from config import rules
 from config.rules import normalize_venue_name
+
+log = logging.getLogger("amy.gmail")
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
@@ -313,7 +316,8 @@ def set_labels(service, message_id, label_ids, add=(), remove=()):
     ).execute()
 
 
-def build_message(to, subject, body, sender, cc=None, message_id=None):
+def build_message(to, subject, body, sender, cc=None, message_id=None, attachments=None):
+    """attachments: list of file paths to attach (images)."""
     msg = EmailMessage()
     msg["From"] = f"Playmaker Entertainment <{sender}>"
     msg["To"] = to
@@ -323,6 +327,16 @@ def build_message(to, subject, body, sender, cc=None, message_id=None):
     if message_id:
         msg["Message-ID"] = f"<{message_id}>"
     msg.set_content(body)
+    for path in attachments or []:
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+            ext = os.path.splitext(path)[1].lower().lstrip(".") or "png"
+            subtype = "jpeg" if ext in ("jpg", "jpeg") else ext
+            msg.add_attachment(data, maintype="image", subtype=subtype,
+                               filename=os.path.basename(path))
+        except OSError as exc:  # noqa: BLE001 - skip a missing/unreadable image, still send
+            log.warning("Skipping attachment %s: %s", path, exc)
     return {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")}
 
 
@@ -352,7 +366,8 @@ def already_sent(service, query):
     return bool(resp.get("messages"))
 
 
-def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None):
+def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None,
+              attachments=None):
     """Send unless the Sent folder already has a matching email (dedupe_query,
     a Gmail search; default: same recipient and exact subject), so a
     restarted run never emails the same person twice. Returns True if sent."""
@@ -360,6 +375,7 @@ def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_qu
     if already_sent(service, query):
         return False
     service.users().messages().send(
-        userId="me", body=build_message(to, subject, body, sender, cc, message_id)
+        userId="me",
+        body=build_message(to, subject, body, sender, cc, message_id, attachments=attachments),
     ).execute()
     return True

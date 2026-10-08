@@ -47,6 +47,68 @@ def parse(fn, venue):
     if not art or art.lower().startswith("weekly"): return None
     return date, art
 
+def _week_contains(week_name, target):
+    """True if a Dropbox week folder like "October 07 - October 13" spans target
+    (a date). Year isn't in the name, so we match on month+day within +-4 days
+    either side of its range to stay robust around month boundaries."""
+    months_idx = {name: int(num) for num, name in MONTHS.items()}
+    parts = re.findall(r"([A-Za-z]+)\s+(\d{1,2})", week_name)
+    if len(parts) < 2:
+        return False
+    import datetime
+    bounds = []
+    for mon, day in parts[:2]:
+        m = months_idx.get(mon.capitalize())
+        if not m:
+            return False
+        try:
+            bounds.append(datetime.date(target.year, m, int(day)))
+        except ValueError:
+            return False
+    start, end = min(bounds), max(bounds)
+    return start - datetime.timedelta(days=1) <= target <= end + datetime.timedelta(days=1)
+
+
+def download_week_images(out_dir, target=None):
+    """Save the current week's flyer JPGs to out_dir (one per venue/show) by
+    screenshotting each image preview, the method Dropbox doesn't block. Returns
+    the list of saved file paths. Best-effort: skips anything it can't render."""
+    import datetime
+    target = target or datetime.date.today()
+    os.makedirs(out_dir, exist_ok=True)
+    month_folder = f"{int(f'{target:%m}'):02d} {MONTHS[f'{target:%m}']}"
+    saved = []
+    with sync_playwright() as p:
+        b = p.chromium.launch(headless=True, executable_path=os.environ["CHROMIUM_PATH"])
+        pg = b.new_context(locale="en-US").new_page(); pg.set_default_timeout(20000)
+        weeks = [w for w in names(pg, url(month_folder)) if _week_contains(w, target)]
+        print("week match:", weeks, file=sys.stderr)
+        for wk in weeks:
+            for vf in names(pg, url(month_folder, wk)):
+                venue = FOLDER_TO_VENUE.get(vf.strip().upper())
+                if not venue:
+                    continue
+                for fn in names(pg, url(month_folder, wk, vf)):
+                    if not fn.lower().endswith((".jpg", ".jpeg", ".png")):
+                        continue
+                    if not parse(fn, venue):  # skip weekly-overview / undated graphics
+                        continue
+                    try:
+                        pg.goto(url(month_folder, wk, vf, fn), wait_until="domcontentloaded")
+                        pg.wait_for_timeout(2500)
+                        img = pg.locator("img[src*='previews'], img.sl-preview-image, "
+                                         "div[data-testid='preview-content'] img").first
+                        img.wait_for(timeout=15000)
+                        dest = os.path.join(out_dir, re.sub(r"[^A-Za-z0-9._-]", "_", fn))
+                        img.screenshot(path=dest)
+                        saved.append(dest)
+                    except Exception as exc:  # noqa: BLE001 - one bad flyer must not sink the batch
+                        print("skip", fn, exc, file=sys.stderr)
+        b.close()
+    print("images saved:", len(saved), file=sys.stderr)
+    return saved
+
+
 def run(month_folder, out):
     data={}
     with sync_playwright() as p:
@@ -70,4 +132,7 @@ def run(month_folder, out):
     return data
 
 if __name__=="__main__":
-    run(sys.argv[1], sys.argv[2])
+    if len(sys.argv) >= 2 and sys.argv[1] == "images":
+        download_week_images(sys.argv[2])
+    else:
+        run(sys.argv[1], sys.argv[2])

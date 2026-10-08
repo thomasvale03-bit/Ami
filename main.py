@@ -28,7 +28,7 @@ from config import rules
 from templates.emails import (
     FOLLOW_UP_DELAY_DAYS, consolidated_confirmation, follow_up_email, internal_action_needed,
     internal_processed_record, manual_work_order, manual_confirmation_draft,
-    guest_signup_links_email, guest_confirmation, jose_signup_order,
+    guest_signup_links_email, guest_confirmation, jose_signup_order, weekly_lineup_email,
 )
 import gmail_client
 import posh
@@ -594,6 +594,63 @@ def send_follow_ups(service, mode, allowlist=None, today=None):
             log.info("Follow-up sent to %s (last night %s)", address, last_night)
 
 
+FLYERS_DIR = os.path.join(os.path.dirname(__file__), "data", "flyers")
+
+
+def _week_flyer_files(flyers_dir=FLYERS_DIR):
+    """Current week's flyer images to attach, newest-looking order. The capture
+    job writes this week's JPG/PNGs here; missing dir just means no attachments."""
+    try:
+        names = sorted(
+            n for n in os.listdir(flyers_dir)
+            if n.lower().endswith((".jpg", ".jpeg", ".png")))
+    except OSError:
+        return []
+    return [os.path.join(flyers_dir, n) for n in names]
+
+
+def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=False):
+    """Monday-morning (Vegas) email to the team with the upcoming week's
+    lineup, flyers attached. Deduped so it goes out once per week even if the
+    loop restarts (so Amy's hourly fallback and the capture job that attaches
+    flyers never double-send — first one wins). Set WEEKLY_LINEUP_ENABLED=false
+    in Railway to pause. force=True skips the Monday check (for the capture job).
+
+    Sends only from WEEKLY_LINEUP_HOUR (Vegas, default 9am) onward, so the early
+    Monday flyer-capture job has time to commit this week's images and Railway to
+    redeploy them before Amy sends — otherwise Amy's first tick would send
+    text-only and the dedupe would then block the flyered version. If capture
+    never lands, Amy still sends (text-only) once the hour arrives."""
+    now = datetime.now(VEGAS)
+    today = today or now.date()
+    if not force:
+        if today.weekday() != 0:  # Monday only
+            return
+        send_hour = int(os.environ.get("WEEKLY_LINEUP_HOUR", "9"))
+        if now.hour < send_hour:
+            return
+    monday = today - timedelta(days=today.weekday())
+    week = [monday + timedelta(days=i) for i in range(7)]
+    catalog = tao_portal.catalog_snapshot()  # {(venue, date): {...}}, {} if unreadable
+    days = []
+    for d in week:
+        venues = sorted({venue for (venue, vd) in catalog if vd == d})
+        days.append({"date": d.isoformat(),
+                     "venues": [(v, headliners.headliner(v, d)) for v in venues]})
+    attachments = _week_flyer_files(flyers_dir)
+    subject, body = weekly_lineup_email(monday.isoformat(), days, attached=bool(attachments))
+    if mode == "dry-run":
+        log.info("[dry run] would send weekly lineup to %s (%d flyers)",
+                 rules.PLAYMAKER_EMAIL, len(attachments))
+        return
+    if gmail_client.send_once(
+            service, f"amy-lineup-{monday.isoformat()}@playmakerentertainment.com",
+            rules.PLAYMAKER_EMAIL, subject, body, sender=rules.SENDER_EMAIL,
+            attachments=attachments,
+            dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} subject:"{subject}" newer_than:6d'):
+        log.info("Weekly lineup sent to %s (%d flyers)", rules.PLAYMAKER_EMAIL, len(attachments))
+
+
 def run_once(service, mode, labels, allowlist=None, start_after=None):
     dry_run = mode == "dry-run"
     pending = gmail_client.list_pending_requests(service, start_after=start_after)
@@ -689,6 +746,7 @@ def main():
 
     poll_seconds = max(int(os.environ.get("AMY_POLL_SECONDS", "120")), 30)
     last_follow_up_check = 0.0
+    last_lineup_check = 0.0
     while True:
         try:
             run_once(service, mode, labels, allowlist, start_after)
@@ -698,6 +756,12 @@ def main():
             if follow_ups_on and time.time() - last_follow_up_check >= 3600:  # hourly is plenty
                 send_follow_ups(service, mode, allowlist)
                 last_follow_up_check = time.time()
+            # Monday-morning weekly lineup to the team (dedupe makes the hourly
+            # check safe — it sends once per week). On by default.
+            lineup_on = os.environ.get("WEEKLY_LINEUP_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+            if lineup_on and time.time() - last_lineup_check >= 3600:
+                send_weekly_lineup(service, mode)
+                last_lineup_check = time.time()
         except Exception:
             if not args.loop:
                 raise
