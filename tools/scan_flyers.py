@@ -47,26 +47,55 @@ def parse(fn, venue):
     if not art or art.lower().startswith("weekly"): return None
     return date, art
 
-def _week_contains(week_name, target):
-    """True if a Dropbox week folder like "October 07 - October 13" spans target
-    (a date). Year isn't in the name, so we match on month+day within +-4 days
-    either side of its range to stay robust around month boundaries."""
+def _week_bounds(week_name, year):
+    """(start, end) dates for a folder like "October 07 - October 13", or None."""
+    import datetime
     months_idx = {name: int(num) for num, name in MONTHS.items()}
     parts = re.findall(r"([A-Za-z]+)\s+(\d{1,2})", week_name)
     if len(parts) < 2:
-        return False
-    import datetime
+        return None
     bounds = []
     for mon, day in parts[:2]:
         m = months_idx.get(mon.capitalize())
         if not m:
-            return False
+            return None
         try:
-            bounds.append(datetime.date(target.year, m, int(day)))
+            bounds.append(datetime.date(year, m, int(day)))
         except ValueError:
-            return False
-    start, end = min(bounds), max(bounds)
+            return None
+    return min(bounds), max(bounds)
+
+
+def _week_contains(week_name, target):
+    """True if a Dropbox week folder spans target (a date)."""
+    import datetime
+    b = _week_bounds(week_name, target.year)
+    if not b:
+        return False
+    start, end = b
     return start - datetime.timedelta(days=1) <= target <= end + datetime.timedelta(days=1)
+
+
+def _week_overlaps(week_name, win_start, win_end):
+    """True if a Dropbox week folder overlaps the window [win_start, win_end]."""
+    b = _week_bounds(week_name, win_start.year)
+    if not b:
+        return False
+    start, end = b
+    return start <= win_end and end >= win_start
+
+
+def _month_folders(win_start, win_end):
+    """Dropbox month folder names (e.g. "10 October") the window touches."""
+    import datetime
+    seen, folders, d = set(), [], win_start
+    while d <= win_end:
+        key = (d.year, d.month)
+        if key not in seen:
+            seen.add(key)
+            folders.append(f"{d.month:02d} {MONTHS[f'{d:%m}']}")
+        d += datetime.timedelta(days=1)
+    return folders
 
 
 def _dismiss_cookie_banner(pg):
@@ -85,48 +114,63 @@ def _dismiss_cookie_banner(pg):
     return False
 
 
-def download_week_images(out_dir, target=None):
-    """Save the current week's flyer JPGs to out_dir (one per venue/show) by
-    screenshotting each image preview, the method Dropbox doesn't block. Returns
-    the list of saved file paths. Best-effort: skips anything it can't render.
+def download_week_images(out_dir, target=None, start=None, end=None):
+    """Save a week's flyer JPGs to out_dir (one per venue/show) by screenshotting
+    each image preview, the method Dropbox doesn't block. Returns the saved file
+    paths. Best-effort: skips anything it can't render.
 
-    Keeps only the feed-ratio (1080x1350) image per show, so each event appears
-    once rather than once per social format (feed + story)."""
+    The window is [start, end] inclusive; if not given it's the Mon–Sun week of
+    target (default today). A Mon–Sun week can straddle two of TAO's Dropbox week
+    folders (and month folders), so this walks every folder that overlaps the
+    window and keeps only flyers whose own date falls inside it. Keeps only the
+    feed-ratio (1080x1350) image per show, so each event appears once."""
     import datetime
     target = target or datetime.date.today()
+    if start is None or end is None:
+        start = target - datetime.timedelta(days=target.weekday())  # Monday
+        end = start + datetime.timedelta(days=6)                     # Sunday
     os.makedirs(out_dir, exist_ok=True)
-    month_folder = f"{int(f'{target:%m}'):02d} {MONTHS[f'{target:%m}']}"
     saved = []
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True, executable_path=os.environ["CHROMIUM_PATH"])
         pg = b.new_context(locale="en-US").new_page(); pg.set_default_timeout(20000)
-        weeks = [w for w in names(pg, url(month_folder)) if _week_contains(w, target)]
-        print("week match:", weeks, file=sys.stderr)
         _dismiss_cookie_banner(pg)  # once per context, before any screenshot
-        for wk in weeks:
-            for vf in names(pg, url(month_folder, wk)):
-                venue = FOLDER_TO_VENUE.get(vf.strip().upper())
-                if not venue:
-                    continue
-                for fn in names(pg, url(month_folder, wk, vf)):
-                    if not fn.lower().endswith((".jpg", ".jpeg", ".png")):
+        for month_folder in _month_folders(start, end):
+            try:
+                week_names = names(pg, url(month_folder))
+            except Exception as exc:  # noqa: BLE001 - a missing month folder is fine
+                print("skip month", month_folder, exc, file=sys.stderr)
+                continue
+            weeks = [w for w in week_names if _week_overlaps(w, start, end)]
+            print("month", month_folder, "weeks:", weeks, file=sys.stderr)
+            for wk in weeks:
+                for vf in names(pg, url(month_folder, wk)):
+                    venue = FOLDER_TO_VENUE.get(vf.strip().upper())
+                    if not venue:
                         continue
-                    if "1080x1920" in fn:   # skip the story format; keep feed (1080x1350)
-                        continue
-                    if not parse(fn, venue):  # skip weekly-overview / undated graphics
-                        continue
-                    try:
-                        pg.goto(url(month_folder, wk, vf, fn), wait_until="domcontentloaded")
-                        pg.wait_for_timeout(2500)
-                        _dismiss_cookie_banner(pg)  # reappears until the cookie sticks
-                        img = pg.locator("img[src*='previews'], img.sl-preview-image, "
-                                         "div[data-testid='preview-content'] img").first
-                        img.wait_for(timeout=15000)
-                        dest = os.path.join(out_dir, re.sub(r"[^A-Za-z0-9._-]", "_", fn))
-                        img.screenshot(path=dest)
-                        saved.append(dest)
-                    except Exception as exc:  # noqa: BLE001 - one bad flyer must not sink the batch
-                        print("skip", fn, exc, file=sys.stderr)
+                    for fn in names(pg, url(month_folder, wk, vf)):
+                        if not fn.lower().endswith((".jpg", ".jpeg", ".png")):
+                            continue
+                        if "1080x1920" in fn:   # skip story format; keep feed (1080x1350)
+                            continue
+                        parsed = parse(fn, venue)  # (date, artist); None = undated graphic
+                        if not parsed:
+                            continue
+                        fdate = datetime.date.fromisoformat(parsed[0])
+                        if not (start <= fdate <= end):  # outside this week's window
+                            continue
+                        try:
+                            pg.goto(url(month_folder, wk, vf, fn), wait_until="domcontentloaded")
+                            pg.wait_for_timeout(2500)
+                            _dismiss_cookie_banner(pg)  # reappears until the cookie sticks
+                            img = pg.locator("img[src*='previews'], img.sl-preview-image, "
+                                             "div[data-testid='preview-content'] img").first
+                            img.wait_for(timeout=15000)
+                            dest = os.path.join(out_dir, re.sub(r"[^A-Za-z0-9._-]", "_", fn))
+                            img.screenshot(path=dest)
+                            saved.append(dest)
+                        except Exception as exc:  # noqa: BLE001 - one bad flyer must not sink the batch
+                            print("skip", fn, exc, file=sys.stderr)
         b.close()
     print("images saved:", len(saved), file=sys.stderr)
     return saved

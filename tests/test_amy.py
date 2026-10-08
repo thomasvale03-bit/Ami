@@ -1198,16 +1198,20 @@ class WeeklyLineupTests(unittest.TestCase):
         self.assertIn("omnia.jpg", api.sent[0]["attachments"])
 
     def test_not_sent_on_non_monday(self):
+        import tempfile
         api = FakeSentFolder()
-        with mock.patch.object(tao_portal, "catalog_snapshot", return_value=self.CATALOG):
-            main.send_weekly_lineup(api, "live", today=date(2026, 10, 14))  # Wednesday
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(tao_portal, "catalog_snapshot", return_value=self.CATALOG):
+            main.send_weekly_lineup(api, "live", today=date(2026, 10, 14), flyers_dir=d)  # Wed
         self.assertEqual(len(api.sent), 0)
 
     def test_not_sent_before_send_hour(self):
+        import tempfile
         api = FakeSentFolder()
-        with mock.patch.object(tao_portal, "catalog_snapshot", return_value=self.CATALOG), \
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(tao_portal, "catalog_snapshot", return_value=self.CATALOG), \
              mock.patch.dict(os.environ, {"WEEKLY_LINEUP_HOUR": "24"}):  # before any hour
-            main.send_weekly_lineup(api, "live", today=self.MONDAY)
+            main.send_weekly_lineup(api, "live", today=self.MONDAY, flyers_dir=d)
         self.assertEqual(len(api.sent), 0)
 
     def test_force_ignores_monday_and_hour_gate(self):
