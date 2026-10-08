@@ -692,9 +692,9 @@ def main():
     while True:
         try:
             run_once(service, mode, labels, allowlist, start_after)
-            # Follow-ups are off unless FOLLOW_UPS_ENABLED=true (paused 2026-10-04
-            # while the owner rewrites the wording).
-            follow_ups_on = os.environ.get("FOLLOW_UPS_ENABLED", "").strip().lower() in ("1", "true", "yes")
+            # Follow-ups are ON by default now (wording approved, dedupe fixed,
+            # sending from info@). Set FOLLOW_UPS_ENABLED=false in Railway to pause.
+            follow_ups_on = os.environ.get("FOLLOW_UPS_ENABLED", "true").strip().lower() in ("1", "true", "yes")
             if follow_ups_on and time.time() - last_follow_up_check >= 3600:  # hourly is plenty
                 send_follow_ups(service, mode, allowlist)
                 last_follow_up_check = time.time()
