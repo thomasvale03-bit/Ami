@@ -308,31 +308,53 @@ def jose_signup_order(request, nights, drais_nights=()):
     return subject, "\n".join(lines)
 
 
+SIGNUP_URL = "PlaymakerEntertainment.com"
+
+
 def weekly_lineup_email(week_start, days, attached=False):
-    """Monday "here's the week" email to the team.
+    """Upbeat weekly newsletter to Playmaker's clients + promoters.
 
     week_start: ISO date (the Monday). days: list of
     {"date": iso, "venues": [(venue, headliner_or_None), ...]} for Mon–Sun.
     attached: True when flyer images are attached, so the body says so.
     """
-    lines = [f"Here's the lineup for the week of {_long_date(week_start)}.", ""]
+    lines = [
+        f"🎉 THIS WEEK IN VEGAS — {_long_date(week_start)}",
+        "",
+        "Here's what's popping off this week at the hottest clubs and dayclubs in town. "
+        "Want in? Get on the guest list — it's on us.",
+        "",
+        f"👉 Sign up at {SIGNUP_URL} and we'll take care of the rest.",
+        "",
+        "— — —",
+        "",
+    ]
     any_events = False
     for day in days:
         header = _long_date(day["date"])
         venues = day.get("venues") or []
         if not venues:
-            lines.append(f"{header} — (nothing live on the master link yet)")
             continue
         any_events = True
-        lines.append(f"{header}:")
+        lines.append(f"🔥 {header}")
         for venue, headliner in venues:
-            lines.append(f"  • {venue}" + (f" — {headliner}" if headliner else ""))
+            lines.append(f"   • {venue}" + (f" — {headliner}" if headliner else ""))
         lines.append("")
     if not any_events:
-        lines.append("(Nothing is showing live on the master link for this week yet — "
-                     "it usually fills in as the week gets closer.)")
+        lines.append("This week's lineup is still landing — check back soon, or just "
+                     f"request your guest list now at {SIGNUP_URL} and we'll slot you in.")
+        lines.append("")
     if attached:
-        lines += ["", "This week's flyers are attached."]
-    lines += ["", "— Amy", "Playmaker Entertainment"]
-    subject = f"This week's lineup — week of {_long_date(week_start)}"
+        lines += ["📸 This week's flyers are attached — tag us and share them around!", ""]
+    lines += [
+        "— — —",
+        "",
+        f"Ready to go out? Request your guest list at {SIGNUP_URL}.",
+        "Bringing friends or family to town? Send them our way — we've got you covered.",
+        "Follow us on Instagram @playmaker.entertainment for daily updates.",
+        "",
+        "See you in Vegas! 🍾",
+        "Playmaker Entertainment",
+    ]
+    subject = f"🎉 This Week in Vegas — {_long_date(week_start)}"
     return subject, "\n".join(lines).replace("\n\n\n", "\n\n").strip() + "\n"

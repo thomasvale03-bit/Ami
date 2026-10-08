@@ -639,16 +639,18 @@ def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=F
                      "venues": [(v, headliners.headliner(v, d)) for v in venues]})
     attachments = _week_flyer_files(flyers_dir)
     subject, body = weekly_lineup_email(monday.isoformat(), days, attached=bool(attachments))
+    # Newsletter goes to the client/promoter group. Default: the team inbox;
+    # set WEEKLY_LINEUP_TO in Railway to the group address once it exists.
+    recipient = os.environ.get("WEEKLY_LINEUP_TO", "").strip() or rules.PLAYMAKER_EMAIL
     if mode == "dry-run":
-        log.info("[dry run] would send weekly lineup to %s (%d flyers)",
-                 rules.PLAYMAKER_EMAIL, len(attachments))
+        log.info("[dry run] would send weekly lineup to %s (%d flyers)", recipient, len(attachments))
         return
     if gmail_client.send_once(
             service, f"amy-lineup-{monday.isoformat()}@playmakerentertainment.com",
-            rules.PLAYMAKER_EMAIL, subject, body, sender=rules.SENDER_EMAIL,
+            recipient, subject, body, sender=rules.SENDER_EMAIL,
             attachments=attachments,
-            dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} subject:"{subject}" newer_than:6d'):
-        log.info("Weekly lineup sent to %s (%d flyers)", rules.PLAYMAKER_EMAIL, len(attachments))
+            dedupe_query=f'to:{recipient} subject:"{subject}" newer_than:6d'):
+        log.info("Weekly lineup sent to %s (%d flyers)", recipient, len(attachments))
 
 
 def run_once(service, mode, labels, allowlist=None, start_after=None):

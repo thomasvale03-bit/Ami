@@ -1175,10 +1175,11 @@ class WeeklyLineupTests(unittest.TestCase):
         days = [{"date": "2026-10-16", "venues": [("OMNIA Nightclub", "Steve Aoki")]},
                 {"date": "2026-10-17", "venues": [("XS Nightclub", None)]}]
         subject, body = weekly_lineup_email("2026-10-12", days, attached=True)
-        self.assertIn("week of", subject)
+        self.assertIn("This Week in Vegas", subject)
         self.assertIn("OMNIA Nightclub — Steve Aoki", body)
         self.assertIn("XS Nightclub", body)
         self.assertIn("flyers are attached", body)
+        self.assertIn("PlaymakerEntertainment.com", body)  # the sign-up CTA
 
     def test_sent_once_per_week_with_attachments(self):
         import tempfile
