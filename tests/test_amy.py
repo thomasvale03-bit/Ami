@@ -694,7 +694,7 @@ class ConciergeTests(unittest.TestCase):
         self.assertEqual(len(sent), 2)
         guest = next(a for a, k in sent if a[2] == "jane.sample@example.com")
         self.assertEqual(guest[3], "You're on the list — Playmaker Entertainment")
-        self.assertNotIn("http", guest[4])  # no link in the guest email
+        self.assertNotIn("tickets.taogroup.com", guest[4])  # no signup/promoter link in the guest email
         jose = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)
         self.assertIn("Jose", jose[4])
         self.assertIn("Ref: m1", jose[4])
@@ -1138,3 +1138,20 @@ class RecentConfirmationsTests(unittest.TestCase):
         self.assertEqual(confs[0]["first_name"], "Ava")
         self.assertIn("OMNIA Nightclub", confs[0]["venues"])
         self.assertIn("JEWEL Nightclub", confs[0]["venues"])
+
+
+class TaoAppBlockTests(unittest.TestCase):
+    """Guest confirmation includes the TAO app / ticket-wallet instructions."""
+
+    def test_app_block_on_tao_nights(self):
+        from templates.emails import guest_confirmation, TAO_APP_URL
+        body = guest_confirmation("Mia", [{"date": "2026-10-10", "venue": "OMNIA Nightclub"}])[1]
+        self.assertIn("To access your passes:", body)
+        self.assertIn("TAO Group Hospitality Rewards app", body)
+        self.assertIn(TAO_APP_URL, body)
+
+    def test_no_app_block_when_drais_only(self):
+        from templates.emails import guest_confirmation
+        drais = {"name": "Mia", "female_count": 1, "male_count": 0, "nights": ["2026-10-10"]}
+        body = guest_confirmation("Mia", [], drais=drais)[1]
+        self.assertNotIn("To access your passes:", body)

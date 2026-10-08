@@ -253,6 +253,13 @@ def guest_confirmation(first_name, nights, drais=None):
         parts.append(line)
     if drais:
         parts.append("Drai’s After Hours — just show this at the door:\n\n" + drais_guestlist(drais))
+    if nights:  # TAO venues issue passes through their app; Drai's-only has no wallet
+        parts.append(
+            "To access your passes:\n"
+            "1. Download the TAO Group Hospitality Rewards app.\n"
+            "2. Sign up using the same email address you used on the form.\n"
+            "3. Open the Ticket Wallet section to view your passes once they're issued.\n"
+            f"Download: {TAO_APP_URL}")
     parts += [
         "Arrive early and bring a valid, government-issued 21+ photo ID. Guest-list admission "
         "is subject to each venue’s rules, dress code, and capacity.",
