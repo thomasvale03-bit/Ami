@@ -69,10 +69,29 @@ def _week_contains(week_name, target):
     return start - datetime.timedelta(days=1) <= target <= end + datetime.timedelta(days=1)
 
 
+def _dismiss_cookie_banner(pg):
+    """Dropbox's cookie-consent banner overlaps the flyer corner. Accept it once
+    (sets a cookie for the whole context) so screenshots come out clean."""
+    for sel in ("button:has-text('Accept All')", "button:has-text('Accept all')",
+                "button:has-text('Allow all')", "[data-testid='cookie-consent'] button"):
+        try:
+            btn = pg.locator(sel).first
+            if btn.is_visible(timeout=2000):
+                btn.click(timeout=2000)
+                pg.wait_for_timeout(500)
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def download_week_images(out_dir, target=None):
     """Save the current week's flyer JPGs to out_dir (one per venue/show) by
     screenshotting each image preview, the method Dropbox doesn't block. Returns
-    the list of saved file paths. Best-effort: skips anything it can't render."""
+    the list of saved file paths. Best-effort: skips anything it can't render.
+
+    Keeps only the feed-ratio (1080x1350) image per show, so each event appears
+    once rather than once per social format (feed + story)."""
     import datetime
     target = target or datetime.date.today()
     os.makedirs(out_dir, exist_ok=True)
@@ -83,6 +102,7 @@ def download_week_images(out_dir, target=None):
         pg = b.new_context(locale="en-US").new_page(); pg.set_default_timeout(20000)
         weeks = [w for w in names(pg, url(month_folder)) if _week_contains(w, target)]
         print("week match:", weeks, file=sys.stderr)
+        _dismiss_cookie_banner(pg)  # once per context, before any screenshot
         for wk in weeks:
             for vf in names(pg, url(month_folder, wk)):
                 venue = FOLDER_TO_VENUE.get(vf.strip().upper())
@@ -91,11 +111,14 @@ def download_week_images(out_dir, target=None):
                 for fn in names(pg, url(month_folder, wk, vf)):
                     if not fn.lower().endswith((".jpg", ".jpeg", ".png")):
                         continue
+                    if "1080x1920" in fn:   # skip the story format; keep feed (1080x1350)
+                        continue
                     if not parse(fn, venue):  # skip weekly-overview / undated graphics
                         continue
                     try:
                         pg.goto(url(month_folder, wk, vf, fn), wait_until="domcontentloaded")
                         pg.wait_for_timeout(2500)
+                        _dismiss_cookie_banner(pg)  # reappears until the cookie sticks
                         img = pg.locator("img[src*='previews'], img.sl-preview-image, "
                                          "div[data-testid='preview-content'] img").first
                         img.wait_for(timeout=15000)
