@@ -629,8 +629,10 @@ def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=F
     # schedule, and still deduped so it goes out once.
     try:
         with open(os.path.join(flyers_dir, ".send_now")) as fh:
-            if fh.read().strip() == today.isoformat():
-                force = True
+            sent_date = fh.read().strip()
+        # today or yesterday (Vegas), so a build finishing after midnight still fires.
+        if sent_date in (today.isoformat(), (today - timedelta(days=1)).isoformat()):
+            force = True
     except OSError:
         pass
     if not force:
