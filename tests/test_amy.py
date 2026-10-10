@@ -1177,7 +1177,7 @@ class RecentConfirmationsTests(unittest.TestCase):
         svc.users().messages().get().execute.return_value = {
             "internalDate": sent_ms,
             "payload": {"headers": [{"name": "To", "value": "Ava <ava@example.com>"}]}}
-        with mock.patch.object(gmail_client, "get_plain_text_body", return_value=body):
+        with mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, body))  # real function returns (msg, body):
             confs = gmail_client.recent_confirmations(svc)
         self.assertEqual(confs[0]["last_night"], date(2026, 10, 10))
         self.assertEqual(confs[0]["first_name"], "Ava")

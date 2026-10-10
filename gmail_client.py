@@ -202,7 +202,8 @@ def recent_confirmations(service, days=45):
         ).execute()
         headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
         sent = datetime.fromtimestamp(int(msg.get("internalDate", "0")) / 1000, tz=timezone.utc).date()
-        body = get_plain_text_body(service, ref["id"]).replace("\r\n", "\n")
+        _msg, body = get_plain_text_body(service, ref["id"])  # returns (message, text)
+        body = (body or "").replace("\r\n", "\n")
         first = re.search(r"\bHi ([^,\s]+),", body)
         venues = [v for v in rules.ALL_AUTHORIZED_VENUES if v in body]
         dates = [d for d in (_resolve_date(m, day, sent)
