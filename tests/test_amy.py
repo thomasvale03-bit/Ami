@@ -762,6 +762,24 @@ class ConciergeTests(unittest.TestCase):
         jose = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)[4]
         self.assertIn("couldn't read the master link", jose)
 
+    def test_jose_email_has_tap_signup_links_when_live(self):
+        from datetime import date
+        self.catalog = {
+            ("JEWEL Nightclub", date(2026, 10, 30)): {"url": "https://tickets.taogroup.com/e/jewel-30"},
+            ("Marquee Dayclub", date(2026, 10, 30)): {"url": "https://tickets.taogroup.com/e/marquee-dc-30"},
+            ("OMNIA Nightclub", date(2026, 10, 31)): {"url": "https://tickets.taogroup.com/e/omnia-31"},
+        }
+        try:
+            out, sent, submit = self._handle()
+        finally:
+            self.catalog = {}
+        jose = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)[4]
+        submit.assert_not_called()  # Amy never submits; Jose taps and clears the check
+        self.assertIn("https://tickets.taogroup.com/e/jewel-30", jose)      # nightclub tap link
+        self.assertIn("https://tickets.taogroup.com/e/marquee-dc-30", jose) # dayclub tap link
+        self.assertIn("https://tickets.taogroup.com/e/omnia-31", jose)
+        self.assertIn("Email: jane.sample@example.com", jose)  # copy-paste details present
+
     def test_needs_attention_is_suppressed(self):
         # A request missing its email would normally trigger a team alert.
         text = FIXTURE.replace("Email: jane.sample@example.com\nPhone", "Email: \nPhone")

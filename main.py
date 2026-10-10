@@ -285,11 +285,16 @@ def concierge_handoff(service, message_id, raw, dry_run):
             chosen = opts[0]
         # Dayclub: only when its free pass is actually live that day.
         dayclub = next((dv for dv in dayclub_candidates(request) if (dv, d) in catalog), None) if live else None
+        # Direct sign-up links for the chosen venue(s), so Jose just taps, clears
+        # the check himself, and submits. Only present when live on the feed.
+        signup_url = (catalog.get((chosen, d)) or {}).get("url")
+        dayclub_url = (catalog.get((dayclub, d)) or {}).get("url") if dayclub else None
         nights.append({"date": d.isoformat(), "venue": chosen,
                        "backups": [v for v in opts if v != chosen][:3],
                        "dayclub": dayclub, "rerouted_from": rerouted_from,
                        "unverified": not live, "none_live": none_live,
-                       "headliner": headliners.headliner(chosen, d)})
+                       "headliner": headliners.headliner(chosen, d),
+                       "signup_url": signup_url, "dayclub_url": dayclub_url})
         prev = chosen
 
     drais_nights = [n["date"] for n in nights] if request.get("drais") else []

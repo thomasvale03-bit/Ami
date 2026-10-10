@@ -270,27 +270,41 @@ def guest_confirmation(first_name, nights, drais=None):
 
 
 def jose_signup_order(request, nights, drais_nights=()):
-    """Team email telling the admin (Jose) exactly who to sign up on TAO,
-    through the promoter dashboard so it credits Playmaker. nights carry the
-    primary club, backups, and any dayclub to add."""
+    """Team email telling the admin (Jose) exactly who to sign up on TAO.
+
+    For each night the chosen venue's direct sign-up link is included when it's
+    live on the feed, so Jose just taps it, clears the quick check himself, and
+    submits — the guest's details are right here to drop in. The link opens the
+    official TAO/TicketSauce page through the promoter link, so it credits
+    Playmaker."""
     name = f"{request['first_name']} {request['last_name']}".strip()
+    party = party_phrase(request['female_count'], request['male_count'])
+    phone = request.get('phone') or '(none)'
     lines = [
-        "Jose — please sign this guest up on TAO through your promoter dashboard "
-        "(so it credits Thomas / Playmaker), then mark done.", "",
-        f"Guest: {name}", f"Email: {request['email']}", f"Phone: {request.get('phone') or '(none)'}",
-        f"Party: {party_phrase(request['female_count'], request['male_count'])}",
+        "Jose — tap each night's link below, clear the quick check, and submit. "
+        "The guest's details to drop in are right here. Mark done after.", "",
+        "— Copy-paste details —",
+        f"Name: {name}", f"Email: {request['email']}", f"Phone: {phone}",
+        f"Party: {party}",
         f"Promoter: {request['promoter']}" if request.get("promoter") else "Promoter: (none given)",
         "",
+        "— Nights —",
     ]
     for n in nights:
         line = f"{_long_date(n['date'])} — {n['venue']}"
         if n.get("headliner"):
             line += f" ({n['headliner']})"
-        if n.get("backups"):
-            line += f"  (backups if full: {', '.join(n['backups'])})"
         lines.append(line)
+        if n.get("signup_url"):
+            lines.append(f"    👉 Sign up: {n['signup_url']}")
+        else:
+            lines.append("    (no direct link on the feed — open your promoter dashboard for this one.)")
+        if n.get("backups"):
+            lines.append(f"    backups if full: {', '.join(n['backups'])}")
         if n.get("dayclub"):
-            lines.append(f"    dayclub: {n['dayclub']} — live on the master link, add it too.")
+            lines.append(f"    + dayclub: {n['dayclub']} (daytime — add it too)")
+            if n.get("dayclub_url"):
+                lines.append(f"      👉 Sign up: {n['dayclub_url']}")
         if n.get("rerouted_from"):
             lines.append(f"    note: {n['rerouted_from']} skipped — its guest list is closed for "
                          f"same-day sign-ups on Fri/Sat.")
@@ -300,12 +314,13 @@ def jose_signup_order(request, nights, drais_nights=()):
         elif n.get("unverified"):
             lines.append("    note: couldn't read the master link just now — confirm this night "
                          "is open before signing up.")
+        lines.append("")
     if drais_nights:
-        lines += ["", "Drai’s After Hours: no signup needed — the guest’s "
-                  "confirmation carries the door text."]
+        lines += ["Drai’s After Hours: no signup needed — the guest’s "
+                  "confirmation carries the door text.", ""]
     subject = f"Sign up — {name}, {request['start_date']}" + (
         f" to {request['end_date']}" if request['end_date'] != request['start_date'] else "")
-    return subject, "\n".join(lines)
+    return subject, "\n".join(lines).rstrip() + "\n"
 
 
 SIGNUP_URL = "PlaymakerEntertainment.com"
