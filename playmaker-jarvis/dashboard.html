@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Playmaker Jarvis</title>
+<style>
+:root {
+  --gold: #d7ad52;
+  --gold-bright: #f2d58f;
+  --gold-dim: #6f5a2c;
+  --bg: #070706;
+  --panel: #100f0c;
+  --line: #2f2818;
+  --text: #f5f0e4;
+  --muted: #8f887a;
+  --bad: #ff8f7a;
+  --ok: #9fd39a;
+  --u: clamp(12px, 0.85vw, 22px);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: radial-gradient(ellipse at 50% -10%, #2a210d 0%, var(--bg) 55%);
+  color: var(--text);
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: var(--u);
+  padding: calc(var(--u) * 2);
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: calc(var(--u) * 1.4);
+  overflow: hidden;
+}
+.serif { font-family: Georgia, "Times New Roman", serif; }
+.eyebrow { font-size: 0.75em; letter-spacing: 0.24em; text-transform: uppercase; color: var(--muted); }
+.gold { color: var(--gold); }
+
+header { grid-row: 1; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line); padding-bottom: calc(var(--u) * 1.2); }
+.brand { font-size: 1.7em; letter-spacing: 0.32em; font-weight: 300; }
+.brand b { color: var(--gold); font-weight: 600; }
+.clock { text-align: right; }
+#clock { font-size: 2.6em; color: var(--gold-bright); line-height: 1; }
+#today { margin-top: 0.3em; }
+
+.pill { border: 1px solid var(--gold-dim); padding: 0.5em 1em; font-size: 0.8em; letter-spacing: 0.16em; text-transform: uppercase; color: #dcc690; display: inline-flex; align-items: center; gap: 0.6em; }
+.pill .dot { width: 0.6em; height: 0.6em; border-radius: 50%; background: var(--gold); }
+.pill.ok .dot { background: var(--ok); }
+.pill.bad { border-color: #7a3a2e; color: var(--bad); }
+.pill.bad .dot { background: var(--bad); }
+.pill.run .dot { animation: pulse 1s infinite alternate; }
+@keyframes pulse { from { opacity: 0.25; } to { opacity: 1; } }
+
+.banner { grid-row: 2; border: 1px solid #7a3a2e; background: #1c0f0b; color: #ffc4b8; padding: 1em 1.3em; line-height: 1.5; display: none; }
+.banner b { color: var(--bad); }
+.banner.show { display: block; }
+.banner.note { border-color: var(--gold-dim); background: #15120a; color: #e9d9ad; }
+
+main { grid-row: 3; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.9fr); gap: calc(var(--u) * 1.4); min-height: 0; }
+.panel { background: linear-gradient(150deg, #15130e, #0a0a08); border: 1px solid var(--line); padding: calc(var(--u) * 2); min-height: 0; }
+
+.hero { display: flex; flex-direction: column; justify-content: space-between; }
+#total { font-size: 9em; line-height: 0.95; color: var(--gold); margin: 0.12em 0 0.05em; }
+#reportDate { font-size: 1.5em; }
+.facts { display: grid; grid-template-columns: auto 1fr; gap: 0.55em 1.2em; margin-top: 1.6em; color: var(--muted); }
+.facts span:nth-child(even) { color: var(--text); }
+button {
+  font: inherit; cursor: pointer; background: transparent; color: var(--gold-bright);
+  border: 1px solid var(--gold); padding: 0.8em 1.6em; letter-spacing: 0.18em; text-transform: uppercase; font-size: 0.85em;
+}
+button:hover:not(:disabled) { background: var(--gold); color: #0b0a07; }
+button:disabled { opacity: 0.45; cursor: default; }
+#checkNow { margin-top: 1.8em; width: 100%; padding: 1.1em; }
+
+.events { display: flex; flex-direction: column; overflow: hidden; }
+.events-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.8em; }
+#eventList { overflow-y: auto; }
+.row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.4em 1.5em; padding: 1.05em 0.2em; border-bottom: 1px solid #22201a; }
+.row .name { font-size: 1.45em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .num { font-size: 2.6em; color: var(--gold); text-align: right; line-height: 1; grid-row: span 2; align-self: center; }
+.row .sub { color: var(--muted); font-size: 0.9em; }
+.row .err { color: var(--bad); }
+.bar { height: 4px; background: #221e14; grid-column: 1 / -1; }
+.bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--gold-dim), var(--gold)); }
+.empty { color: var(--muted); font-size: 1.2em; padding: 2em 0; line-height: 1.6; }
+
+footer { grid-row: 4; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.9fr); gap: calc(var(--u) * 1.4); }
+.spotify { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 1.2em; align-items: center; }
+#art { width: 7em; height: 7em; background: #1b1810 center/cover no-repeat; border: 1px solid var(--line); }
+#trackTitle { font-size: 1.3em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 0.3em; }
+#trackArtist { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 0.2em; }
+.progress { height: 3px; background: #2a2416; margin: 0.8em 0; }
+.progress i { display: block; height: 100%; width: 0; background: var(--gold); }
+.controls { display: flex; gap: 0.5em; flex-wrap: wrap; }
+.controls button { padding: 0.5em 1em; }
+#spotifyMsg { color: var(--muted); font-size: 0.85em; margin-top: 0.5em; min-height: 1.2em; }
+#log { font-family: Consolas, monospace; font-size: 0.8em; color: #a49c8b; white-space: pre; overflow: hidden; line-height: 1.55; height: calc(1.55em * 7); text-overflow: ellipsis; }
+
+@media (max-width: 900px) {
+  body { overflow: auto; height: auto; }
+  main, footer { grid-template-columns: minmax(0, 1fr); }
+  header { flex-wrap: wrap; gap: 1em; }
+  #log { white-space: pre-wrap; height: auto; }
+  #total { font-size: 6em; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">PLAYMAKER <b>JARVIS</b></div>
+  <div id="status" class="pill"><span class="dot"></span><span id="statusText">Loading</span></div>
+  <div class="clock"><div id="clock" class="serif">--:--</div><div id="today" class="eyebrow"></div></div>
+</header>
+
+<div id="banner" class="banner"></div>
+
+<main>
+  <section class="panel hero">
+    <div>
+      <div class="eyebrow">TAO validations</div>
+      <div id="total" class="serif">&mdash;</div>
+      <div id="reportDate" class="serif">Waiting for first report</div>
+      <div class="facts">
+        <span>Last checked</span><span id="checkedAt">&mdash;</span>
+        <span>Events counted</span><span id="eventCount">&mdash;</span>
+        <span>Next automatic check</span><span id="nextCheck">&mdash;</span>
+      </div>
+    </div>
+    <button id="checkNow" type="button">Check now</button>
+  </section>
+
+  <section class="panel events">
+    <div class="events-head">
+      <div class="eyebrow">Breakdown by event</div>
+      <div id="reportLabel" class="eyebrow"></div>
+    </div>
+    <div id="eventList"><div class="empty">No report yet. Press <b class="gold">Check now</b> or wait for the 10:00 AM check.</div></div>
+  </section>
+</main>
+
+<footer>
+  <section class="panel spotify">
+    <div id="art"></div>
+    <div>
+      <div class="eyebrow">Spotify</div>
+      <div id="trackTitle">Not connected</div>
+      <div id="trackArtist"></div>
+      <div class="progress"><i id="progress"></i></div>
+      <div class="controls" id="controls"></div>
+      <div id="spotifyMsg"></div>
+    </div>
+  </section>
+  <section class="panel">
+    <div class="eyebrow">Jarvis activity</div>
+    <div id="log"></div>
+  </section>
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+let scheduleTime = "10:00";
+let running = false;
+
+function tickClock() {
+  const now = new Date();
+  $("clock").textContent = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  $("today").textContent = now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+  const [h, m] = scheduleTime.split(":").map(Number);
+  const next = new Date(now);
+  next.setHours(h, m, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  $("nextCheck").textContent = next.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+}
+
+const fmtDate = (ymd) => ymd ? new Date(ymd + "T12:00:00").toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" }) : "";
+const fmtTime = (iso) => iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—";
+
+function setStatus(kind, text) {
+  $("status").className = "pill " + kind;
+  $("statusText").textContent = text;
+}
+
+function renderReport(report) {
+  if (!report) return;
+  $("total").textContent = report.total ?? 0;
+  $("reportDate").textContent = "Events that started " + fmtDate(report.reportDate);
+  $("checkedAt").textContent = fmtTime(report.finishedAt ?? report.checkedAt);
+  $("eventCount").textContent = (report.events ?? []).length;
+  $("reportLabel").textContent = fmtDate(report.reportDate);
+  const events = report.events ?? [];
+  if (!events.length) {
+    $("eventList").innerHTML = `<div class="empty">${esc((report.notes ?? [])[0] ?? "No events found for this date.")}</div>`;
+    return;
+  }
+  const max = Math.max(1, ...events.map((e) => e.validations ?? 0));
+  $("eventList").innerHTML = events.map((e) => `
+    <div class="row">
+      <div class="name">${esc(e.event)}</div>
+      <div class="num serif">${e.error ? "!" : esc(e.validations)}</div>
+      <div class="sub ${e.error ? "err" : ""}">${e.error ? "Could not count: " + esc(e.error) : `${esc(e.notRedeemed ?? 0)} not redeemed`}</div>
+      <div class="bar"><i style="width:${e.error ? 0 : Math.round(((e.validations ?? 0) / max) * 100)}%"></i></div>
+    </div>`).join("");
+}
+
+async function refresh() {
+  try {
+    const data = await fetch("/api/report", { cache: "no-store" }).then((r) => r.json());
+    scheduleTime = data.scheduleTime || scheduleTime;
+    running = !!data.running;
+    const latest = data.latest;
+    const banner = $("banner");
+    banner.className = "banner";
+    if (running) {
+      setStatus("run", "Checking TAO now");
+    } else if (!latest) {
+      setStatus("", "Waiting for first check");
+    } else if (latest.status === "error") {
+      setStatus("bad", "Last check failed");
+    } else if (latest.status === "success") {
+      setStatus("ok", "Up to date");
+    } else {
+      setStatus("", latest.status === "partial" ? "Partly counted" : "Check needs attention");
+    }
+
+    if (latest?.status === "error") {
+      banner.className = "banner show";
+      banner.innerHTML = `<b>Last check failed (${esc(fmtTime(latest.finishedAt))}):</b> ${esc(latest.message)}<br>${esc(latest.hint ?? "")}` +
+        (data.lastSuccess ? `<br>Showing the last successful report below.` : "");
+      renderReport(data.lastSuccess);
+    } else {
+      if (latest?.notes?.length && latest.status !== "success") {
+        banner.className = "banner note show";
+        banner.textContent = latest.notes.join(" ");
+      }
+      renderReport(latest);
+    }
+    $("checkNow").disabled = running;
+    $("checkNow").textContent = running ? "Checking…" : "Check now";
+    $("log").textContent = (data.logTail ?? []).slice(-7).map((l) => l.replace(/^\d{4}-\d{2}-\d{2} /, "")).join("\n");
+  } catch {
+    setStatus("bad", "Dashboard server offline");
+  }
+  setTimeout(refresh, running ? 3000 : 30000);
+}
+
+$("checkNow").addEventListener("click", async () => {
+  $("checkNow").disabled = true;
+  await fetch("/api/check", { method: "POST" }).catch(() => {});
+  running = true;
+  setStatus("run", "Checking TAO now");
+  setTimeout(refresh, 1500);
+});
+
+// ---------------------------------------------------------------- Spotify
+async function spotifyControl(action) {
+  const res = await fetch("/api/spotify/" + action, { method: "POST" }).then((r) => r.json()).catch(() => ({ error: "Dashboard server offline" }));
+  $("spotifyMsg").textContent = res.error ?? "";
+  setTimeout(refreshSpotify, 600);
+}
+
+function spotifyButtons(isPlaying) {
+  $("controls").innerHTML = `
+    <button type="button" data-a="previous">Prev</button>
+    <button type="button" data-a="${isPlaying ? "pause" : "play"}">${isPlaying ? "Pause" : "Play"}</button>
+    <button type="button" data-a="next">Next</button>`;
+  $("controls").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => spotifyControl(b.dataset.a)));
+}
+
+async function refreshSpotify() {
+  let s;
+  try { s = await fetch("/api/spotify", { cache: "no-store" }).then((r) => r.json()); } catch { s = { error: "Dashboard server offline" }; }
+  $("progress").style.width = "0";
+  $("art").style.backgroundImage = "";
+  if (s.configured === false) {
+    $("trackTitle").textContent = "Spotify not set up";
+    $("trackArtist").textContent = "Add your Spotify Client ID to config.json (see README.txt).";
+    $("controls").innerHTML = "";
+  } else if (s.connected === false) {
+    $("trackTitle").textContent = "Not connected";
+    $("trackArtist").textContent = "Sign in once and Jarvis stays connected.";
+    $("controls").innerHTML = `<button type="button" onclick="location.href='/spotify/login'">Connect Spotify</button>`;
+  } else if (s.error) {
+    $("trackTitle").textContent = "Spotify";
+    $("trackArtist").textContent = s.error;
+  } else if (!s.active) {
+    $("trackTitle").textContent = "Nothing playing";
+    $("trackArtist").textContent = "Start Spotify on this PC or your phone.";
+    spotifyButtons(false);
+  } else {
+    $("trackTitle").textContent = s.title;
+    $("trackArtist").textContent = [s.artist, s.device ? "on " + s.device : ""].filter(Boolean).join("  ·  ");
+    if (s.art) $("art").style.backgroundImage = `url("${s.art}")`;
+    if (s.durationMs) $("progress").style.width = Math.min(100, (s.progressMs / s.durationMs) * 100) + "%";
+    spotifyButtons(s.isPlaying);
+  }
+}
+
+const params = new URLSearchParams(location.search);
+if (params.get("spotify") === "failed") $("spotifyMsg").textContent = "Spotify sign-in did not finish. Try Connect Spotify again.";
+if (params.has("spotify")) history.replaceState(null, "", "/");
+
+tickClock();
+setInterval(tickClock, 1000);
+refresh();
+refreshSpotify();
+setInterval(refreshSpotify, 5000);
+</script>
+</body>
+</html>

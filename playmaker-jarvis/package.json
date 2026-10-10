@@ -1,0 +1,18 @@
+{
+  "name": "playmaker-jarvis-tao",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "login": "node login.js",
+    "check": "node check.js",
+    "check:debug": "node check.js --debug",
+    "dashboard": "node server.js"
+  },
+  "dependencies": {
+    "playwright-core": "^1.54.2"
+  }
+}

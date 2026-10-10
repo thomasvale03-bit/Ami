@@ -1,0 +1,7 @@
+{
+  "taoLoginUrl": "https://tickets.taogroup.com/login",
+  "scheduleTime": "10:00",
+  "dashboardPort": 8787,
+  "debugSlowMoMs": 250,
+  "spotifyClientId": ""
+}
