@@ -1,0 +1,8 @@
+.git
+token.json
+client_secret*.json
+credentials.json
+amy_records.jsonl
+__pycache__
+*.pyc
+tests
