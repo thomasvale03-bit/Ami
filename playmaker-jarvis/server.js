@@ -138,6 +138,7 @@ async function handle(req, res) {
       lastSuccess: readJson(PATHS.lastSuccess),
       running: readLock(),
       scheduleTime: config.scheduleTime,
+      voice: { enabled: config.voiceEnabled, address: config.voiceAddress, name: config.voiceName },
       logTail: tailLog(12),
     });
   }

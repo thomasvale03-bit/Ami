@@ -30,5 +30,5 @@ pause
 exit /b 1
 
 :open
-start "" msedge --new-window --app=%URL% --start-fullscreen
+start "" msedge --new-window --app=%URL% --start-fullscreen --autoplay-policy=no-user-gesture-required
 exit /b 0

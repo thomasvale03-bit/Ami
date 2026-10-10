@@ -60,6 +60,21 @@ A small minimized window called "Playmaker Jarvis Server" runs the
 dashboard. Leave it open. If you close it, run Start-Jarvis-Dashboard.bat.
 
 
+JARVIS VOICE
+- Click VOICE on the dashboard once. Jarvis greets you, and from then on
+  he reads each new report out loud (including the 10:00 AM check) and
+  tells you if a check fails or TAO needs you to sign in again.
+- Click BRIEF ME any time to hear the latest numbers.
+- Windows only allows web pages to talk after one click, so after a
+  restart click VOICE (or anywhere on the dashboard) once.
+- He uses the British male voice "Microsoft Ryan (Natural)" built into
+  Edge. To change it, put part of another voice name in config.json, e.g.
+  "voiceName": "Thomas". "voiceAddress" is what he calls you ("sir",
+  "Mr. Vale", "boss"). Set "voiceEnabled": false to turn the voice off.
+  After editing config.json, close the "Playmaker Jarvis Server" window
+  and run Start-Jarvis-Dashboard.bat again.
+
+
 SPOTIFY (optional, about 5 minutes, one time)
 1. Go to https://developer.spotify.com/dashboard and log in with your
    Spotify account. Click "Create app".

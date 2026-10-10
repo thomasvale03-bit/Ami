@@ -70,6 +70,9 @@ button {
 button:hover:not(:disabled) { background: var(--gold); color: #0b0a07; }
 button:disabled { opacity: 0.45; cursor: default; }
 #checkNow { margin-top: 1.8em; width: 100%; padding: 1.1em; }
+.voice-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8em; margin-top: 0.8em; }
+.voice-row button { padding: 0.8em; }
+#voiceToggle.on { background: rgba(215, 173, 82, 0.14); }
 
 .events { display: flex; flex-direction: column; overflow: hidden; }
 .events-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.8em; }
@@ -125,7 +128,13 @@ footer { grid-row: 4; display: grid; grid-template-columns: minmax(0, 1fr) minma
         <span>Next automatic check</span><span id="nextCheck">&mdash;</span>
       </div>
     </div>
-    <button id="checkNow" type="button">Check now</button>
+    <div>
+      <button id="checkNow" type="button">Check now</button>
+      <div class="voice-row">
+        <button id="voiceToggle" type="button">Voice off</button>
+        <button id="briefMe" type="button">Brief me</button>
+      </div>
+    </div>
   </section>
 
   <section class="panel events">
@@ -206,6 +215,7 @@ async function refresh() {
   try {
     const data = await fetch("/api/report", { cache: "no-store" }).then((r) => r.json());
     scheduleTime = data.scheduleTime || scheduleTime;
+    if (data.voice) voiceConfig = data.voice;
     running = !!data.running;
     const latest = data.latest;
     const banner = $("banner");
@@ -236,6 +246,7 @@ async function refresh() {
     }
     $("checkNow").disabled = running;
     $("checkNow").textContent = running ? "Checking…" : "Check now";
+    announceIfNew(latest, data.lastSuccess);
     $("log").textContent = (data.logTail ?? []).slice(-7).map((l) => l.replace(/^\d{4}-\d{2}-\d{2} /, "")).join("\n");
   } catch {
     setStatus("bad", "Dashboard server offline");
@@ -247,9 +258,134 @@ $("checkNow").addEventListener("click", async () => {
   $("checkNow").disabled = true;
   await fetch("/api/check", { method: "POST" }).catch(() => {});
   running = true;
+  say(`Right away, ${voiceConfig.address}. Checking TAO now.`);
   setStatus("run", "Checking TAO now");
   setTimeout(refresh, 1500);
 });
+
+// ---------------------------------------------------------------- Jarvis voice
+// Uses the speech voices built into Windows/Edge. Prefers a British male
+// natural voice (e.g. "Microsoft Ryan Online (Natural)"). Browsers only allow
+// speech after one click on the page, so press "Voice on" once per session.
+let voiceConfig = { enabled: true, address: "sir", name: "" };
+let latestReport = null;
+let lastSuccessReport = null;
+let pageLoadedAt = Date.now();
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
+};
+let voiceOn = store.get("jarvisVoice") === "on";
+let voiceUnlocked = false;
+
+function pickVoice() {
+  const voices = speechSynthesis.getVoices();
+  if (voiceConfig.name) {
+    const wanted = voices.find((v) => v.name.toLowerCase().includes(voiceConfig.name.toLowerCase()));
+    if (wanted) return wanted;
+  }
+  const prefs = [
+    (v) => /en-GB/i.test(v.lang) && /Ryan.*Natural/i.test(v.name),
+    (v) => /en-GB/i.test(v.lang) && /Thomas.*Natural/i.test(v.name),
+    (v) => /en-GB/i.test(v.lang) && /Natural/i.test(v.name) && /Ryan|Thomas|Alfie|Elliot|Noah|Oliver|Ethan/i.test(v.name),
+    (v) => /en-GB/i.test(v.lang) && /George|Ryan|Thomas|Daniel|Male/i.test(v.name),
+    (v) => /en-GB/i.test(v.lang),
+    (v) => /^en/i.test(v.lang),
+  ];
+  for (const test of prefs) {
+    const v = voices.find(test);
+    if (v) return v;
+  }
+  return voices[0] ?? null;
+}
+
+function say(text) {
+  if (!voiceOn || !voiceConfig.enabled || !("speechSynthesis" in window) || !text) return;
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice();
+    if (v) { u.voice = v; u.lang = v.lang; }
+    u.rate = 0.98;
+    u.pitch = 0.9;
+    speechSynthesis.speak(u);
+  } catch (error) {
+    console.warn("Jarvis voice unavailable:", error);
+  }
+}
+
+function greeting() {
+  const h = new Date().getHours();
+  return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+}
+
+function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
+
+function summarize(report, lastSuccess) {
+  const sir = voiceConfig.address;
+  if (!report) return `No report yet, ${sir}. The next check runs at ${scheduleTime.replace(/^0/, "")}.`;
+  const day = fmtDate(report.reportDate);
+  if (report.status === "error") {
+    const why = /not signed in|sign-in|session/i.test(report.message ?? "")
+      ? "Your TAO session appears to have expired. Please run the login helper and sign in again."
+      : "I've saved the details in the error log.";
+    const fallback = lastSuccess ? ` The last good report showed ${plural(lastSuccess.total, "validation")}.` : "";
+    return `${sir[0].toUpperCase() + sir.slice(1)}, I'm afraid the last check failed. ${why}${fallback}`;
+  }
+  const events = (report.events ?? []).filter((e) => !e.error);
+  if (!(report.events ?? []).length) return `${greeting()}, ${sir}. I found no events that started on ${day}.`;
+  let text = `${greeting()}, ${sir}. For events that started on ${day}, we have ${plural(report.total, "validation")} across ${plural(report.events.length, "event")}.`;
+  const top = events[0];
+  if (top && events.length > 1) text += ` ${top.event} leads with ${top.validations}.`;
+  const failed = report.events.length - events.length;
+  if (failed) text += ` However, I couldn't count ${plural(failed, "event")}. Details are on screen.`;
+  return text;
+}
+
+function announceIfNew(latest, lastSuccess) {
+  latestReport = latest;
+  lastSuccessReport = lastSuccess;
+  if (!latest?.finishedAt) return;
+  const key = latest.finishedAt;
+  const isFresh = new Date(key).valueOf() > pageLoadedAt - 5 * 60000;
+  if (store.get("jarvisLastAnnounced") === key) return;
+  if (!voiceOn || !voiceUnlocked) return;
+  store.set("jarvisLastAnnounced", key);
+  if (isFresh) say(summarize(latest, lastSuccess));
+}
+
+function renderVoiceButton() {
+  const b = $("voiceToggle");
+  b.textContent = voiceOn ? (voiceUnlocked ? "Voice on" : "Tap to enable voice") : "Voice off";
+  b.classList.toggle("on", voiceOn);
+}
+
+$("voiceToggle").addEventListener("click", () => {
+  if (voiceOn && voiceUnlocked) {
+    voiceOn = false;
+    speechSynthesis.cancel();
+  } else {
+    voiceOn = true;
+    voiceUnlocked = true;
+  }
+  store.set("jarvisVoice", voiceOn ? "on" : "off");
+  renderVoiceButton();
+  if (voiceOn) say(`${greeting()}, ${voiceConfig.address}. Jarvis is online.`);
+});
+
+$("briefMe").addEventListener("click", () => {
+  if (!voiceOn || !voiceUnlocked) { voiceOn = true; voiceUnlocked = true; store.set("jarvisVoice", "on"); renderVoiceButton(); }
+  speechSynthesis.cancel();
+  say(summarize(latestReport, lastSuccessReport));
+});
+
+// Any first click on the page unlocks speech if voice was left on last time.
+document.addEventListener("click", (e) => {
+  if (e.target.closest("#voiceToggle, #briefMe")) return;
+  if (voiceOn && !voiceUnlocked) { voiceUnlocked = true; renderVoiceButton(); }
+}, { capture: true });
+
+if ("speechSynthesis" in window) speechSynthesis.onvoiceschanged = () => {};
+renderVoiceButton();
 
 // ---------------------------------------------------------------- Spotify
 async function spotifyControl(action) {

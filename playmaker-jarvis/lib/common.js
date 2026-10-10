@@ -27,6 +27,9 @@ const DEFAULT_CONFIG = {
   dashboardPort: 8787,
   debugSlowMoMs: 250,
   spotifyClientId: "",
+  voiceEnabled: true,
+  voiceAddress: "sir",
+  voiceName: "",
 };
 
 export function loadConfig() {
