@@ -525,6 +525,13 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
         raw = posh.parse_signup(message_id, body)
         if posh_webhook.is_webhook_signup(body):
             raw["posh"]["via"] = "webhook"
+            if posh_webhook.needs_review(body) and not raw.get("_action_needed"):
+                raw["_action_needed"] = (
+                    f"Posh recurring event: Posh only sent the series start "
+                    f"({raw['posh'].get('event_start')}), and the real date of this order's event "
+                    f"could not be looked up, so the night ({raw.get('start_date')}) is a guess. "
+                    "Not booked automatically.",
+                    "Check the order in Posh for the real night and register this guest manually.")
         order = raw["posh"].get("order_number")
         log.info("%s: source POSH, order %s, event %r, ticket %r", message_id, order or "(none)",
                  raw["posh"].get("event_name"), raw["posh"].get("ticket"))

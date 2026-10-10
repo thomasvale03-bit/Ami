@@ -213,3 +213,20 @@ If webhook times turn out to be real UTC, set `POSH_EVENT_START_IS_UTC=true`.
 `https://<railway-domain>/webhooks/posh?token=<POSH_WEBHOOK_TOKEN>`, enable **New order**.
 If Posh sends a signature header, its *name* is logged ("signature-like headers
 present") so it can be verified later.
+
+### Real night for recurring Posh series (child-event lookup)
+
+Each date in a Posh recurring series is a separate child event with its own
+`event_id`, but the webhook's `event_start` is the series' first date. Amy now
+reads the child's real start from its public Posh page (`posh_lookup.py`):
+- `https://posh.vip/e/<slug>` pages (allowed by robots.txt) have JSON-LD
+  `"startDate": "2026-10-17T19:30:00-07:00"`, and they list sibling dates as
+  `"<event_id>",{"href":"/e/<slug>"`. Slugs look like `<name>-<UTC end Y-M-D>-<UTC end H-MM>`.
+- `https://posh.vip/e/<event_id>` does **not** work (it returns an empty page), and `/api/` is disallowed.
+- Amy guesses a few slugs around the purchase date to find one page in the series,
+  then jumps to the order's own `event_id` page. Results are cached per event_id,
+  there are at most `POSH_LOOKUP_MAX_FETCHES` (25) fetches, 1 s apart.
+  `POSH_SLUG_END_TIMES` (default `8-30,9-30`) is the list of end times it tries.
+  `POSH_LOOKUP_ENABLED=false` turns the lookup off.
+- If the lookup fails and `event_start` is before the purchase (a series anchor),
+  the order is **not** booked. It goes to the team as needs-attention.
