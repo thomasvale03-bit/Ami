@@ -74,6 +74,9 @@ VENUE_ALIASES = {
     "lavo": "LAVO Party Brunch",
     "drai's": "Drai's",
     "drais": "Drai's",
+    "drai’s": "Drai's",
+    "dria's": "Drai's",  # common Posh typo ("Guestlist | Dria's After Hours")
+    "drias": "Drai's",
 }
 
 
@@ -82,10 +85,29 @@ def normalize_venue_name(name):
     return VENUE_ALIASES.get(key, name.strip())
 
 
-# Fallback values ONLY used when TAO's form requires them and the guest
-# submission did not supply a usable value.
-FALLBACK_PHONE = "480-214-5268"
-FALLBACK_BILLING_ZIP = "85306"
+# Fallback values used when a guest gave no phone / billing ZIP (website
+# form, Posh webhook, assisted sign-up jobs). Override in Railway with
+# DEFAULT_GUEST_PHONE / DEFAULT_BILLING_ZIP.
+FALLBACK_PHONE = "4802649387"
+FALLBACK_BILLING_ZIP = "85311"
+
+
+def fallback_phone():
+    import os
+    return os.environ.get("DEFAULT_GUEST_PHONE", "").strip() or FALLBACK_PHONE
+
+
+def fallback_billing_zip():
+    import os
+    return os.environ.get("DEFAULT_BILLING_ZIP", "").strip() or FALLBACK_BILLING_ZIP
+
+
+def phone_or_default(value):
+    return str(value or "").strip() or fallback_phone()
+
+
+def zip_or_default(value):
+    return str(value or "").strip() or fallback_billing_zip()
 
 # --- Default nightclub routing (used only when no specific venue tied to
 # a date, or requested venue is unavailable) ------------------------------
@@ -188,3 +210,15 @@ TAO_AUTOMATION_AUTHORIZATION = (
     "List registrations, signed 2026-09-28 by Jonathan Sidara (Las Vegas "
     "Promotions Director, TAO Group Hospitality); acknowledged by Thomas Vale"
 )
+
+
+# Posh recurring series: child events can be RENAMED ("R&BAE | Hakkasan"),
+# but their slugs keep the series' original name. Known series, keyed by the
+# first 18 hex chars of the child event ids (ids in one series share them),
+# with their slug base and UTC end-time slug parts. Amy also learns new ones
+# from every Posh page she reads. Extra entries: env POSH_SERIES_SEEDS as
+# "prefix=base:8-30/9-30;prefix2=base2:11-30".
+POSH_SERIES_SEEDS = {
+    "6a682ff9374ee034d5": ("guest-list-hakkasan", ("11-30", "12-30")),
+    "6a80e79648e2b4a133": ("guestlist-tao-nc", ("8-30", "9-30")),
+}

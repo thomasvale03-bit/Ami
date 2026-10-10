@@ -173,3 +173,69 @@ send until `TICKETSAUCE_REGISTRATION_VERIFIED=true`. When
 `TICKETSAUCE_CLIENT_ID` / `TICKETSAUCE_CLIENT_SECRET` are set and a listing
 has an `event_id`, `tao_portal.submit_registration` tries the API first,
 then assisted mode, then the old browser flow.
+
+## Posh webhook (fixes wrong dates on recurring events)
+
+Posh sends each new order straight to Amy instead of going through Zapier.
+Amy's `--loop` process also runs a tiny web server (`PORT`, default 8080):
+
+- `POST /webhooks/posh?token=<POSH_WEBHOOK_TOKEN>`: Posh "New order" webhook
+- `GET /healthz`: returns `{"result": "ok"}`
+
+The webhook checks the token, skips cancelled, refunded, disputed and in-person
+orders and anything that isn't `new_order` (`new_order_request` = pending, not
+booked), works out the right night, and drops a "NEW POSH SIGNUP (webhook)"
+message into the intake inbox (Gmail insert, nothing gets emailed). The normal
+loop then handles it like any request: same routing, assisted jobs, labels and
+Posh dedupe. Gmail is the durable record, so the same order number (or the same
+event_id + email) is never added twice, even after a redeploy.
+
+**Picking the night** (`posh_webhook.posh_night`, Las Vegas time):
+1. If a custom question about date/night/day has a date answer, use it.
+2. If the event starts on or after the purchase time, use `event_start`.
+3. If it starts before the purchase, it's a recurring series' first date, so step
+   forward whole weeks (same weekday and start time) to the first occurrence
+   that hadn't ended when they bought. An event still running counts, using
+   `event_end`, or 6 h if there is none.
+4. A start before 6 AM counts as the previous night (Sat 1 AM = Friday night).
+Posh's clock time is read as Vegas wall-clock time (what real orders showed).
+If webhook times turn out to be real UTC, set `POSH_EVENT_START_IS_UTC=true`.
+
+**Railway**
+1. Service → Settings → Networking → *Generate Domain* (target port = `PORT`, 8080).
+2. Variables: `POSH_WEBHOOK_TOKEN=<long random>` (`python -c 'import secrets;print(secrets.token_urlsafe(24))'`).
+   Optional: `POSH_WEBHOOK_ONLY=true` once the webhook works, to skip the old Zapier
+   Posh emails (and turn the Zap off). `POSH_CONSENT_ON_FILE=true` is still required
+   before Posh orders are booked, not just sent to the team.
+3. Check: `curl https://<railway-domain>/healthz`.
+
+**Posh**: Org *Playmaker Entertainment* → Settings → Integrations/Webhooks → add
+`https://<railway-domain>/webhooks/posh?token=<POSH_WEBHOOK_TOKEN>`, enable **New order**.
+If Posh sends a signature header, its *name* is logged ("signature-like headers
+present") so it can be verified later.
+
+### Real night for recurring Posh series (child-event lookup)
+
+Each date in a Posh recurring series is a separate child event with its own
+`event_id`, but the webhook's `event_start` is the series' first date. Amy now
+reads the child's real start from its public Posh page (`posh_lookup.py`):
+- `https://posh.vip/e/<slug>` pages (allowed by robots.txt) have JSON-LD
+  `"startDate": "2026-10-17T19:30:00-07:00"`, and they list sibling dates as
+  `"<event_id>",{"href":"/e/<slug>"`. Slugs look like `<name>-<UTC end Y-M-D>-<UTC end H-MM>`.
+- `https://posh.vip/e/<event_id>` does **not** work (it returns an empty page), and `/api/` is disallowed.
+- Amy guesses a few slugs around the purchase date to find one page in the series,
+  then jumps to the order's own `event_id` page. Results are cached per event_id,
+  there are at most `POSH_LOOKUP_MAX_FETCHES` (40) fetches, 1 s apart.
+  End times tried: first ones derived from the payload's series start/end (Vegas wall clock to UTC,
+  PDT and PST, e.g. Hakkasan 10:30 PM start gives `11-30`), then `POSH_SLUG_END_TIMES`
+  (default `8-30,9-30,11-30,12-30,8-0,9-0,10-0,10-30,11-0,12-0`). Both `guest-list` and `guestlist` name forms are tried.
+  The organizer page (posh.vip/g/playmakerentertainment) is rendered in the browser and lists no event links, so it isn't used.
+  `POSH_LOOKUP_ENABLED=false` turns the lookup off.
+- If the lookup fails and `event_start` is before the purchase (a series anchor),
+  the order is **not** booked. It goes to the team as needs-attention.
+- Renamed dates: a child event can be renamed ("R&BAE | Hakkasan") but its slug keeps
+  the series name (`guest-list-hakkasan-…`). Child ids in one series share their first
+  18 hex characters, so Amy first tries the slug names known for that id prefix:
+  ones learned from pages she has read, plus `POSH_SERIES_SEEDS` in `config/rules.py`
+  (Hakkasan, TAO NC). More can be added with env `POSH_SERIES_SEEDS="<id prefix>=<base>:8-30/9-30;..."`.
+  After that she guesses from the order's own name, including `&` variants (`r-bae`, `rbae`, `r-and-bae`).

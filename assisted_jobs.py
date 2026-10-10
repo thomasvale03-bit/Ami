@@ -17,6 +17,8 @@ import json
 import os
 import shlex
 
+from config import rules
+
 JOB_VERSION = 1
 FIELDS = ("url", "first_name", "last_name", "email", "phone", "female_count",
           "male_count", "billing_zip", "notes", "venue", "date", "event", "ref")
@@ -43,10 +45,10 @@ def make_job(url, guest, venue=None, date=None, event=None, ref=None, notes=None
         "first_name": guest.get("first_name", ""),
         "last_name": guest.get("last_name", ""),
         "email": guest.get("email", ""),
-        "phone": guest.get("phone") or "",
+        "phone": rules.phone_or_default(guest.get("phone")),
         "female_count": int(guest.get("female_count") or 0),
         "male_count": int(guest.get("male_count") or 0),
-        "billing_zip": guest.get("billing_zip") or "",
+        "billing_zip": rules.zip_or_default(guest.get("billing_zip")),
         "notes": notes or guest.get("notes") or "",
         "venue": venue or "", "date": str(date or ""), "event": event or "", "ref": ref or "",
     }
@@ -55,6 +57,8 @@ def make_job(url, guest, venue=None, date=None, event=None, ref=None, notes=None
 
 
 def validate(job):
+    job["phone"] = rules.phone_or_default(job.get("phone"))
+    job["billing_zip"] = rules.zip_or_default(job.get("billing_zip"))
     missing = [k for k in ("url", "first_name", "last_name", "email") if not job.get(k)]
     if missing:
         raise ValueError(f"Sign-up job is missing: {', '.join(missing)}")

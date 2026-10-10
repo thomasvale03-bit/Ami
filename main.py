@@ -32,6 +32,7 @@ from templates.emails import (
 )
 import gmail_client
 import posh
+import posh_webhook
 import tao_portal
 import ticketsauce
 import assisted_jobs
@@ -518,7 +519,19 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
     address (it is left completely untouched)."""
     msg, body = gmail_client.get_plain_text_body(service, message_id)
     if posh.is_posh_signup(gmail_client.get_subject(msg or {}), body):
+        if posh_webhook.webhook_only() and not posh_webhook.is_webhook_signup(body):
+            log.info("%s: Zapier Posh email skipped (POSH_WEBHOOK_ONLY; the webhook copy is used)", message_id)
+            return gmail_client.PROCESSED_LABEL
         raw = posh.parse_signup(message_id, body)
+        if posh_webhook.is_webhook_signup(body):
+            raw["posh"]["via"] = "webhook"
+            if posh_webhook.needs_review(body) and not raw.get("_action_needed"):
+                raw["_action_needed"] = (
+                    f"Posh recurring event: Posh only sent the series start "
+                    f"({raw['posh'].get('event_start')}), and the real date of this order's event "
+                    f"could not be looked up, so the night ({raw.get('start_date')}) is a guess. "
+                    "Not booked automatically.",
+                    "Check the order in Posh for the real night and register this guest manually.")
         order = raw["posh"].get("order_number")
         log.info("%s: source POSH, order %s, event %r, ticket %r", message_id, order or "(none)",
                  raw["posh"].get("event_name"), raw["posh"].get("ticket"))
@@ -868,6 +881,13 @@ def main():
             run_speakeasy_test(service)  # one-shot, no-op unless the sentinel file is present
         except Exception:
             log.exception("SpeakeasyGo test run failed")
+
+    if args.loop or os.environ.get("PORT"):
+        try:
+            posh_webhook.serve(posh_webhook.Intake(gmail_client.get_service, rules.INTAKE_EMAIL,
+                                                   dry_run=mode == "dry-run"))
+        except Exception:
+            log.exception("Posh webhook server failed to start; inbox loop continues")
 
     poll_seconds = max(int(os.environ.get("AMY_POLL_SECONDS", "120")), 30)
     last_follow_up_check = 0.0
