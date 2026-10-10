@@ -85,10 +85,29 @@ def normalize_venue_name(name):
     return VENUE_ALIASES.get(key, name.strip())
 
 
-# Fallback values ONLY used when TAO's form requires them and the guest
-# submission did not supply a usable value.
-FALLBACK_PHONE = "480-214-5268"
-FALLBACK_BILLING_ZIP = "85306"
+# Fallback values used when a guest gave no phone / billing ZIP (website
+# form, Posh webhook, assisted sign-up jobs). Override in Railway with
+# DEFAULT_GUEST_PHONE / DEFAULT_BILLING_ZIP.
+FALLBACK_PHONE = "4802649387"
+FALLBACK_BILLING_ZIP = "85311"
+
+
+def fallback_phone():
+    import os
+    return os.environ.get("DEFAULT_GUEST_PHONE", "").strip() or FALLBACK_PHONE
+
+
+def fallback_billing_zip():
+    import os
+    return os.environ.get("DEFAULT_BILLING_ZIP", "").strip() or FALLBACK_BILLING_ZIP
+
+
+def phone_or_default(value):
+    return str(value or "").strip() or fallback_phone()
+
+
+def zip_or_default(value):
+    return str(value or "").strip() or fallback_billing_zip()
 
 # --- Default nightclub routing (used only when no specific venue tied to
 # a date, or requested venue is unavailable) ------------------------------
