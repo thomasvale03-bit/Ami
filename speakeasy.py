@@ -178,6 +178,38 @@ def add_guests_for_night(date_iso, guests, force=False):
     return results
 
 
+def test_add_guest(date_iso, guest, shot_path="/tmp/speakeasy_test.png"):
+    """Run one add with creds (regardless of SPEAKEASY_AUTO) and always capture a
+    screenshot so a failure can be seen. Returns {ok, error, screenshot}."""
+    if not (EMAIL and PASSWORD):
+        return {"ok": False, "error": "speakeasy creds not set", "screenshot": None}
+    from playwright.sync_api import sync_playwright
+    out = {"ok": False, "error": None, "screenshot": None}
+    try:
+        with sync_playwright() as p:
+            b = _browser(p)
+            page = b.new_context(locale="en-US").new_page()
+            page.set_default_timeout(20000)
+            try:
+                first = guest.get("first") or (guest.get("name", "").split(" ", 1) + [""])[0]
+                last = guest.get("last") or (guest.get("name", "").split(" ", 1) + [""])[1]
+                _add_one(page, date_iso, first.strip(), last.strip(),
+                         guest.get("male", 0), guest.get("female", 0))
+                out["ok"] = True
+            except Exception as exc:  # noqa: BLE001
+                out["error"] = str(exc)
+            finally:
+                try:
+                    page.screenshot(path=shot_path, full_page=True)
+                    out["screenshot"] = shot_path
+                except Exception:
+                    pass
+                b.close()
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{out['error'] or ''} / {exc}".strip(" /")
+    return out
+
+
 def _test_add(first, last, male, female, date_iso):
     """One-guest live test. Runs with creds from the environment regardless of
     SPEAKEASY_AUTO, so you can verify before enabling the real flow. Check your
