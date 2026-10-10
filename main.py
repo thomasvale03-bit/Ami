@@ -261,6 +261,13 @@ def concierge_on():
     return os.environ.get("AMY_CONCIERGE", "").strip().lower() in ("1", "true", "yes")
 
 
+def guest_confirmation_on():
+    """AMY_GUEST_CONFIRMATION=true: also email the guest "You're on the list"
+    right away, before any TAO sign-up. Off by default (some lists close);
+    guests get AMYI's post-signup confirmation instead."""
+    return os.environ.get("AMY_GUEST_CONFIRMATION", "").strip().lower() in ("1", "true", "yes")
+
+
 def concierge_handoff(service, message_id, raw, dry_run):
     """Guest confirmation + Jose sign-up order. No TAO, no needs-attention.
     Unprocessable or all-past requests are labeled and dropped quietly."""
@@ -346,10 +353,14 @@ def concierge_handoff(service, message_id, raw, dry_run):
         print(f"[dry run] Jose sign-up to {rules.PLAYMAKER_EMAIL}:\n{tsub}\n{tbody}")
         return None
 
-    gmail_client.send_once(
-        service, f"amy-confirm-{message_id}@playmakerentertainment.com",
-        request["email"], gsub, gbody, sender=rules.SENDER_EMAIL,
-        dedupe_query=f'to:{request["email"]} subject:"{gsub}" newer_than:3d')
+    if guest_confirmation_on():
+        gmail_client.send_once(
+            service, f"amy-confirm-{message_id}@playmakerentertainment.com",
+            request["email"], gsub, gbody, sender=rules.SENDER_EMAIL,
+            dedupe_query=f'to:{request["email"]} subject:"{gsub}" newer_than:3d')
+    else:
+        log.info("%s: immediate guest confirmation off (AMY_GUEST_CONFIRMATION); "
+                 "guest hears from AMYI after sign-up", message_id)
     if assisted_jobs.assisted_on():
         jobs = concierge_jobs(request, nights, message_id)
         if jobs:
@@ -658,11 +669,15 @@ def send_follow_ups(service, mode, allowlist=None, today=None):
     cap = _int_env("FOLLOW_UP_MAX_PER_CYCLE", 5)
     late = _int_env("FOLLOW_UP_MAX_LATE_DAYS", 7)
     sent = deferred = 0
+    seen = set()
     for conf in gmail_client.recent_confirmations(service):
         last_night = conf.get("last_night")
         address = re.sub(r".*<([^>]+)>.*", r"\1", conf["to"]).strip().lower()
         if not last_night or not address or today < last_night + timedelta(days=FOLLOW_UP_DELAY_DAYS):
             continue
+        if address in seen:
+            continue  # one guest can have both confirmation kinds: one follow-up only
+        seen.add(address)
         if today > last_night + timedelta(days=FOLLOW_UP_DELAY_DAYS + late):
             continue  # too overdue: don't send a stale follow-up after an outage
         if allowlist is not None and address not in allowlist:

@@ -685,11 +685,13 @@ class ConciergeTests(unittest.TestCase):
     """AMY_CONCIERGE: guest confirmation (no link) + Jose sign-up; no needs-attention."""
 
     catalog = {}  # default: master link unreadable (rules-only fallback)
+    guest_confirmation = "true"  # these tests read the immediate guest email
 
     def _handle(self, text=FIXTURE):
         sent = []
         svc = mock.MagicMock()
-        with mock.patch.dict(os.environ, {"AMY_CONCIERGE": "true"}), \
+        with mock.patch.dict(os.environ, {"AMY_CONCIERGE": "true",
+                                          "AMY_GUEST_CONFIRMATION": self.guest_confirmation}), \
              mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, text)), \
              mock.patch.object(gmail_client, "send_once",
                                side_effect=lambda *a, **k: sent.append((a, k)) or True), \
@@ -716,7 +718,7 @@ class ConciergeTests(unittest.TestCase):
     def _nights(self, year, month, day):
         """Run concierge with a fixed 'today' and return the parsed guest email body."""
         sent = []
-        with mock.patch.dict(os.environ, {"AMY_CONCIERGE": "true"}), \
+        with mock.patch.dict(os.environ, {"AMY_CONCIERGE": "true", "AMY_GUEST_CONFIRMATION": "true"}), \
              mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, FIXTURE)), \
              mock.patch.object(gmail_client, "send_once",
                                side_effect=lambda *a, **k: sent.append((a, k)) or True), \

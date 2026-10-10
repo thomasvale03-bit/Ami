@@ -163,6 +163,8 @@ def posh_order_already_handled(service, order_number, exclude_message_id):
 CONFIRMATION_SUBJECT = "Playmaker Guest List Confirmation"
 # Concierge-era guest confirmation subject (what Amy sends now).
 CONFIRMATION_SUBJECT_CONCIERGE = "You're on the list"
+# AMYI's post-signup guest confirmation (same body layout). Follow-ups key off both.
+CONFIRMATION_SUBJECT_POST_SIGNUP = "You're on the Playmaker Entertainment guest list"
 
 _MONTHS = {m: i for i, m in enumerate(
     ["January", "February", "March", "April", "May", "June", "July",
@@ -193,7 +195,8 @@ def recent_confirmations(service, days=45):
     subject carries no dates)."""
     resp = service.users().messages().list(
         userId="me",
-        q=f'in:sent subject:"{CONFIRMATION_SUBJECT_CONCIERGE}" newer_than:{days}d', maxResults=200,
+        q=(f'in:sent (subject:"{CONFIRMATION_SUBJECT_CONCIERGE}" OR '
+           f'subject:"{CONFIRMATION_SUBJECT_POST_SIGNUP}") newer_than:{days}d'), maxResults=200,
     ).execute()
     out = []
     for ref in resp.get("messages", []):
