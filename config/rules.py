@@ -74,6 +74,9 @@ VENUE_ALIASES = {
     "lavo": "LAVO Party Brunch",
     "drai's": "Drai's",
     "drais": "Drai's",
+    "drai’s": "Drai's",
+    "dria's": "Drai's",  # common Posh typo ("Guestlist | Dria's After Hours")
+    "drias": "Drai's",
 }
 
 

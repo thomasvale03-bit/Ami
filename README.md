@@ -173,3 +173,43 @@ send until `TICKETSAUCE_REGISTRATION_VERIFIED=true`. When
 `TICKETSAUCE_CLIENT_ID` / `TICKETSAUCE_CLIENT_SECRET` are set and a listing
 has an `event_id`, `tao_portal.submit_registration` tries the API first,
 then assisted mode, then the old browser flow.
+
+## Posh webhook (fixes wrong dates on recurring events)
+
+Posh sends each new order straight to Amy instead of going through Zapier.
+Amy's `--loop` process also runs a tiny web server (`PORT`, default 8080):
+
+- `POST /webhooks/posh?token=<POSH_WEBHOOK_TOKEN>`: Posh "New order" webhook
+- `GET /healthz`: returns `{"result": "ok"}`
+
+The webhook checks the token, skips cancelled, refunded, disputed and in-person
+orders and anything that isn't `new_order` (`new_order_request` = pending, not
+booked), works out the right night, and drops a "NEW POSH SIGNUP (webhook)"
+message into the intake inbox (Gmail insert, nothing gets emailed). The normal
+loop then handles it like any request: same routing, assisted jobs, labels and
+Posh dedupe. Gmail is the durable record, so the same order number (or the same
+event_id + email) is never added twice, even after a redeploy.
+
+**Picking the night** (`posh_webhook.posh_night`, Las Vegas time):
+1. If a custom question about date/night/day has a date answer, use it.
+2. If the event starts on or after the purchase time, use `event_start`.
+3. If it starts before the purchase, it's a recurring series' first date, so step
+   forward whole weeks (same weekday and start time) to the first occurrence
+   that hadn't ended when they bought. An event still running counts, using
+   `event_end`, or 6 h if there is none.
+4. A start before 6 AM counts as the previous night (Sat 1 AM = Friday night).
+Posh's clock time is read as Vegas wall-clock time (what real orders showed).
+If webhook times turn out to be real UTC, set `POSH_EVENT_START_IS_UTC=true`.
+
+**Railway**
+1. Service → Settings → Networking → *Generate Domain* (target port = `PORT`, 8080).
+2. Variables: `POSH_WEBHOOK_TOKEN=<long random>` (`python -c 'import secrets;print(secrets.token_urlsafe(24))'`).
+   Optional: `POSH_WEBHOOK_ONLY=true` once the webhook works, to skip the old Zapier
+   Posh emails (and turn the Zap off). `POSH_CONSENT_ON_FILE=true` is still required
+   before Posh orders are booked, not just sent to the team.
+3. Check: `curl https://<railway-domain>/healthz`.
+
+**Posh**: Org *Playmaker Entertainment* → Settings → Integrations/Webhooks → add
+`https://<railway-domain>/webhooks/posh?token=<POSH_WEBHOOK_TOKEN>`, enable **New order**.
+If Posh sends a signature header, its *name* is logged ("signature-like headers
+present") so it can be verified later.
