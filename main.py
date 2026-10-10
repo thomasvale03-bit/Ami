@@ -33,6 +33,7 @@ from templates.emails import (
 import gmail_client
 import posh
 import tao_portal
+import ticketsauce
 import headliners
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -287,8 +288,8 @@ def concierge_handoff(service, message_id, raw, dry_run):
         dayclub = next((dv for dv in dayclub_candidates(request) if (dv, d) in catalog), None) if live else None
         # Direct sign-up links for the chosen venue(s), so Jose just taps, clears
         # the check himself, and submits. Only present when live on the feed.
-        signup_url = (catalog.get((chosen, d)) or {}).get("url")
-        dayclub_url = (catalog.get((dayclub, d)) or {}).get("url") if dayclub else None
+        signup_url = ticketsauce.promoter_link((catalog.get((chosen, d)) or {}).get("url"))
+        dayclub_url = ticketsauce.promoter_link((catalog.get((dayclub, d)) or {}).get("url")) if dayclub else None
         nights.append({"date": d.isoformat(), "venue": chosen,
                        "backups": [v for v in opts if v != chosen][:3],
                        "dayclub": dayclub, "rerouted_from": rerouted_from,

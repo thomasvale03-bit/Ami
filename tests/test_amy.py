@@ -778,6 +778,7 @@ class ConciergeTests(unittest.TestCase):
         self.assertIn("https://tickets.taogroup.com/e/jewel-30", jose)      # nightclub tap link
         self.assertIn("https://tickets.taogroup.com/e/marquee-dc-30", jose) # dayclub tap link
         self.assertIn("https://tickets.taogroup.com/e/omnia-31", jose)
+        self.assertIn("utm_source=promoter", jose)  # links credit Playmaker
         self.assertIn("Email: jane.sample@example.com", jose)  # copy-paste details present
 
     def test_needs_attention_is_suppressed(self):

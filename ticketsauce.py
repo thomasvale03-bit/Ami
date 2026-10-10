@@ -21,7 +21,22 @@ log = logging.getLogger("amy.ticketsauce")
 ORG_PID = os.environ.get("TICKETSAUCE_PID", "61aa6d22-0a44-4f7b-9a62-5d970ad1213e")
 FEED_URL = "https://events.ticketsauce.com/events/events_by_organization/"
 
+# Playmaker's promoter tracking tag — appended to sign-up links so every
+# sign-up credits Playmaker (utm_source=promoter&utm_id=<id>). It's a public
+# attribution tag (it rides every promoter link), not a credential. Override
+# with TAO_PROMOTER_UTM_ID in Railway if the id ever changes.
+PROMOTER_UTM_ID = os.environ.get("TAO_PROMOTER_UTM_ID", "68d79ff587c84397b19f00330a1e6107")
+
 GUEST_LIST_PREFIX = "guest list"
+
+
+def promoter_link(url):
+    """Append Playmaker's promoter tracking tag to a sign-up URL so the sign-up
+    credits Playmaker. Leaves the URL alone if it's empty or already tagged."""
+    if not url or not PROMOTER_UTM_ID or "utm_id=" in url:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}utm_source=promoter&utm_id={PROMOTER_UTM_ID}"
 
 
 def _fetch():
