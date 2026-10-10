@@ -734,6 +734,39 @@ def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=F
         log.info("Weekly lineup sent to %s (%d flyers)", recipient, len(attachments))
 
 
+def run_speakeasy_test(service):
+    """One-shot SpeakeasyGo check: if data/speakeasy_test.json exists, add that
+    one guest to SpeakeasyGo and email the result to the team, then it's safe to
+    delete the file. Lets you verify the Drai's auto-add end to end (set the
+    creds in Railway, deploy, check your email + the dashboard) before turning
+    SPEAKEASY_AUTO on. No-op if the file isn't there."""
+    path = os.path.join(os.path.dirname(__file__), "data", "speakeasy_test.json")
+    try:
+        with open(path) as fh:
+            t = json.load(fh)
+    except OSError:
+        return
+    if not (speakeasy.EMAIL and speakeasy.PASSWORD):
+        log.info("speakeasy_test present but SPEAKEASY_EMAIL/PASSWORD not set; skipping")
+        return
+    guest = {"first": t.get("first", "Test"), "last": t.get("last", "Amy"),
+             "male": t.get("male", 0), "female": t.get("female", 0),
+             "name": f"{t.get('first','Test')} {t.get('last','Amy')}"}
+    res = speakeasy.add_guests_for_night(t["date"], [guest])[0]
+    status = ("✓ added to SpeakeasyGo" if res["ok"]
+              else f"✗ failed: {res['error']}")
+    log.info("SpeakeasyGo test (%s %s, %s): %s", guest["first"], guest["last"], t["date"], status)
+    body = (f"SpeakeasyGo auto-add test\n\nGuest: {guest['first']} {guest['last']}\n"
+            f"Party: {guest['male']}M / {guest['female']}F\nNight: {t['date']}\n\n"
+            f"Result: {status}\n\nIf ✓, check the SpeakeasyGo dashboard for that night to confirm, "
+            f"then it's safe to enable SPEAKEASY_AUTO. If ✗, send the error to get it fixed.")
+    gmail_client.send_once(
+        service, f"amy-speakeasy-test-{t['date']}@playmakerentertainment.com",
+        rules.PLAYMAKER_EMAIL, "Amy — SpeakeasyGo test result", body,
+        sender=rules.SENDER_EMAIL,
+        dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} subject:"Amy — SpeakeasyGo test result" newer_than:1h')
+
+
 def run_once(service, mode, labels, allowlist=None, start_after=None):
     dry_run = mode == "dry-run"
     pending = gmail_client.list_pending_requests(service, start_after=start_after)
@@ -826,6 +859,12 @@ def main():
     if mode != "dry-run":
         for name in (gmail_client.PROCESSING_LABEL, gmail_client.PROCESSED_LABEL, gmail_client.EXCEPTION_LABEL):
             labels[name] = gmail_client.get_or_create_label(service, name)
+
+    if mode != "dry-run":
+        try:
+            run_speakeasy_test(service)  # one-shot, no-op unless the sentinel file is present
+        except Exception:
+            log.exception("SpeakeasyGo test run failed")
 
     poll_seconds = max(int(os.environ.get("AMY_POLL_SECONDS", "120")), 30)
     last_follow_up_check = 0.0
