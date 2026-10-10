@@ -27,13 +27,14 @@ from zoneinfo import ZoneInfo
 log = logging.getLogger("amy.posh_lookup")
 VEGAS = ZoneInfo("America/Los_Angeles")
 BASE = "https://posh.vip/e/"
-MAX_FETCHES = int(os.environ.get("POSH_LOOKUP_MAX_FETCHES", "25"))
-DEFAULT_END_TIMES = ("8-30", "9-30")  # seen on Playmaker series (UTC end, PDT/PST)
+MAX_FETCHES = int(os.environ.get("POSH_LOOKUP_MAX_FETCHES", "40"))
+# Seen on Playmaker series (UTC end): TAO NC 8-30/9-30, Hakkasan 11-30/12-30.
+DEFAULT_END_TIMES = ("8-30", "9-30", "11-30", "12-30", "8-0", "9-0", "10-0", "10-30", "11-0", "12-0")
 
 SIBLING_RE = re.compile(r'"([0-9a-f]{24})",\{"href":"/e/([a-z0-9-]+)"')
 START_RE = re.compile(r'"startDate"\s*:\s*"([^"]+)"')
 OG_URL_RE = re.compile(r'og:url" content="https://posh\.vip/e/([a-z0-9-]+)"')
-SLUG_TAIL_RE = re.compile(r"-(\d{4})-(\d{1,2})-(\d{1,2})-(\d{1,2})-(\d{2})$")
+SLUG_TAIL_RE = re.compile(r"-(\d{4})-(\d{1,2})-(\d{1,2})-(\d{1,2})-(\d{1,2})$")
 
 _lock = threading.Lock()
 _starts = {}    # event_id -> aware datetime
@@ -78,19 +79,87 @@ def _learn(found):
             _end_times.setdefault(slug[:m.start()], set()).add(f"{int(m.group(4))}-{m.group(5)}")
 
 
-def candidate_slugs(event_name, purchased_utc, days_before=1, days_after=13):
+def name_bases(event_name):
+    """Slug bases to try: the plain slug plus guestlist <-> guest-list swaps."""
     base = slugify(event_name)
-    if not base or purchased_utc is None:
-        return []
-    times = list(_end_times.get(base, ())) + [t for t in os.environ.get(
-        "POSH_SLUG_END_TIMES", ",".join(DEFAULT_END_TIMES)).split(",") if t.strip()]
-    times = list(dict.fromkeys(t.strip() for t in times))
-    out = []
-    for offset in range(-days_before, days_after + 1):
-        d = (purchased_utc + timedelta(days=offset)).date()
-        for t in times:
-            out.append(f"{base}-{d.year}-{d.month}-{d.day}-{t}")
+    out = [base] if base else []
+    for a, b in (("guest-list", "guestlist"), ("guestlist", "guest-list")):
+        if a in base:
+            out.append(base.replace(a, b))
+    return list(dict.fromkeys(out))
+
+
+def _hm(dt):
+    return f"{dt.hour}-{dt.minute:02d}"
+
+
+def _forms(dt):
+    out = [_hm(dt)]
+    if dt.minute == 0:
+        out.append(f"{dt.hour}-0")  # on-the-hour slug form unconfirmed: try both
     return out
+
+
+def derived_end_times(event_start=None, event_end=None, wide=False):
+    """UTC end-time slug parts suggested by the payload's series times.
+
+    Posh sends series times as Vegas wall clock marked 'Z' (Hakkasan: start
+    T22:30Z = 10:30 PM, child slugs end in 11-30 = 4:30 AM PDT). The end
+    (event_end, else start + 6 h) is turned into UTC for PDT (+7) and PST
+    (+8). wide=True adds start + 5/7 h and the raw clock read as real UTC."""
+    ends = []
+    try:
+        if event_end:
+            ends.append(datetime.fromisoformat(event_end.strip()[:19]))
+        if event_start:
+            st = datetime.fromisoformat(event_start.strip()[:19])
+            ends.append(st + timedelta(hours=6))
+            if wide:
+                ends += [st + timedelta(hours=5), st + timedelta(hours=7)]
+    except ValueError:
+        pass
+    out = []
+    for e in ends:
+        for x in (e + timedelta(hours=7), e + timedelta(hours=8)) + ((e,) if wide else ()):
+            out += _forms(x)
+    return list(dict.fromkeys(out))
+
+
+def fallback_end_times():
+    env = [t.strip() for t in os.environ.get("POSH_SLUG_END_TIMES", "").split(",") if t.strip()]
+    return env or list(DEFAULT_END_TIMES)
+
+
+def candidate_slugs(event_name, purchased_utc, days_before=1, days_after=13, event_start=None, event_end=None):
+    """Slug guesses, most likely first (the fetch cap cuts the tail):
+    1. end times already learned for this series, full date window
+    2. times derived from the payload's series start/end, days -1..+7
+    3. the common Playmaker end times (first 4 defaults), days 0..+7
+    4. the alternate name form (guestlist <-> guest-list) with 2+3, days 0..+3
+    5. everything else (wider derived times, other defaults), days 0..+3"""
+    bases = name_bases(event_name)
+    if not bases or purchased_utc is None:
+        return []
+    main, alts = bases[0], bases[1:]
+    learned = sorted({t for b in bases for t in _end_times.get(b, ())})
+    derived = derived_end_times(event_start, event_end)
+    defaults = fallback_end_times()
+    common, rest = defaults[:4], defaults[4:]
+    wide = derived_end_times(event_start, event_end, wide=True)
+    out = []
+
+    def add(base_list, times, before, after):
+        for offset in range(-before, after + 1):
+            d = (purchased_utc + timedelta(days=offset)).date()
+            for base in base_list:
+                for t in times:
+                    out.append(f"{base}-{d.year}-{d.month}-{d.day}-{t}")
+    add([main], learned, days_before, days_after)
+    add([main], derived, 1, 7)
+    add([main], common, 0, 7)
+    add(alts, list(dict.fromkeys(learned + derived + common)), 0, 3)
+    add([main], wide + rest, 0, 3)
+    return list(dict.fromkeys(out))
 
 
 def _default_fetch(url):
@@ -120,7 +189,7 @@ class _Fetcher:
 
 
 def real_start(event_id, event_name, purchased_utc, fetch=_default_fetch, sleep=time.sleep,
-               max_fetches=MAX_FETCHES):
+               max_fetches=MAX_FETCHES, event_start=None, event_end=None):
     """Aware start datetime of the child event, or None."""
     if not event_id:
         return None
@@ -129,7 +198,7 @@ def real_start(event_id, event_name, purchased_utc, fetch=_default_fetch, sleep=
             return _starts[event_id]
         get = _Fetcher(fetch, sleep, max_fetches)
         try:
-            start = _resolve(event_id, event_name, purchased_utc, get)
+            start = _resolve(event_id, event_name, purchased_utc, get, event_start, event_end)
         except RuntimeError as exc:
             log.info("Posh lookup for %s gave up: %s", event_id, exc)
             start = None
@@ -138,7 +207,7 @@ def real_start(event_id, event_name, purchased_utc, fetch=_default_fetch, sleep=
         return start
 
 
-def _resolve(event_id, event_name, purchased_utc, get):
+def _resolve(event_id, event_name, purchased_utc, get, event_start=None, event_end=None):
     tried = set()
 
     def open_target(slug):
@@ -153,7 +222,7 @@ def _resolve(event_id, event_name, purchased_utc, get):
         start = open_target(_slugs[event_id])
         if start:
             return start
-    for slug in candidate_slugs(event_name, purchased_utc):
+    for slug in candidate_slugs(event_name, purchased_utc, event_start=event_start, event_end=event_end):
         if slug in tried:
             continue
         html = get(slug)

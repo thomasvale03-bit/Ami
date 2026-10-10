@@ -49,7 +49,8 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(pl.slugify("Guestlist | TAO NC"), "guestlist-tao-nc")
         pl.reset_cache()
         c = pl.candidate_slugs("Guestlist | TAO NC", datetime(2026, 11, 1, tzinfo=timezone.utc), 0, 0)
-        self.assertEqual(c, ["guestlist-tao-nc-2026-11-1-8-30", "guestlist-tao-nc-2026-11-1-9-30"])
+        self.assertEqual(c[:2], ["guestlist-tao-nc-2026-11-1-8-30", "guestlist-tao-nc-2026-11-1-9-30"])
+        self.assertIn("guest-list-tao-nc-2026-11-1-8-30", c)
 
     def test_night_after_midnight(self):
         self.assertEqual(pl.night_from_start(datetime.fromisoformat("2026-10-18T01:00:00-07:00")), date(2026, 10, 17))
@@ -131,3 +132,63 @@ class MainReviewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+HAK_1010 = (pathlib.Path(__file__).parent / "fixtures" / "posh_event_hakkasan_1010.html").read_text()
+HAK_1018 = (pathlib.Path(__file__).parent / "fixtures" / "posh_event_hakkasan_1018.html").read_text()
+HAK_ID = "6a682ff9374ee034d5cc4b5e"
+
+
+class HakkasanRegressionTests(unittest.TestCase):
+    """Real order 37447941: 'Guest List | Hakkasan', series start 2026-07-29T22:30Z,
+    bought 2026-10-10T13:05:22Z. Thomas confirmed the night: Sat Oct 17, 2026.
+    Child slugs end in 11-30 (4:30 AM PDT), which the old 8-30/9-30 list missed."""
+
+    def setUp(self):
+        pl.reset_cache()
+
+    def test_derived_end_time_from_series_start(self):
+        self.assertIn("11-30", pl.derived_end_times("2026-07-29T22:30:00.000Z"))
+        self.assertIn("11-30", pl.derived_end_times(None, "2026-07-30T04:30:00.000Z"))
+
+    def test_name_bases(self):
+        self.assertEqual(pl.name_bases("Guest List | Hakkasan"), ["guest-list-hakkasan", "guestlist-hakkasan"])
+        self.assertEqual(pl.name_bases("Guestlist | TAO NC"), ["guestlist-tao-nc", "guest-list-tao-nc"])
+
+    def test_on_hour_end_tries_both_forms(self):
+        times = pl.derived_end_times(None, "2026-07-30T02:00:00Z")
+        self.assertIn("9-00", times)
+        self.assertIn("9-0", times)
+
+    def test_finds_hakkasan_child_and_night(self):
+        fetch, calls = fake_site({"guest-list-hakkasan-2026-10-10-11-30": HAK_1010,
+                                  "guest-list-hakkasan-2026-10-18-11-30": HAK_1018})
+        bought = datetime(2026, 10, 10, 13, 5, 22, tzinfo=timezone.utc)
+        start = pl.real_start(HAK_ID, "Guest List | Hakkasan", bought, fetch=fetch, sleep=lambda s: None,
+                              event_start="2026-07-29T22:30:00Z")
+        self.assertEqual(start, datetime.fromisoformat("2026-10-17T22:30:00-07:00"))
+        self.assertEqual(pl.night_from_start(start), date(2026, 10, 17))
+        self.assertLessEqual(len(calls), 5)
+
+    def test_webhook_end_to_end(self):
+        fetch, _ = fake_site({"guest-list-hakkasan-2026-10-10-11-30": HAK_1010,
+                              "guest-list-hakkasan-2026-10-18-11-30": HAK_1018})
+        payload = series_payload(event_name="Guest List | Hakkasan", event_id=HAK_ID, order_number="37447941",
+                                 event_start="2026-07-29T22:30:00Z", event_end=None,
+                                 date_purchased="2026-10-10T13:05:22Z")
+        look = lambda *a, **k: pl.real_start(*a, fetch=fetch, sleep=lambda s: None, **k)
+        night, how, start = pw.resolve_night(payload, lookup=look)
+        self.assertEqual((night, how), (date(2026, 10, 17), "posh_page"))
+        raw = posh.parse_signup("m", pw.to_signup_text(payload, night, how, start))
+        self.assertEqual(raw["start_date"], "2026-10-17")
+        self.assertEqual(raw["venues"], ["Hakkasan Nightclub"])
+
+    def test_old_tao_case_still_found_within_cap(self):
+        sibling = HTML.replace(f'og:url" content="https://posh.vip/e/{SLUG}"',
+                               'og:url" content="https://posh.vip/e/guestlist-tao-nc-2026-10-11-8-30"')
+        fetch, calls = fake_site({"guestlist-tao-nc-2026-10-11-8-30": sibling, SLUG: HTML})
+        start = pl.real_start(TARGET, "Guestlist | TAO NC", datetime(2026, 10, 8, 19, tzinfo=timezone.utc),
+                              fetch=fetch, sleep=lambda s: None, event_start="2026-08-15T22:30:00.000Z",
+                              event_end="2026-08-16T04:30:00.000Z")
+        self.assertEqual(pl.night_from_start(start), date(2026, 10, 17))
+        self.assertLessEqual(len(calls), 40)

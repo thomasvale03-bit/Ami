@@ -225,8 +225,11 @@ reads the child's real start from its public Posh page (`posh_lookup.py`):
 - `https://posh.vip/e/<event_id>` does **not** work (it returns an empty page), and `/api/` is disallowed.
 - Amy guesses a few slugs around the purchase date to find one page in the series,
   then jumps to the order's own `event_id` page. Results are cached per event_id,
-  there are at most `POSH_LOOKUP_MAX_FETCHES` (25) fetches, 1 s apart.
-  `POSH_SLUG_END_TIMES` (default `8-30,9-30`) is the list of end times it tries.
+  there are at most `POSH_LOOKUP_MAX_FETCHES` (40) fetches, 1 s apart.
+  End times tried: first ones derived from the payload's series start/end (Vegas wall clock to UTC,
+  PDT and PST, e.g. Hakkasan 10:30 PM start gives `11-30`), then `POSH_SLUG_END_TIMES`
+  (default `8-30,9-30,11-30,12-30,8-0,9-0,10-0,10-30,11-0,12-0`). Both `guest-list` and `guestlist` name forms are tried.
+  The organizer page (posh.vip/g/playmakerentertainment) is rendered in the browser and lists no event links, so it isn't used.
   `POSH_LOOKUP_ENABLED=false` turns the lookup off.
 - If the lookup fails and `event_start` is before the purchase (a series anchor),
   the order is **not** booked. It goes to the team as needs-attention.

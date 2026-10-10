@@ -192,7 +192,11 @@ def resolve_night(payload, lookup=None):
         except ValueError:
             bought = None
     try:
-        start = lookup(payload.get("event_id"), payload.get("event_name"), bought)
+        try:
+            start = lookup(payload.get("event_id"), payload.get("event_name"), bought,
+                           event_start=payload.get("event_start"), event_end=payload.get("event_end"))
+        except TypeError:  # simple lookups (tests) take three arguments
+            start = lookup(payload.get("event_id"), payload.get("event_name"), bought)
     except Exception as exc:  # noqa: BLE001 - a lookup failure just means "fall back"
         log.info("Posh event lookup failed: %s", exc)
         start = None
