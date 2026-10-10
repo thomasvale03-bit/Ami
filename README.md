@@ -128,3 +128,48 @@ core logic is verified.
   of emailing the customer. Decide the wording before going live if you want
   customers notified automatically either way.
 - Drai's is hard-paused in `config/rules.py` until you say otherwise.
+
+## Assisted sign-up (you click the human check, Amy fills the form)
+
+TAO's guest-list pages show a Cloudflare "verify you are human" check. Amy
+never tries to get past it. In **assisted mode** Amy emails you each sign-up
+as a one-line command; you run it on your own computer, a normal Chrome
+window opens, **you** click the check, and the helper fills in and submits
+the form only after the check is gone.
+
+**Railway env vars**
+- `AMY_SIGNUP_MODE=assisted` — turn it on (anything else = old behavior; the
+  concierge/Jose email is unchanged when this is off).
+- `ASSISTED_SIGNUP_TO=you@example.com` — where job emails go (default: the Playmaker inbox).
+- In concierge mode the job email replaces Jose's sign-up order for nights
+  that have a live sign-up link; nights without one still go to Jose.
+
+**One-time setup on your computer** (Python 3.10+, Google Chrome installed)
+```
+git clone https://github.com/thomasvale03-bit/ami && cd ami
+pip install playwright==1.63.0
+playwright install chrome      # or skip if Chrome is already installed
+```
+
+**Each sign-up**: copy the command from Amy's email and run it in the `ami` folder:
+```
+python tools/assisted_signup.py --job eyJ2IjoxLC...
+```
+- Click the check when told ("Click the human check"); it waits up to 3 minutes.
+- Add `--confirm` to review the filled form and press Enter before it submits.
+- `--show` prints the job without opening a browser.
+- Manual job: `python tools/assisted_signup.py --url <guest-list URL> --first Ana --last Ruiz --email a@b.com --phone 7025550100 --female 2 --male 1`
+- Results: screenshot + `signup-results/results.jsonl`. If a field can't be
+  found it stops **before** submitting and leaves the window open for you.
+- Form selectors live in `SELECTORS` at the top of `tools/assisted_signup.py`.
+- Your Chrome profile for this is kept in `~/.amy-signup-profile` (override `AMY_SIGNUP_PROFILE`).
+
+## TicketSauce API (skeleton, not live)
+
+`ticketsauce_api.py`: token fetch (`POST /v2/oauth/token`, client
+credentials) matches TicketSauce's public docs. A **create registration**
+endpoint is *not* in the public docs, so it's a placeholder and refuses to
+send until `TICKETSAUCE_REGISTRATION_VERIFIED=true`. When
+`TICKETSAUCE_CLIENT_ID` / `TICKETSAUCE_CLIENT_SECRET` are set and a listing
+has an `event_id`, `tao_portal.submit_registration` tries the API first,
+then assisted mode, then the old browser flow.
