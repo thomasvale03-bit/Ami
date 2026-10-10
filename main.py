@@ -655,15 +655,23 @@ def send_follow_ups(service, mode, allowlist=None, today=None):
     """One "see you next time" email per confirmed visit, FOLLOW_UP_DELAY_DAYS
     after the guest's last night. Fixed Message-IDs mean never twice."""
     today = today or datetime.now(VEGAS).date()
+    cap = _int_env("FOLLOW_UP_MAX_PER_CYCLE", 5)
+    late = _int_env("FOLLOW_UP_MAX_LATE_DAYS", 7)
+    sent = deferred = 0
     for conf in gmail_client.recent_confirmations(service):
         last_night = conf.get("last_night")
         address = re.sub(r".*<([^>]+)>.*", r"\1", conf["to"]).strip().lower()
         if not last_night or not address or today < last_night + timedelta(days=FOLLOW_UP_DELAY_DAYS):
             continue
+        if today > last_night + timedelta(days=FOLLOW_UP_DELAY_DAYS + late):
+            continue  # too overdue: don't send a stale follow-up after an outage
         if allowlist is not None and address not in allowlist:
             continue
         if gmail_client.has_opted_out(service, address):
             log.info("Follow-up skipped for %s: they asked to stop", address)
+            continue
+        if sent >= cap:
+            deferred += 1
             continue
         subject, body = follow_up_email(conf["first_name"], conf.get("venues", []))
         if mode == "dry-run":
@@ -674,6 +682,16 @@ def send_follow_ups(service, mode, allowlist=None, today=None):
                                   address, subject, body, sender=rules.SENDER_EMAIL,
                                   dedupe_query=f'to:{address} {FOLLOW_UP_SEARCH} newer_than:60d'):
             log.info("Follow-up sent to %s (last night %s)", address, last_night)
+            sent += 1
+    if deferred:
+        log.info("Follow-ups: %d sent this cycle, %d deferred to later cycles (cap %d)", sent, deferred, cap)
+
+
+def _int_env(name, default):
+    try:
+        return int(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
 
 
 FLYERS_DIR = os.path.join(os.path.dirname(__file__), "data", "flyers")
