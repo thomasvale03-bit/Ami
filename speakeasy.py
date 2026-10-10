@@ -38,7 +38,9 @@ def auto_on():
 
 
 def _browser(p):
-    return p.chromium.launch(headless=True, executable_path=os.environ["CHROMIUM_PATH"])
+    # CHROMIUM_PATH is set in dev; on Railway's Playwright image it's unset and
+    # Playwright finds its own Chromium (pass None, same as tao_portal).
+    return p.chromium.launch(headless=True, executable_path=os.environ.get("CHROMIUM_PATH") or None)
 
 
 def _login(page):
