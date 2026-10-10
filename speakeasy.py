@@ -54,13 +54,91 @@ def _login(page):
     page.wait_for_timeout(1500)
 
 
-def _add_one(page, date_iso, name, male, female):
-    """Add a single guest for one night via the dashboard's 'Add new' dialog.
-    Steps finalised against the real Add-new form; raises on failure so the
-    caller records it per guest."""
-    # TODO(finalise from screenshot): navigate to `date_iso`, click "Add new",
-    # fill name + male/female counts, save, confirm the row appears.
-    raise NotImplementedError("Add-new flow pending the real dashboard form.")
+def _parse_shown_date(text, year):
+    """Parse the date-nav label like 'Fri, Oct 9' into a date, using `year`."""
+    import datetime, re
+    m = re.search(r"([A-Za-z]{3,})\s+(\d{1,2})", text or "")
+    if not m:
+        return None
+    mon, day = m.group(1)[:3], int(m.group(2))
+    months = {"Jan":1,"Feb":2,"Mar":3,"Apr":4,"May":5,"Jun":6,
+              "Jul":7,"Aug":8,"Sep":9,"Oct":10,"Nov":11,"Dec":12}
+    if mon not in months:
+        return None
+    try:
+        return datetime.date(year, months[mon], day)
+    except ValueError:
+        return None
+
+
+def _goto_date(page, target):
+    """Step the date-nav arrows until the shown date is `target` (a date).
+    Best-effort; the modal subtitle is the real safety check before saving."""
+    import datetime
+    date_btn = page.get_by_text(__import__("re").compile(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun),"), exact=False).first
+    for _ in range(120):
+        shown = _parse_shown_date(date_btn.inner_text(), target.year)
+        if shown == target:
+            return True
+        arrow = "following-sibling::button[1]" if (shown is None or shown < target) else "preceding-sibling::button[1]"
+        try:
+            date_btn.locator(f"xpath={arrow}").click(timeout=4000)
+        except Exception:
+            # fall back to the two nav buttons flanking the date label
+            btns = page.locator("header button, nav button, button")
+            (btns.nth(1) if (shown is None or shown < target) else btns.nth(0)).click()
+        page.wait_for_timeout(500)
+    return False
+
+
+def _set_count(modal, label, n):
+    """Set the Men/Women stepper to n: type into its number box if it's an
+    input, otherwise click its '+' n times."""
+    if n <= 0:
+        return
+    box = modal.locator(f"xpath=.//*[normalize-space(text())='{label}']/ancestor::div[1]").first
+    inp = box.locator("input")
+    if inp.count() > 0:
+        inp.first.fill(str(n))
+        return
+    plus = box.get_by_role("button").last  # layout is [− value +]; '+' is last
+    for _ in range(n):
+        plus.click()
+        modal.page.wait_for_timeout(120)
+
+
+def _add_one(page, date_iso, first, last, male, female):
+    """Add one guest for `date_iso` via the 'Add new' dialog. Verifies the
+    dialog's own date matches before saving, so a guest is never added to the
+    wrong night. Raises on any failure so the caller records it per guest."""
+    import datetime
+    target = datetime.date.fromisoformat(date_iso)
+    page.goto(MANAGER_URL, wait_until="networkidle")
+    page.wait_for_timeout(1500)
+    _goto_date(page, target)
+    page.get_by_role("button", name="Add new").click()
+    modal = page.get_by_role("dialog")
+    modal.wait_for(timeout=15000)
+    # Safety: the modal says "Create a guest for Friday, October 9, 2026."
+    subtitle = modal.inner_text()
+    shown = None
+    import re as _re
+    m = _re.search(r"for\s+[A-Za-z]+,\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})", subtitle)
+    if m:
+        try:
+            shown = datetime.datetime.strptime(m.group(1), "%B %d, %Y").date()
+        except ValueError:
+            shown = None
+    if shown != target:
+        try: modal.get_by_role("button", name="Cancel").click()
+        except Exception: pass
+        raise RuntimeError(f"dialog date {shown} != target {target}; not adding")
+    modal.get_by_placeholder("Enter first name").fill(first)
+    modal.get_by_placeholder("Enter last name").fill(last or first)
+    _set_count(modal, "Men", int(male or 0))
+    _set_count(modal, "Women", int(female or 0))
+    modal.get_by_role("button", name="Save Guest List").click()
+    page.wait_for_timeout(2000)
 
 
 def add_guests_for_night(date_iso, guests):
@@ -78,7 +156,10 @@ def add_guests_for_night(date_iso, guests):
             _login(page)
             for g in guests:
                 try:
-                    _add_one(page, date_iso, g["name"], g.get("male", 0), g.get("female", 0))
+                    first = g.get("first") or (g.get("name", "").split(" ", 1) + [""])[0]
+                    last = g.get("last") or (g.get("name", "").split(" ", 1) + [""])[1]
+                    _add_one(page, date_iso, first.strip(), last.strip(),
+                             g.get("male", 0), g.get("female", 0))
                     results.append({"name": g["name"], "ok": True, "error": None})
                     log.info("SpeakeasyGo: added %s for %s", g["name"], date_iso)
                 except Exception as exc:  # noqa: BLE001 - one guest failing must not sink the batch
@@ -89,3 +170,40 @@ def add_guests_for_night(date_iso, guests):
         log.warning("SpeakeasyGo auto-add unavailable (%s); door text still sent", exc)
         return [{"name": g["name"], "ok": False, "error": str(exc)} for g in guests]
     return results
+
+
+def _test_add(first, last, male, female, date_iso):
+    """One-guest live test. Runs with creds from the environment regardless of
+    SPEAKEASY_AUTO, so you can verify before enabling the real flow. Check your
+    SpeakeasyGo dashboard for the guest afterward.
+
+        python speakeasy.py test First Last 2 1 2026-10-17
+    """
+    if not (EMAIL and PASSWORD):
+        print("Set SPEAKEASY_EMAIL and SPEAKEASY_PASSWORD first."); return
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        b = _browser(p)
+        page = b.new_context(locale="en-US").new_page(); page.set_default_timeout(20000)
+        try:
+            _login(page)
+            _add_one(page, date_iso, first, last, int(male), int(female))
+            print(f"OK: added {first} {last} ({male}M/{female}F) for {date_iso} — check the dashboard.")
+        except Exception as exc:  # noqa: BLE001
+            print("FAILED:", exc)
+            try:
+                page.screenshot(path="/tmp/speakeasy_fail.png")
+                print("screenshot: /tmp/speakeasy_fail.png")
+            except Exception:
+                pass
+        finally:
+            b.close()
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) >= 7 and sys.argv[1] == "test":
+        _test_add(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6])
+    else:
+        print(__doc__)
+        print("\nUsage: python speakeasy.py test <First> <Last> <Men> <Women> <YYYY-MM-DD>")

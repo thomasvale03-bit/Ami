@@ -762,6 +762,16 @@ class ConciergeTests(unittest.TestCase):
         jose = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)[4]
         self.assertIn("couldn't read the master link", jose)
 
+    def test_drais_auto_add_reported_in_team_email(self):
+        text = FIXTURE.replace("Requested venues: Omnia Nightclub", "Requested venues: Drai's Nightclub")
+        with mock.patch.object(main.speakeasy, "auto_on", return_value=True), \
+             mock.patch.object(main.speakeasy, "add_guests_for_night",
+                               return_value=[{"name": "Jane Sample", "ok": True, "error": None}]) as add:
+            out, sent, submit = self._handle(text)
+        self.assertTrue(add.called)  # Amy added the guest to SpeakeasyGo herself
+        jose = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)[4]
+        self.assertIn("added to SpeakeasyGo", jose)  # result reported to the team
+
     def test_jose_email_has_tap_signup_links_when_live(self):
         from datetime import date
         self.catalog = {

@@ -35,6 +35,7 @@ import posh
 import tao_portal
 import ticketsauce
 import headliners
+import speakeasy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("amy")
@@ -306,8 +307,28 @@ def concierge_handoff(service, message_id, raw, dry_run):
     drais = {"name": f"{request['first_name']} {request['last_name']}".strip(),
              "female_count": request["female_count"], "male_count": request["male_count"],
              "nights": drais_nights} if drais_nights else None
+
+    # Drai's runs on Playmaker's own SpeakeasyGo account (no bot-check). When
+    # enabled, Amy adds the guest to the SpeakeasyGo list herself for each night
+    # and reports the result in the team email, so success/failure is visible
+    # and nobody is ever silently dropped. The guest's door text still goes out.
+    drais_status = None
+    if drais_nights and not dry_run and speakeasy.auto_on():
+        guest_row = {"first": request["first_name"], "last": request["last_name"],
+                     "male": request["male_count"], "female": request["female_count"],
+                     "name": drais["name"]}
+        lines = []
+        for night in drais_nights:
+            res = speakeasy.add_guests_for_night(night, [guest_row])[0]
+            lines.append(f"  {night}: " + ("✓ added to SpeakeasyGo" if res["ok"]
+                         else f"✗ auto-add failed ({res['error']}) — add manually"))
+        drais_status = "Drai's SpeakeasyGo sign-up:\n" + "\n".join(lines)
+        log.info("%s Drai's auto-add: %s", message_id, "; ".join(lines))
+
     gsub, gbody = guest_confirmation(request["first_name"], nights, drais=drais)
     tsub, tbody = jose_signup_order(request, nights, drais_nights)
+    if drais_status:
+        tbody += f"\n\n{drais_status}"
     tbody += f"\n\nRef: {message_id}"
 
     if dry_run:
