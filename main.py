@@ -752,7 +752,7 @@ def run_speakeasy_test(service):
     guest = {"first": t.get("first", "Test"), "last": t.get("last", "Amy"),
              "male": t.get("male", 0), "female": t.get("female", 0),
              "name": f"{t.get('first','Test')} {t.get('last','Amy')}"}
-    res = speakeasy.add_guests_for_night(t["date"], [guest])[0]
+    res = speakeasy.add_guests_for_night(t["date"], [guest], force=True)[0]
     status = ("✓ added to SpeakeasyGo" if res["ok"]
               else f"✗ failed: {res['error']}")
     log.info("SpeakeasyGo test (%s %s, %s): %s", guest["first"], guest["last"], t["date"], status)
@@ -760,11 +760,13 @@ def run_speakeasy_test(service):
             f"Party: {guest['male']}M / {guest['female']}F\nNight: {t['date']}\n\n"
             f"Result: {status}\n\nIf ✓, check the SpeakeasyGo dashboard for that night to confirm, "
             f"then it's safe to enable SPEAKEASY_AUTO. If ✗, send the error to get it fixed.")
+    # Subject carries result+date so each deploy's test sends a fresh email
+    # (short dedupe only collapses a restart loop within 10 minutes).
+    subject = f"Amy — SpeakeasyGo test {t['date']} {'OK' if res['ok'] else 'FAILED'}"
     gmail_client.send_once(
         service, f"amy-speakeasy-test-{t['date']}@playmakerentertainment.com",
-        rules.PLAYMAKER_EMAIL, "Amy — SpeakeasyGo test result", body,
-        sender=rules.SENDER_EMAIL,
-        dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} subject:"Amy — SpeakeasyGo test result" newer_than:1h')
+        rules.PLAYMAKER_EMAIL, subject, body, sender=rules.SENDER_EMAIL,
+        dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} subject:"{subject}" newer_than:10m')
 
 
 def run_once(service, mode, labels, allowlist=None, start_after=None):

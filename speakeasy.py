@@ -141,11 +141,15 @@ def _add_one(page, date_iso, first, last, male, female):
     page.wait_for_timeout(2000)
 
 
-def add_guests_for_night(date_iso, guests):
+def add_guests_for_night(date_iso, guests, force=False):
     """guests: list of {"name", "male", "female"}. Returns per-guest results
-    [{"name", "ok", "error"}]. Best-effort: never raises."""
-    if not auto_on():
+    [{"name", "ok", "error"}]. Best-effort: never raises. force=True runs even
+    when SPEAKEASY_AUTO is off (used by the one-shot test), as long as creds
+    are set."""
+    if not force and not auto_on():
         return [{"name": g["name"], "ok": False, "error": "speakeasy auto off"} for g in guests]
+    if not (EMAIL and PASSWORD):
+        return [{"name": g["name"], "ok": False, "error": "speakeasy creds not set"} for g in guests]
     from playwright.sync_api import sync_playwright
     results = []
     try:
