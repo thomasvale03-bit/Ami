@@ -210,3 +210,15 @@ TAO_AUTOMATION_AUTHORIZATION = (
     "List registrations, signed 2026-09-28 by Jonathan Sidara (Las Vegas "
     "Promotions Director, TAO Group Hospitality); acknowledged by Thomas Vale"
 )
+
+
+# Posh recurring series: child events can be RENAMED ("R&BAE | Hakkasan"),
+# but their slugs keep the series' original name. Known series, keyed by the
+# first 18 hex chars of the child event ids (ids in one series share them),
+# with their slug base and UTC end-time slug parts. Amy also learns new ones
+# from every Posh page she reads. Extra entries: env POSH_SERIES_SEEDS as
+# "prefix=base:8-30/9-30;prefix2=base2:11-30".
+POSH_SERIES_SEEDS = {
+    "6a682ff9374ee034d5": ("guest-list-hakkasan", ("11-30", "12-30")),
+    "6a80e79648e2b4a133": ("guestlist-tao-nc", ("8-30", "9-30")),
+}
