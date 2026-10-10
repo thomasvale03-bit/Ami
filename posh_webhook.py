@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 import posh
+import posh_lookup
 
 log = logging.getLogger("amy.posh_webhook")
 VEGAS = ZoneInfo("America/Los_Angeles")
@@ -166,6 +167,49 @@ def posh_night(event_start, date_purchased=None, event_end=None, custom_fields=N
     return _night(occ), "recurring_next_occurrence"
 
 
+REVIEW_RULE = "recurring_guess_needs_review"
+
+
+def lookup_enabled():
+    return os.environ.get("POSH_LOOKUP_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+
+
+def resolve_night(payload, lookup=None):
+    """(night, how, start_local) using the child event's real start first.
+
+    1. Real start of the child event (payload event_id) from its public Posh
+       page -> "posh_page". This is the truth for recurring series.
+    2. Otherwise posh_night() (custom field / event_start / weekly guess).
+       A weekly guess (event_start before the purchase = series anchor) is
+       returned as REVIEW_RULE: Amy flags it for the team instead of booking.
+    """
+    lookup = lookup or (posh_lookup.real_start if lookup_enabled() else (lambda *a, **k: None))
+    bought = None
+    if payload.get("date_purchased"):
+        try:
+            bought = datetime.fromisoformat(payload["date_purchased"].strip().replace("Z", "+00:00"))
+            bought = bought if bought.tzinfo else bought.replace(tzinfo=timezone.utc)
+        except ValueError:
+            bought = None
+    try:
+        start = lookup(payload.get("event_id"), payload.get("event_name"), bought)
+    except Exception as exc:  # noqa: BLE001 - a lookup failure just means "fall back"
+        log.info("Posh event lookup failed: %s", exc)
+        start = None
+    if start:
+        local = start.astimezone(VEGAS).replace(tzinfo=None)
+        return _night(local), "posh_page", local
+    night, how = posh_night(payload.get("event_start"), payload.get("date_purchased"),
+                            payload.get("event_end"), payload.get("custom_fields"))
+    if how == "recurring_next_occurrence":
+        how = REVIEW_RULE
+    return night, how, None
+
+
+def needs_review(body):
+    return f"Night Rule: {REVIEW_RULE}" in (body or "")
+
+
 # --- payload -> request -----------------------------------------------------
 
 def should_ignore(payload):
@@ -185,10 +229,10 @@ def ticket_names(items):
     return [re.sub(r"\s*,\s*", " ", (i.get("name") or "").strip()) for i in items or [] if i.get("name")]
 
 
-def to_signup_text(payload, night, how):
+def to_signup_text(payload, night, how, start_local=None):
     """The Zapier-style NEW POSH SIGNUP body posh.parse_signup reads. Event
     Date carries the corrected night at the event's own start time."""
-    start = _wall_clock(payload.get("event_start"))
+    start = start_local or _wall_clock(payload.get("event_start"))
     clock = start.time() if start else datetime.min.time().replace(hour=22)
     corrected = datetime.combine(night, clock)
     if clock.hour < posh.NIGHT_ROLLOVER_HOUR:
@@ -247,7 +291,8 @@ class Intake:
     """Puts orders into the intake inbox. One Gmail client per instance
     (kept off the main loop's client: googleapiclient isn't thread-safe)."""
 
-    def __init__(self, service_factory, intake_email, dry_run=False):
+    def __init__(self, service_factory, intake_email, dry_run=False, lookup=None):
+        self.lookup = lookup
         self._factory, self._service, self.intake_email, self.dry_run = service_factory, None, intake_email, dry_run
         self._seen = set()
         self._lock = threading.Lock()
@@ -271,11 +316,10 @@ class Intake:
             return 200, f"ignored: {reason}"
         key = (payload.get("order_number") or "", payload.get("event_id") or "",
                (payload.get("account_email") or "").lower())
-        night, how = posh_night(payload.get("event_start"), payload.get("date_purchased"),
-                                payload.get("event_end"), payload.get("custom_fields"))
+        night, how, start_local = resolve_night(payload, self.lookup)
         if night is None:
             how = "unknown"
-        body = to_signup_text(payload, night, how) if night else to_signup_text(
+        body = to_signup_text(payload, night, how, start_local) if night else to_signup_text(
             dict(payload, event_start=""), datetime.now(VEGAS).date(), how).replace(
             "Event Date: ", "Event Date: (unknown) ", 1)
         with self._lock:

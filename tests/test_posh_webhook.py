@@ -22,6 +22,9 @@ BASE = {"type": "new_order", "account_first_name": "Test", "account_last_name": 
         "isInPersonOrder": False}
 
 
+NOLOOKUP = lambda *a, **k: None
+
+
 def order(**kw):
     return dict(BASE, **kw)
 
@@ -158,7 +161,7 @@ class FakeGmail:
 class DedupeTests(unittest.TestCase):
     def test_inserts_once_then_dedupes_in_memory(self):
         g = FakeGmail()
-        intake = pw.Intake(lambda: g, "intake@example.com")
+        intake = pw.Intake(lambda: g, "intake@example.com", lookup=NOLOOKUP)
         self.assertEqual(intake.accept(order()), (200, "queued"))
         self.assertEqual(intake.accept(order()), (200, "duplicate (this run)"))
         self.assertEqual(len(g.inserted), 1)
@@ -166,7 +169,7 @@ class DedupeTests(unittest.TestCase):
 
     def test_gmail_dedupe_survives_restart(self):
         g = FakeGmail(existing=True)
-        self.assertEqual(pw.Intake(lambda: g, "i@x.com").accept(order()), (200, "duplicate"))
+        self.assertEqual(pw.Intake(lambda: g, "i@x.com", lookup=NOLOOKUP).accept(order()), (200, "duplicate"))
         self.assertEqual(g.inserted, [])
         self.assertIn('"Order Number: 77"', g.queries[0])
         self.assertIn('"600000000000000000000000" "test@example.com"', g.queries[0])
@@ -177,8 +180,8 @@ class DedupeTests(unittest.TestCase):
 
     def test_ignored_and_dry_run_insert_nothing(self):
         g = FakeGmail()
-        self.assertEqual(pw.Intake(lambda: g, "i").accept(order(refunded=True))[1], "ignored: order is refunded")
-        self.assertEqual(pw.Intake(lambda: g, "i", dry_run=True).accept(order())[1], "dry run")
+        self.assertEqual(pw.Intake(lambda: g, "i", lookup=NOLOOKUP).accept(order(refunded=True))[1], "ignored: order is refunded")
+        self.assertEqual(pw.Intake(lambda: g, "i", dry_run=True, lookup=NOLOOKUP).accept(order())[1], "dry run")
         self.assertEqual(g.inserted, [])
 
 
@@ -198,7 +201,7 @@ class ServerTests(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {"POSH_WEBHOOK_TOKEN": "tok"})
         self.env.start()
         self.gmail = FakeGmail()
-        self.server = pw.serve(pw.Intake(lambda: self.gmail, "i@x.com"), port=0, host="127.0.0.1")
+        self.server = pw.serve(pw.Intake(lambda: self.gmail, "i@x.com", lookup=NOLOOKUP), port=0, host="127.0.0.1")
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def tearDown(self):
