@@ -192,3 +192,65 @@ class HakkasanRegressionTests(unittest.TestCase):
                               event_end="2026-08-16T04:30:00.000Z")
         self.assertEqual(pl.night_from_start(start), date(2026, 10, 17))
         self.assertLessEqual(len(calls), 40)
+
+
+HAK_1022 = (pathlib.Path(__file__).parent / "fixtures" / "posh_event_hakkasan_1022.html").read_text()
+RBAE_ID = "6a682ff9374ee034d5cc4b61"
+
+
+class RenamedChildTests(unittest.TestCase):
+    """Real order 37448164: 'R&BAE | Hakkasan' is a renamed child of the
+    'Guest List | Hakkasan' series; its slug keeps the series name
+    (guest-list-hakkasan-2026-10-22-11-30). Thomas: night is Wed Oct 21."""
+
+    def setUp(self):
+        pl.reset_cache()
+
+    def test_ampersand_variants(self):
+        self.assertEqual(pl.name_bases("R&BAE | Hakkasan"),
+                         ["r-bae-hakkasan", "rbae-hakkasan", "r-and-bae-hakkasan"])
+
+    def test_series_key_and_seed(self):
+        self.assertEqual(pl.series_key(RBAE_ID), pl.series_key(HAK_ID))
+        self.assertEqual(pl.series_bases(RBAE_ID), ["guest-list-hakkasan"])
+        self.assertEqual(pl.series_bases("ffffffffffffffffffffffff"), [])
+
+    def test_env_seed(self):
+        with mock.patch.dict(os.environ, {"POSH_SERIES_SEEDS": "abcdefabcdefabcdef12=marquee-gl:8-0/9-0"}):
+            self.assertEqual(pl.series_bases("abcdefabcdefabcdef123456"), ["marquee-gl"])
+
+    def test_learns_series_from_pages(self):
+        pl._learn(pl.siblings(HAK_1010))
+        self.assertIn("guest-list-hakkasan", pl._series[pl.series_key(HAK_ID)])
+
+    def test_renamed_child_found_via_seed(self):
+        fetch, calls = fake_site({"guest-list-hakkasan-2026-10-10-11-30": HAK_1010,
+                                  "guest-list-hakkasan-2026-10-22-11-30": HAK_1022})
+        start = pl.real_start(RBAE_ID, "R&BAE | Hakkasan", datetime(2026, 10, 10, 13, 13, 57, tzinfo=timezone.utc),
+                              fetch=fetch, sleep=lambda s: None, event_start="2026-07-29T22:30:00Z")
+        self.assertEqual(start, datetime.fromisoformat("2026-10-21T22:30:00-07:00"))
+        self.assertEqual(pl.night_from_start(start), date(2026, 10, 21))
+        self.assertLessEqual(len(calls), 6)
+        self.assertFalse(any("r-bae" in c for c in calls))
+
+    def test_renamed_child_without_seed_uses_learned_series(self):
+        with mock.patch.object(pl, "seeds", return_value={}):
+            pl._learn(pl.siblings(HAK_1010))  # an earlier Hakkasan order taught us the series
+            fetch, _ = fake_site({"guest-list-hakkasan-2026-10-10-11-30": HAK_1010,
+                                  "guest-list-hakkasan-2026-10-22-11-30": HAK_1022})
+            pl._starts.clear()
+            pl._slugs.clear()
+            start = pl.real_start(RBAE_ID, "R&BAE | Hakkasan", datetime(2026, 10, 10, 13, 13, 57, tzinfo=timezone.utc),
+                                  fetch=fetch, sleep=lambda s: None)
+        self.assertEqual(pl.night_from_start(start), date(2026, 10, 21))
+
+    def test_other_series_page_does_not_stop_search(self):
+        # A TAO page found first (different series) must not end the search.
+        fetch, _ = fake_site({"guest-list-hakkasan-2026-10-10-11-30": HTML,
+                              "guest-list-hakkasan-2026-10-11-11-30": HAK_1010,
+                              "guest-list-hakkasan-2026-10-22-11-30": HAK_1022})
+        with mock.patch.object(pl, "seeds", return_value={}):
+            start = pl.real_start(RBAE_ID, "Guest List | Hakkasan",
+                                  datetime(2026, 10, 10, 13, tzinfo=timezone.utc), fetch=fetch, sleep=lambda s: None,
+                                  event_start="2026-07-29T22:30:00Z")
+        self.assertEqual(pl.night_from_start(start), date(2026, 10, 21))

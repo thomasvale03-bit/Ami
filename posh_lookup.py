@@ -71,21 +71,65 @@ def page_slug(html):
     return m.group(1) if m else None
 
 
+PREFIX_LEN = 18
+_series = {}  # id prefix -> {slug bases}
+
+
+def series_key(event_id):
+    return (event_id or "")[:PREFIX_LEN] if len(event_id or "") == 24 else ""
+
+
+def seeds():
+    """{prefix: (base, end_times)} from config plus POSH_SERIES_SEEDS env."""
+    from config import rules
+    out = dict(getattr(rules, "POSH_SERIES_SEEDS", {}))
+    for item in os.environ.get("POSH_SERIES_SEEDS", "").split(";"):
+        m = re.match(r"\s*([0-9a-f]{6,24})\s*=\s*([a-z0-9-]+)\s*(?::\s*([0-9/ -]+))?\s*$", item)
+        if m:
+            out[m.group(1)[:PREFIX_LEN]] = (m.group(2), tuple(t.strip() for t in (m.group(3) or "").split("/") if t.strip()))
+    return out
+
+
+def _base_and_time(slug):
+    m = SLUG_TAIL_RE.search(slug)
+    return (slug[:m.start()], f"{int(m.group(4))}-{m.group(5)}") if m else (None, None)
+
+
 def _learn(found):
     for event_id, slug in found.items():
         _slugs[event_id] = slug
-        m = SLUG_TAIL_RE.search(slug)
-        if m:
-            _end_times.setdefault(slug[:m.start()], set()).add(f"{int(m.group(4))}-{m.group(5)}")
+        base, t = _base_and_time(slug)
+        if base:
+            _end_times.setdefault(base, set()).add(t)
+            if series_key(event_id):
+                _series.setdefault(series_key(event_id), set()).add(base)
+
+
+def series_bases(event_id):
+    """Slug bases known for this event's series: learned first, then seeds."""
+    key = series_key(event_id)
+    if not key:
+        return []
+    out = sorted(_series.get(key, ()))
+    seed = seeds().get(key)
+    if seed:
+        out.append(seed[0])
+        for t in seed[1]:
+            _end_times.setdefault(seed[0], set()).add(t)
+    return list(dict.fromkeys(out))
 
 
 def name_bases(event_name):
-    """Slug bases to try: the plain slug plus guestlist <-> guest-list swaps."""
-    base = slugify(event_name)
-    out = [base] if base else []
+    """Slug bases to try: the plain slug, '&' variants ("R&BAE" ->
+    r-bae / rbae / r-and-bae), and guestlist <-> guest-list swaps."""
+    name = event_name or ""
+    forms = [name, name.replace("&", ""), name.replace("&", " and ")]
+    out = list(dict.fromkeys(b for b in map(slugify, forms) if b))
+    base = out[0] if out else ""
     for a, b in (("guest-list", "guestlist"), ("guestlist", "guest-list")):
-        if a in base:
-            out.append(base.replace(a, b))
+        for x in list(out):
+            if a in x:
+                out.append(x.replace(a, b))
     return list(dict.fromkeys(out))
 
 
@@ -207,8 +251,30 @@ def real_start(event_id, event_name, purchased_utc, fetch=_default_fetch, sleep=
         return start
 
 
+def _series_slugs(base, purchased_utc, before=1, after=7):
+    times = sorted(_end_times.get(base, ())) or fallback_end_times()[:4]
+    out = []
+    for offset in range(-before, after + 1):
+        d = (purchased_utc + timedelta(days=offset)).date()
+        out += [f"{base}-{d.year}-{d.month}-{d.day}-{t}" for t in times]
+    return out
+
+
+def _all_candidates(event_id, event_name, purchased_utc, event_start, event_end):
+    """Known series bases first (child events can be renamed, slugs keep the
+    series name), then guesses from this order's own name."""
+    if purchased_utc is None:
+        return []
+    out = []
+    for base in series_bases(event_id):
+        out += _series_slugs(base, purchased_utc)
+    out += candidate_slugs(event_name, purchased_utc, event_start=event_start, event_end=event_end)
+    return list(dict.fromkeys(out))
+
+
 def _resolve(event_id, event_name, purchased_utc, get, event_start=None, event_end=None):
     tried = set()
+    key = series_key(event_id)
 
     def open_target(slug):
         html = get(slug)
@@ -222,7 +288,7 @@ def _resolve(event_id, event_name, purchased_utc, get, event_start=None, event_e
         start = open_target(_slugs[event_id])
         if start:
             return start
-    for slug in candidate_slugs(event_name, purchased_utc, event_start=event_start, event_end=event_end):
+    for slug in _all_candidates(event_id, event_name, purchased_utc, event_start, event_end):
         if slug in tried:
             continue
         html = get(slug)
@@ -236,16 +302,15 @@ def _resolve(event_id, event_name, purchased_utc, get, event_start=None, event_e
                 if found[event_id] == page_slug(html):
                     return page_start(html)
                 return open_target(found[event_id])
-            # Not in this window: hop to the furthest-out sibling and look again.
-            later = [s for s in found.values() if s not in tried]
+            same_series = key and any(series_key(i) == key for i in found)
+            later = [s for s in found.values() if s not in tried] if same_series else []
             if not later:
-                return None
+                break  # another series, or nothing further: keep guessing
             nxt = later[-1]
             html = get(nxt)
             tried.add(nxt)
             if not html:
-                return None
-        return None
+                break
     return None
 
 
@@ -259,3 +324,4 @@ def reset_cache():
         _starts.clear()
         _slugs.clear()
         _end_times.clear()
+        _series.clear()

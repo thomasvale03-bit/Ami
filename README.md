@@ -233,3 +233,9 @@ reads the child's real start from its public Posh page (`posh_lookup.py`):
   `POSH_LOOKUP_ENABLED=false` turns the lookup off.
 - If the lookup fails and `event_start` is before the purchase (a series anchor),
   the order is **not** booked. It goes to the team as needs-attention.
+- Renamed dates: a child event can be renamed ("R&BAE | Hakkasan") but its slug keeps
+  the series name (`guest-list-hakkasan-…`). Child ids in one series share their first
+  18 hex characters, so Amy first tries the slug names known for that id prefix:
+  ones learned from pages she has read, plus `POSH_SERIES_SEEDS` in `config/rules.py`
+  (Hakkasan, TAO NC). More can be added with env `POSH_SERIES_SEEDS="<id prefix>=<base>:8-30/9-30;..."`.
+  After that she guesses from the order's own name, including `&` variants (`r-bae`, `rbae`, `r-and-bae`).
