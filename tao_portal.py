@@ -435,12 +435,44 @@ def check_availability(venue, date_obj):
             browser.close()
 
 
+def _api_or_assisted(listing, guest, rehearse=False):
+    """Official TicketSauce API first (only when creds exist, the endpoint is
+    marked verified and the listing carries an event_id), then assisted mode
+    (AMY_SIGNUP_MODE=assisted: hand the job to Thomas, who clears the human
+    check himself). None => fall through to the existing browser flow."""
+    import assisted_jobs
+    import ticketsauce_api
+    if not rehearse and ticketsauce_api.has_credentials() and listing.get("event_id"):
+        try:
+            result = ticketsauce_api.Client.from_env().create_registration(listing["event_id"], guest)
+            if result.get("verified"):
+                result.setdefault("event", listing.get("event"))
+                result.setdefault("arrival_text", listing.get("arrival_text", ""))
+                result.setdefault("authorization", TAO_AUTOMATION_AUTHORIZATION)
+                return result
+            log.info("TicketSauce API did not register: %s", result.get("reason"))
+        except ticketsauce_api.ApiNotReady as exc:
+            log.info("TicketSauce API not used: %s", exc)
+    if assisted_jobs.assisted_on():
+        try:
+            job = assisted_jobs.make_job(listing["listing_url"], guest, venue=listing.get("venue"),
+                                         date=listing.get("date"), event=listing.get("event"))
+        except ValueError as exc:
+            return {"confirmation_id": None, "verified": False, "reason": str(exc)}
+        return {"confirmation_id": None, "verified": False, "assisted_job": job,
+                "reason": "handed to Thomas for an assisted sign-up (he clears the human check)"}
+    return None
+
+
 def submit_registration(listing, guest, rehearse=False):
     """rehearse=True fills and checks the whole form, then stops before the
     final click and returns {"rehearsal": True, ...}: nothing is ordered."""
     url = listing.get("listing_url", "")
     if not is_safe_pass_url(url):
         return {"confirmation_id": None, "verified": False, "reason": f"Refusing non-Guest-List URL: {url}"}
+    routed = _api_or_assisted(listing, guest, rehearse)
+    if routed is not None:
+        return routed
     if url not in _catalog_urls():
         return {"confirmation_id": None, "verified": False,
                 "reason": f"Refusing a Pass link that is not on the Playmaker promoter page: {url}"}

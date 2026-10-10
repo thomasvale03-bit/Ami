@@ -34,6 +34,7 @@ import gmail_client
 import posh
 import tao_portal
 import ticketsauce
+import assisted_jobs
 import headliners
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -63,6 +64,7 @@ def process_one_request(raw, dry_run=True, today=None, now=None):
 
     registrations = []
     exceptions = []
+    assisted = []
 
     def checker(venue, date_obj):
         if dry_run:
@@ -91,6 +93,11 @@ def process_one_request(raw, dry_run=True, today=None, now=None):
             exceptions.append({"date": date_obj.isoformat(), "issue": (
                 f"{venue}: submitted but success could not be confirmed ({exc}). "
                 "Check TAO for this guest before re-submitting.")})
+            return False
+        if result.get("assisted_job"):
+            job = result["assisted_job"]
+            job.update(venue=job.get("venue") or venue, date=job.get("date") or date_obj.isoformat())
+            assisted.append(job)
             return False
         if not result.get("verified"):
             exceptions.append({"date": date_obj.isoformat(), "issue": (
@@ -137,6 +144,8 @@ def process_one_request(raw, dry_run=True, today=None, now=None):
                 "required_action": "Book this guest manually on TAO."}
 
     output = {"request": request, "registrations": registrations, "exceptions": exceptions}
+    if assisted:
+        output["assisted_jobs"] = assisted
     return _confirmation_and_records(output, request, today, dry_run)
 
 
@@ -319,11 +328,41 @@ def concierge_handoff(service, message_id, raw, dry_run):
         service, f"amy-confirm-{message_id}@playmakerentertainment.com",
         request["email"], gsub, gbody, sender=rules.SENDER_EMAIL,
         dedupe_query=f'to:{request["email"]} subject:"{gsub}" newer_than:3d')
+    if assisted_jobs.assisted_on():
+        jobs = concierge_jobs(request, nights, message_id)
+        if jobs:
+            send_assisted_jobs(service, message_id, request, jobs, dry_run=False)
+            return gmail_client.PROCESSED_LABEL
     gmail_client.send_once(
         service, f"amy-signup-{message_id}@playmakerentertainment.com",
         rules.PLAYMAKER_EMAIL, tsub, tbody, sender=rules.SENDER_EMAIL,
         dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Ref: {message_id}"')
     return gmail_client.PROCESSED_LABEL
+
+
+def concierge_jobs(request, nights, message_id):
+    """Assisted jobs for every concierge night that has a live sign-up link
+    (main venue and dayclub). Nights without a link yield no job."""
+    jobs = []
+    for n in nights:
+        for venue, url in ((n["venue"], n.get("signup_url")), (n.get("dayclub"), n.get("dayclub_url"))):
+            if url and tao_portal.is_safe_pass_url(url):
+                jobs.append(assisted_jobs.make_job(url, request, venue=venue, date=n["date"], ref=message_id))
+    return jobs
+
+
+def send_assisted_jobs(service, message_id, request, jobs, dry_run):
+    """Email the jobs to Thomas (ASSISTED_SIGNUP_TO, else the Playmaker inbox)."""
+    to = assisted_jobs.recipient(rules.PLAYMAKER_EMAIL)
+    name = f"{request['first_name']} {request['last_name']}".strip()
+    subject, body = assisted_jobs.job_email(jobs, name)
+    body += f"\n\nRef: {message_id}"
+    if dry_run:
+        print(f"[dry run] assisted sign-up jobs to {to}:\n{subject}\n{body}")
+        return False
+    return gmail_client.send_once(
+        service, f"amy-assisted-{message_id}@playmakerentertainment.com", to, subject, body,
+        sender=rules.SENDER_EMAIL, dedupe_query=f'to:{to} "Ref: {message_id}" subject:"Amy sign-up"')
 
 
 def send_links_on():
@@ -531,6 +570,9 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
             "consent": request.get("consent"),
             "problems": result.get("action_needed_records"),
         }, indent=2, default=str))
+
+    if result.get("assisted_jobs"):
+        send_assisted_jobs(service, message_id, request, result["assisted_jobs"], dry_run)
 
     if "confirmation_email" in result:
         email = result["confirmation_email"]
