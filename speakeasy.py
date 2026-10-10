@@ -24,8 +24,8 @@ import os
 
 log = logging.getLogger("amy.speakeasy")
 
-LOGIN_URL = os.environ.get("SPEAKEASY_LOGIN_URL", "").strip()
-MANAGER_URL = os.environ.get("SPEAKEASY_MANAGER_URL", "https://manager.speakeasygo.com/event-manager").strip()
+LOGIN_URL = os.environ.get("SPEAKEASY_LOGIN_URL", "https://manager.speakeasygo.com/login").strip()
+MANAGER_URL = os.environ.get("SPEAKEASY_MANAGER_URL", "https://manager.speakeasygo.com/guest-list").strip()
 EMAIL = os.environ.get("SPEAKEASY_EMAIL", "").strip()
 PASSWORD = os.environ.get("SPEAKEASY_PASSWORD", "")
 
@@ -46,11 +46,12 @@ def _login(page):
     Selectors are finalised against the real login page."""
     page.goto(LOGIN_URL, wait_until="domcontentloaded")
     page.wait_for_timeout(1500)
-    # Finalised from the real login form (email + password + submit).
-    page.fill("input[type=email], input[name=email]", EMAIL)
-    page.fill("input[type=password], input[name=password]", PASSWORD)
-    page.click("button[type=submit], button:has-text('Sign in'), button:has-text('Log in')")
+    # Real login form: #email, #password, "Sign In with Email" (no CAPTCHA).
+    page.fill("#email", EMAIL)
+    page.fill("#password", PASSWORD)
+    page.click("button:has-text('Sign In with Email')")
     page.wait_for_load_state("networkidle", timeout=30000)
+    page.wait_for_timeout(1500)
 
 
 def _add_one(page, date_iso, name, male, female):
