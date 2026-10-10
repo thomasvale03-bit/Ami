@@ -107,15 +107,15 @@ def omnia_closed_for_same_day(date_obj, today):
 
 def candidate_venues(request, date_obj, previous_night_venue=None):
     """
-    Ordered venue candidates for one date.
-    1. Customer-requested venues first. When several were requested, the
-       night's schedule decides which of them is tried first (owner decision
-       2026-09-27); requested venues the schedule doesn't list follow in
-       form order.
-    2. Then the night's schedule: the weekday primary/fallbacks, then the
+    Ordered nightclub candidates for one date.
+    1. Customer-requested venues first (honor what they asked for that night).
+    2. Then JEWEL — Playmaker's main club, always pushed so any day it's live
+       it leads (owner rule 2026-10-10).
+    3. Then the night's schedule: the weekday primary/fallbacks, then the
        extra backup nightclubs (not on Tuesday).
-    Weekend rule: never repeat the previous night's nightclub on Fri->Sat;
-    if Friday was JEWEL, prefer Hakkasan for Saturday.
+    Never repeat the previous night's nightclub on back-to-back nights: it's
+    moved to the end so a stay varies clubs (e.g. Hakkasan Fri -> JEWEL Sat),
+    but it still remains available if nothing else is live.
     """
     day = date_obj.strftime("%A")
     route = default_route_for_date(date_obj)
@@ -123,8 +123,8 @@ def candidate_venues(request, date_obj, previous_night_venue=None):
     schedule = [route["primary"]] + fallback
     if day not in rules.NO_EXTRA_BACKUP_DAYS:
         schedule += rules.EXTRA_BACKUP_NIGHTCLUBS
-    if day == "Saturday" and previous_night_venue == "JEWEL Nightclub":
-        schedule.insert(0, "Hakkasan Nightclub")
+    # Always push the main club to the front of the default schedule.
+    schedule = [rules.MAIN_NIGHTCLUB] + schedule
 
     requested = [v for v in request["requested_venues"] if v in rules.NIGHTCLUBS]
     ordered = [v for v in schedule if v in requested] + requested + schedule
@@ -133,10 +133,11 @@ def candidate_venues(request, date_obj, previous_night_venue=None):
     for v in ordered:
         if v == "best_available" or v in rules.PAUSED_VENUES or v in seen:
             continue
-        if date_obj.strftime("%A") == "Saturday" and v == previous_night_venue:
-            continue  # Fri+Sat duplicate-nightclub conflict
         seen.add(v)
         result.append(v)
+    # No back-to-back repeat: deprioritize last night's club (keep as last resort).
+    if previous_night_venue in result and len(result) > 1:
+        result = [v for v in result if v != previous_night_venue] + [previous_night_venue]
     return result
 
 

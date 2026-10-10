@@ -100,15 +100,22 @@ DEFAULT_ROUTING = {
     "Sunday":    {"primary": "TAO Nightclub", "fallback": "best_available"},
 }
 
+# JEWEL and Liquid are Playmaker's main clubs — always lead with them when
+# they're live (owner rule 2026-10-10). JEWEL leads the nightclub order every
+# day it's open; Liquid leads the dayclub order.
+MAIN_NIGHTCLUB = "JEWEL Nightclub"
+MAIN_DAYCLUB = "Liquid Pool Lounge"
+
 # On any date with a live, free dayclub Pass, Amy books one dayclub IN
-# ADDITION to the nightclub (never instead of it): a requested dayclub
-# first, then this priority. Live TAO availability decides the season.
+# ADDITION to the nightclub (different time slot — 11:30a–6p vs 10:30p–4a, so
+# this is not "doubling" a night): a requested dayclub first, then Liquid (the
+# main dayclub), then this priority. Live TAO availability decides the season.
 DAYCLUB_PRIORITY = [
+    "Liquid Pool Lounge",
     "TAO Beach Dayclub",
     "Marquee Dayclub",
     "OMNIA Dayclub",
     "Palm Tree Beach Club",
-    "Liquid Pool Lounge",
 ]
 
 # Tried after the weekday route, on every night except Tuesday, before giving
@@ -116,8 +123,9 @@ DAYCLUB_PRIORITY = [
 EXTRA_BACKUP_NIGHTCLUBS = ["JEWEL Nightclub", "Hakkasan Nightclub", "Marquee Nightclub"]
 NO_EXTRA_BACKUP_DAYS = {"Tuesday"}
 
-# Never repeat the same nightclub Fri + Sat. If Friday resolves to JEWEL,
-# prefer Hakkasan for Saturday when available (see rules_engine.apply_weekend_override).
+# Never repeat the same nightclub on back-to-back nights: candidate_venues moves
+# last night's club to the end so a stay varies clubs and JEWEL gets pushed as
+# the next night's lead (e.g. Hakkasan Fri -> JEWEL Sat).
 
 # --- Per-venue qualification notes (reference values; the LIVE Passes/
 # Guest List listing on tickets.taogroup.com always overrides these) ------

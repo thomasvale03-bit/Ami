@@ -79,24 +79,37 @@ class RoutingTests(unittest.TestCase):
     def order(self, venues, day, prev=None):
         return candidate_venues({"requested_venues": venues}, day, prev)
 
-    def test_several_picks_follow_the_nights_schedule(self):
-        picks = ["OMNIA Nightclub", "Hakkasan Nightclub", "Marquee Nightclub", "TAO Nightclub", "JEWEL Nightclub"]
-        firsts = [self.order(picks, date(2026, 10, d))[0] for d in (12, 13, 14, 15, 16)]
-        self.assertEqual(firsts, ["Marquee Nightclub", "OMNIA Nightclub", "Hakkasan Nightclub",
-                                  "Hakkasan Nightclub", "JEWEL Nightclub"])
+    def test_requested_clubs_follow_the_nights_schedule(self):
+        # No JEWEL requested: the night's primary among the requested clubs leads.
+        picks = ["OMNIA Nightclub", "Hakkasan Nightclub", "Marquee Nightclub", "TAO Nightclub"]
+        firsts = [self.order(picks, date(2026, 10, d))[0] for d in (12, 13, 14, 15)]
+        self.assertEqual(firsts, ["Marquee Nightclub", "OMNIA Nightclub",
+                                  "Hakkasan Nightclub", "Hakkasan Nightclub"])
+
+    def test_jewel_is_pushed_to_the_front_by_default(self):
+        # No specific request: JEWEL (the main club) leads every day it's considered.
+        for d in (12, 13, 14, 15, 16, 17, 18):
+            self.assertEqual(self.order([], date(2026, 10, d))[0], "JEWEL Nightclub")
 
     def test_single_pick_beats_the_schedule(self):
         self.assertEqual(self.order(["OMNIA Nightclub"], date(2026, 10, 12))[0], "OMNIA Nightclub")
 
     def test_extra_backups_except_tuesday(self):
         self.assertEqual(self.order([], date(2026, 10, 18)),
-                         ["TAO Nightclub", "JEWEL Nightclub", "Hakkasan Nightclub", "Marquee Nightclub"])
-        self.assertEqual(self.order([], date(2026, 10, 13)), ["OMNIA Nightclub", "TAO Nightclub"])
+                         ["JEWEL Nightclub", "TAO Nightclub", "Hakkasan Nightclub", "Marquee Nightclub"])
+        self.assertEqual(self.order([], date(2026, 10, 13)),
+                         ["JEWEL Nightclub", "OMNIA Nightclub", "TAO Nightclub"])
 
-    def test_saturday_never_repeats_friday(self):
+    def test_requested_club_friday_pushes_jewel_saturday(self):
+        # Hakkasan Friday -> JEWEL pushed as Saturday's lead (owner's example).
+        order = self.order(["Hakkasan Nightclub"], date(2026, 10, 17), prev="Hakkasan Nightclub")
+        self.assertEqual(order[0], "JEWEL Nightclub")
+        self.assertEqual(order[-1], "Hakkasan Nightclub")  # last night's club, last resort only
+
+    def test_same_club_never_doubled_back_to_back(self):
         order = self.order(["JEWEL Nightclub"], date(2026, 10, 17), prev="JEWEL Nightclub")
-        self.assertNotIn("JEWEL Nightclub", order)
-        self.assertEqual(order[0], "Hakkasan Nightclub")
+        self.assertNotEqual(order[0], "JEWEL Nightclub")
+        self.assertEqual(order[-1], "JEWEL Nightclub")
 
 
 class FlowTests(unittest.TestCase):
@@ -278,7 +291,7 @@ class DayclubTests(unittest.TestCase):
 
     def test_dayclub_priority_and_no_problem_when_none_is_live(self):
         self.assertEqual(self.run_live({"Liquid Pool Lounge", "TAO Beach Dayclub", "OMNIA Nightclub",
-                                        "JEWEL Nightclub"})["registrations"][0]["venue"], "TAO Beach Dayclub")
+                                        "JEWEL Nightclub"})["registrations"][0]["venue"], "Liquid Pool Lounge")
         result = self.run_live({"OMNIA Nightclub", "JEWEL Nightclub"})
         self.assertEqual({r["category"] for r in result["registrations"]}, {"nightclub"})
         self.assertEqual(result["exceptions"], [])
