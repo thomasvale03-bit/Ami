@@ -80,7 +80,7 @@ class TemplateTests(unittest.TestCase):
         out = html_emails.render_follow_up("Mia", "https://h/optin?e=a&t=1", "https://h/unsubscribe?e=a&t=2")
         for s in ("Hope you had an amazing time", "enjoyed the night", "Remember us for your next Vegas trip",
                   "every 3 months", "Yes, sign me up", "Unsubscribe from Playmaker emails",
-                  "Know someone heading to Vegas?", "Book a VIP Table", "Share Playmaker", "is not a secret &#9829;", "love to get referred",
+                  "Know someone heading to Vegas?", "Share Playmaker", "is not a secret &#9829;", "love to get referred", "VIP tables are always an option",
                   'href="https://h/optin?e=a&amp;t=1"', 'href="https://h/unsubscribe?e=a&amp;t=2"'):
             self.assertIn(s, out)
         self.assertNotIn("{{", out)
