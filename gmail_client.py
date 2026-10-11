@@ -320,8 +320,9 @@ def set_labels(service, message_id, label_ids, add=(), remove=()):
     ).execute()
 
 
-def build_message(to, subject, body, sender, cc=None, message_id=None, attachments=None):
-    """attachments: list of file paths to attach (images)."""
+def build_message(to, subject, body, sender, cc=None, message_id=None, attachments=None, html=None):
+    """attachments: list of file paths to attach (images). html: optional
+    text/html alternative; body stays as the plain-text fallback."""
     msg = EmailMessage()
     msg["From"] = f"Playmaker Entertainment <{sender}>"
     msg["To"] = to
@@ -331,6 +332,8 @@ def build_message(to, subject, body, sender, cc=None, message_id=None, attachmen
     if message_id:
         msg["Message-ID"] = f"<{message_id}>"
     msg.set_content(body)
+    if html:
+        msg.add_alternative(html, subtype="html")
     for path in attachments or []:
         try:
             with open(path, "rb") as fh:
@@ -371,7 +374,7 @@ def already_sent(service, query):
 
 
 def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None,
-              attachments=None):
+              attachments=None, html=None):
     """Send unless the Sent folder already has a matching email (dedupe_query,
     a Gmail search; default: same recipient and exact subject), so a
     restarted run never emails the same person twice. Returns True if sent."""
@@ -380,6 +383,6 @@ def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_qu
         return False
     service.users().messages().send(
         userId="me",
-        body=build_message(to, subject, body, sender, cc, message_id, attachments=attachments),
+        body=build_message(to, subject, body, sender, cc, message_id, attachments=attachments, html=html),
     ).execute()
     return True
