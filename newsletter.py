@@ -187,7 +187,7 @@ a.btn{{display:inline-block;margin-top:26px;padding:13px 34px;border-radius:30px
 <img src="https://isteam.wsimg.com/genai-assistant/logoagent/customer/86557a2a-428d-40d8-87e7-0710f78e0dfa/session/272ddf34-d38d-44d8-8ae9-33cd91a55c2f/horizontal-transparent-0582e683-5deb-43fb-80b9-0ac1ca56ae18/logo-logo.png/:/rs=w:560" width="220" alt="Playmaker Entertainment" style="max-width:100%;margin-bottom:24px">
 <p class="k">{kicker}</p><h1>{title}</h1><p class="b">{body}</p>
 <a class="btn" href="https://playmakerentertainment.com">Visit Playmaker</a></div>
-<div class="f">Playmaker Entertainment &middot; Las Vegas</div></div></body></html>"""
+<div class="f">Questions? Email <a href="mailto:info@playmakerentertainment.com" style="color:#C9A84C">info@playmakerentertainment.com</a><br>Playmaker Entertainment &middot; Las Vegas</div></div></body></html>"""
 
 
 def page(kind, name=""):
@@ -202,5 +202,5 @@ def page(kind, name=""):
                            body="We won't send you any more Playmaker follow-up or marketing emails. "
                                 "Guest-list confirmations you request will still arrive.")
     return PAGE.format(kicker="Link problem", title="That link didn't work.",
-                       body="This link is invalid or incomplete. Reply STOP to any Playmaker email "
+                       body="This link is invalid or incomplete. Email info@playmakerentertainment.com "
                             "and we'll take care of it.")
