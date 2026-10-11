@@ -32,6 +32,7 @@ from templates.emails import (
     guest_signup_links_email, guest_confirmation, jose_signup_order, weekly_lineup_email,
 )
 import gmail_client
+import newsletter
 import posh
 import posh_webhook
 import tao_portal
@@ -669,7 +670,28 @@ FOLLOW_UP_SEARCH = ('(subject:"Until next time" OR subject:"See you next time in
                     'OR subject:"Hope you had fun in Vegas")')
 
 
-def send_follow_ups(service, mode, allowlist=None, today=None):
+_NEWSLETTER_STORE = None
+
+
+def newsletter_store():
+    """One shared opt-in/opt-out store (own Gmail client, internally locked)."""
+    global _NEWSLETTER_STORE
+    if _NEWSLETTER_STORE is None:
+        _NEWSLETTER_STORE = newsletter.GmailStore(gmail_client.get_service, rules.INTAKE_EMAIL)
+    return _NEWSLETTER_STORE
+
+
+def marketing_blocked(service, address, store=None):
+    """True if a marketing email (follow-up, newsletter, promo) must NOT go to
+    this guest: they unsubscribed via link or replied STOP. Transactional
+    confirmations never call this."""
+    store = store or newsletter_store()
+    if store.is_opted_out(address):
+        return True
+    return gmail_client.has_opted_out(service, address)
+
+
+def send_follow_ups(service, mode, allowlist=None, today=None, store=None):
     """One "see you next time" email per confirmed visit, FOLLOW_UP_DELAY_DAYS
     after the guest's last night. Fixed Message-IDs mean never twice."""
     today = today or datetime.now(VEGAS).date()
@@ -689,20 +711,32 @@ def send_follow_ups(service, mode, allowlist=None, today=None):
             continue  # too overdue: don't send a stale follow-up after an outage
         if allowlist is not None and address not in allowlist:
             continue
-        if gmail_client.has_opted_out(service, address):
-            log.info("Follow-up skipped for %s: they asked to stop", address)
+        try:
+            blocked = marketing_blocked(service, address, store)
+        except Exception:
+            log.exception("Opt-out check failed for %s; skipping this cycle", address)
+            continue  # never email someone we can't confirm is still subscribed
+        if blocked:
+            log.info("Follow-up skipped for %s: unsubscribed / asked to stop", address)
             continue
         if sent >= cap:
             deferred += 1
             continue
         subject, body = follow_up_email(conf["first_name"], conf.get("venues", []))
+        links = newsletter.follow_up_links(address, conf["first_name"])
+        if not links:
+            log.warning("Follow-up held for %s: NEWSLETTER_LINK_SECRET not set (no unsubscribe link)", address)
+            continue
+        optin_url, unsub_url = links
+        body += f"\n\nNewsletter (every 3 months, events and specials): {optin_url}\nUnsubscribe: {unsub_url}"
         if mode == "dry-run":
             log.info("[dry run] would send follow-up to %s (last night %s)", address, last_night)
             continue
         # Any follow-up to this guest in the last 60 days counts: never again.
         if gmail_client.send_once(service, f"amy-followup-{conf['id']}@playmakerentertainment.com",
                                   address, subject, body, sender=rules.SENDER_EMAIL,
-                                  html=html_emails.render_follow_up(conf["first_name"]),
+                                  html=html_emails.render_follow_up(conf["first_name"], optin_url, unsub_url),
+                                  headers=newsletter.list_unsubscribe_headers(unsub_url),
                                   dedupe_query=f'to:{address} {FOLLOW_UP_SEARCH} newer_than:60d'):
             log.info("Follow-up sent to %s (last night %s)", address, last_night)
             sent += 1
@@ -926,7 +960,7 @@ def main():
     if args.loop or os.environ.get("PORT"):
         try:
             posh_webhook.serve(posh_webhook.Intake(gmail_client.get_service, rules.INTAKE_EMAIL,
-                                                   dry_run=mode == "dry-run"))
+                                                   dry_run=mode == "dry-run"), store=newsletter_store())
         except Exception:
             log.exception("Posh webhook server failed to start; inbox loop continues")
 
