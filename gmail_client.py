@@ -96,8 +96,24 @@ def get_service(token_path="token.json"):
     return build("gmail", "v1", credentials=creds)
 
 
-def get_account_email(service):
-    return service.users().getProfile(userId="me").execute()["emailAddress"]
+def get_account_email(service, attempts=6, base_delay=5.0, _sleep=None):
+    """Startup profile check. Retries Gmail per-minute quota errors (403/429
+    rateLimitExceeded) with backoff instead of crashing, which made Railway
+    restart-loop and burn more quota."""
+    import time
+    from googleapiclient.errors import HttpError
+    _sleep = _sleep or time.sleep
+    for i in range(attempts):
+        try:
+            return service.users().getProfile(userId="me").execute()["emailAddress"]
+        except HttpError as e:
+            status = getattr(getattr(e, "resp", None), "status", None)
+            limited = status in (403, 429) and ("rateLimitExceeded" in str(e) or "Quota exceeded" in str(e) or status == 429)
+            if not limited or i == attempts - 1:
+                raise
+            delay = min(base_delay * (2 ** i), 60.0)
+            log.warning("Gmail rate limited on getProfile; retrying in %.0fs (%d/%d)", delay, i + 1, attempts)
+            _sleep(delay)
 
 
 def build_query(start_after=None):
