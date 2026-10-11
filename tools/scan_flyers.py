@@ -23,7 +23,11 @@ def names(page, u):
     page.wait_for_timeout(2500)
     return page.locator("div._sl-file-name-text_mzi4c_1").evaluate_all("els=>els.map(e=>e.textContent.trim())")
 
-NOISE={"ss","glf","lv","omlv","mon","tue","wed","thu","fri","sat","sun","weekly","socials","nc","dc"}
+NOISE={"ss","glf","lv","omlv","mon","tue","wed","thu","fri","sat","sun","weekly","socials","nc","dc",
+       "dw","deseo","r"}  # series/party prefix codes that aren't the artist
+# Post-cleanup fixes for names the filename mangles (keyed on the lowercased
+# cleaned result). Extend as new garbles show up in the spot-check.
+ALIASES={"chaseb":"Chase B","mk":"MK","dj cla":"DJ CLA","yo yolie":"Yo Yolie"}
 def clean_artist(s):
     s=re.sub(r"_\d+x\d+.*$","",s)                 # drop size + ext
     s=re.sub(r"\.(jpg|jpeg|png)$","",s,flags=re.I)
@@ -33,7 +37,7 @@ def clean_artist(s):
         toks.pop(0)
     out=" ".join(toks).title()
     out=re.sub(r"\bDj\b","DJ",out)
-    return out
+    return ALIASES.get(out.lower(), out)
 
 def parse(fn, venue):
     m=re.match(r"^(\d{2})(\d{2})(\d{2})_[A-Za-z0-9]+_(.+)$", fn)
@@ -194,6 +198,13 @@ def run(month_folder, out):
                         date,art=r
                         data.setdefault(date, {}).setdefault(venue, art)
         b.close()
+    # Drop stale/off-month assets (e.g. an evergreen June graphic sitting in an
+    # October folder): keep only the scanned month and the next one.
+    mnum=None
+    mm=re.match(r"\s*(\d{1,2})", month_folder)
+    if mm:
+        mnum=int(mm.group(1)); keep={mnum, mnum%12+1}
+        data={d:v for d,v in data.items() if int(d[5:7]) in keep}
     json.dump(data, open(out,"w"), indent=2, sort_keys=True)
     print("dates:", len(data), file=sys.stderr)
     return data
