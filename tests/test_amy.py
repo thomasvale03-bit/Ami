@@ -137,11 +137,11 @@ def fake_module(fake):
     def get_plain_text_body(service, message_id):
         return {}, fake.body
 
-    def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None):
+    def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None, html=None):
         if message_id in fake.sent_ids:
             return False
         fake.sent_ids.add(message_id)
-        fake.sent.append({"id": message_id, "to": to, "cc": cc, "subject": subject})
+        fake.sent.append({"id": message_id, "to": to, "cc": cc, "subject": subject, "html": html})
         return True
 
     def set_labels(service, message_id, label_ids, add=(), remove=()):
@@ -171,6 +171,14 @@ class LiveFlowTests(unittest.TestCase):
         self.assertEqual(len(fake.sent), 1)
         self.assertEqual(fake.sent[0]["to"], "jane.sample@example.com")
         self.assertEqual(fake.sent[0]["cc"], "team@playmakerentertainment.com")
+        # Branded HTML part goes with it; party of 3 gets no VIP block.
+        self.assertIn("Jane", fake.sent[0]["html"])
+        self.assertNotIn("booketing.com/microsite/pme", fake.sent[0]["html"])
+
+    def test_party_of_four_gets_vip_block(self):
+        fake = FakeGmail(FIXTURE.replace("Male guests: 1", "Male guests: 2"))
+        self.run_handle(fake)
+        self.assertIn("booketing.com/microsite/pme", fake.sent[0]["html"])
 
     def test_confirmation_is_not_resent_after_a_restart(self):
         fake = FakeGmail(FIXTURE, sent_ids={"amy-confirm-msg-1@playmakerentertainment.com"})
@@ -986,7 +994,7 @@ class FollowUpTests(unittest.TestCase):
         from datetime import date
         sent, done = [], set(sent_ids)
 
-        def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None):
+        def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None, html=None):
             if message_id in done:
                 return False
             done.add(message_id)

@@ -25,6 +25,7 @@ from rules_engine import (
     candidate_venues, dayclub_candidates, is_dayclub_season, omnia_closed_for_same_day,
 )
 from config import rules
+from templates import html_emails
 from templates.emails import (
     FOLLOW_UP_DELAY_DAYS, consolidated_confirmation, follow_up_email, internal_action_needed,
     internal_processed_record, manual_work_order, manual_confirmation_draft,
@@ -194,7 +195,10 @@ def _confirmation_and_records(output, request, today, dry_run):
                 "nights": drais_nights,
             },
         )
-        output["confirmation_email"] = {"subject": subject, "body": body}
+        output["confirmation_email"] = {
+            "subject": subject, "body": body,
+            "html": html_emails.consolidated_confirmation_html(
+                request["first_name"], registrations, drais=bool(drais_nights))}
         output["internal_log"] = internal_processed_record(
             f"{request['first_name']} {request['last_name']}", request["email"],
             registrations, request.get("promoter"), "Not sent (dry run)" if dry_run else "Pending send",
@@ -343,6 +347,9 @@ def concierge_handoff(service, message_id, raw, dry_run):
         log.info("%s Drai's auto-add: %s", message_id, "; ".join(lines))
 
     gsub, gbody = guest_confirmation(request["first_name"], nights, drais=drais)
+    ghtml = html_emails.concierge_confirmation_html(
+        request["first_name"], nights,
+        html_emails.party_size(request.get("female_count"), request.get("male_count")), drais=drais)
     tsub, tbody = jose_signup_order(request, nights, drais_nights)
     if drais_status:
         tbody += f"\n\n{drais_status}"
@@ -356,7 +363,7 @@ def concierge_handoff(service, message_id, raw, dry_run):
     if guest_confirmation_on():
         gmail_client.send_once(
             service, f"amy-confirm-{message_id}@playmakerentertainment.com",
-            request["email"], gsub, gbody, sender=rules.SENDER_EMAIL,
+            request["email"], gsub, gbody, sender=rules.SENDER_EMAIL, html=ghtml,
             dedupe_query=f'to:{request["email"]} subject:"{gsub}" newer_than:3d')
     else:
         log.info("%s: immediate guest confirmation off (AMY_GUEST_CONFIRMATION); "
@@ -629,7 +636,7 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
             gmail_client.send_once(
                 service, f"amy-confirm-{message_id}@playmakerentertainment.com",
                 request["email"], email["subject"], email["body"],
-                sender=rules.SENDER_EMAIL, cc=rules.PLAYMAKER_EMAIL,
+                sender=rules.SENDER_EMAIL, cc=rules.PLAYMAKER_EMAIL, html=email.get("html"),
             )
 
     if result.get("action_needed_records"):
@@ -695,6 +702,7 @@ def send_follow_ups(service, mode, allowlist=None, today=None):
         # Any follow-up to this guest in the last 60 days counts: never again.
         if gmail_client.send_once(service, f"amy-followup-{conf['id']}@playmakerentertainment.com",
                                   address, subject, body, sender=rules.SENDER_EMAIL,
+                                  html=html_emails.render_follow_up(conf["first_name"]),
                                   dedupe_query=f'to:{address} {FOLLOW_UP_SEARCH} newer_than:60d'):
             log.info("Follow-up sent to %s (last night %s)", address, last_night)
             sent += 1
