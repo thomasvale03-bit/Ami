@@ -155,8 +155,6 @@ def follow_up_email(first_name, venues=()):
         "Know anyone coming to Vegas? We'd love the referral. Send them to "
         "PlaymakerEntertainment.com and we'll get them on the list for free, just like you. "
         "Playmaker Entertainment is not a secret ♥️\n\n"
-        "Planning your next trip? VIP tables are always an option: "
-        "https://booketing.com/microsite/pme/\n\n"
         "See you in Vegas!\n"
         "Playmaker Entertainment\n"
         "Questions? Email info@playmakerentertainment.com\n\n"
