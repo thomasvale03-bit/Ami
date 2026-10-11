@@ -32,8 +32,8 @@ class CopyTests(unittest.TestCase):
         self.assertNotIn("Join the Guest List", out)
         self.assertNotIn("round two", out)
         text = emails.follow_up_email("Mia")[1]
-        self.assertIn("VIP tables are always an option", text)
-        self.assertIn("https://booketing.com/microsite/pme/", text)
+        self.assertNotIn("VIP tables", text)
+        self.assertNotIn("booketing", text)
 
     def test_confirmation_vip_block_unchanged(self):
         out = html_emails.render_confirmation("Mia", [("Sat, Oct 10", "TAO Nightclub", None)])
@@ -42,5 +42,7 @@ class CopyTests(unittest.TestCase):
 
     def test_follow_up_light_vip_line(self):
         out = html_emails.render_follow_up("Mia")
-        self.assertIn("VIP tables are always an option", out)
+        self.assertNotIn("VIP tables are always an option", out)
+        self.assertNotIn("booketing", out)
+        self.assertNotIn("set up by a real host", out)
         self.assertNotIn("VIP Tables &#9733;", out)
