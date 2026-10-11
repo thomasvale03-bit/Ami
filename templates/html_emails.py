@@ -6,7 +6,7 @@ import os
 from datetime import date
 
 DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email")
-VIP_MIN_PARTY = 4
+VIP_MIN_PARTY = 1  # VIP block on every confirmation (approved 2026-10-11)
 
 
 def _read(name):

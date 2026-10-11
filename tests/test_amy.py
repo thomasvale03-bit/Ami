@@ -171,9 +171,9 @@ class LiveFlowTests(unittest.TestCase):
         self.assertEqual(len(fake.sent), 1)
         self.assertEqual(fake.sent[0]["to"], "jane.sample@example.com")
         self.assertEqual(fake.sent[0]["cc"], "team@playmakerentertainment.com")
-        # Branded HTML part goes with it; party of 3 gets no VIP block.
+        # Branded HTML part goes with it; every party gets the VIP block.
         self.assertIn("Jane", fake.sent[0]["html"])
-        self.assertNotIn("booketing.com/microsite/pme", fake.sent[0]["html"])
+        self.assertIn("booketing.com/microsite/pme", fake.sent[0]["html"])
 
     def test_party_of_four_gets_vip_block(self):
         fake = FakeGmail(FIXTURE.replace("Male guests: 1", "Male guests: 2"))

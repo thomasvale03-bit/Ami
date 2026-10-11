@@ -1,5 +1,5 @@
 """Branded HTML emails: multipart/alternative with plain-text fallback,
-first name filled in, VIP block only for parties of 4+."""
+first name filled in, VIP block on every confirmation."""
 import base64
 import email
 import unittest
@@ -29,8 +29,8 @@ class RenderTest(unittest.TestCase):
         nights = [{"date": "2026-10-10", "venue": "TAO Nightclub", "headliner": "DJ X"}]
         return html_emails.concierge_confirmation_html("Addison", nights, size)
 
-    def test_vip_block_only_for_party_of_four_or_more(self):
-        for size, expected in ((1, False), (3, False), (4, True), (8, True)):
+    def test_vip_block_for_every_party_size(self):
+        for size, expected in ((1, True), (3, True), (4, True), (8, True)):
             out = self._conf(size)
             self.assertEqual(VIP_URL in out, expected, size)
             self.assertNotIn("{{", out)
@@ -50,8 +50,8 @@ class RenderTest(unittest.TestCase):
     def test_consolidated_party_size(self):
         regs = [{"date": "2026-10-10", "venue": "OMNIA", "event": "Gig", "female_count": 2, "male_count": 2}]
         self.assertIn(VIP_URL, html_emails.consolidated_confirmation_html("A", regs))
-        regs[0]["male_count"] = 1
-        self.assertNotIn(VIP_URL, html_emails.consolidated_confirmation_html("A", regs))
+        regs[0]["male_count"] = 0
+        self.assertIn(VIP_URL, html_emails.consolidated_confirmation_html("A", regs))
 
 
 class BuildMessageTest(unittest.TestCase):

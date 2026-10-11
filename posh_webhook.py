@@ -350,6 +350,67 @@ class Intake:
         return 200, "queued"
 
 
+# --- Branded send (POST /send-branded) -------------------------------------
+
+BRANDED_MAX_PER_HOUR = 20
+_branded_times = []
+_branded_lock = threading.Lock()
+
+
+def branded_from():
+    return os.environ.get("BRANDED_FROM_EMAIL", "").strip() or "info@playmakerentertainment.com"
+
+
+def branded_token_ok(headers):
+    """Bearer / X-Amy-Token match on BRANDED_SEND_TOKEN (header only, never query). Unset => reject."""
+    want = os.environ.get("BRANDED_SEND_TOKEN", "").strip()
+    if not want:
+        return False
+    given = headers.get("x-amy-token") or ""
+    auth = headers.get("authorization") or ""
+    if not given and auth.lower().startswith("bearer "):
+        given = auth[7:]
+    return hmac.compare_digest(given.strip().encode(), want.encode())
+
+
+def _gmail_call(fn, attempts=4, base_delay=5.0, _sleep=None):
+    """Retry Gmail 403/429 rate-limit errors with backoff instead of failing hard."""
+    import time
+    _sleep = _sleep or time.sleep
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            status = getattr(getattr(e, "resp", None), "status", None)
+            limited = status == 429 or (status == 403 and ("rateLimitExceeded" in str(e) or "Quota" in str(e)))
+            if not limited or i == attempts - 1:
+                raise
+            _sleep(min(base_delay * (2 ** i), 60.0))
+
+
+def send_branded(service, payload, _sleep=None):
+    """Returns (status_code, result). payload: to, subject, html, text."""
+    import time
+    import gmail_client
+    to, subject = (payload.get("to") or "").strip(), (payload.get("subject") or "").strip()
+    html, text = payload.get("html") or "", payload.get("text") or ""
+    if not (to and subject and html and text) or "@" not in to or any(c in to + subject for c in "\r\n,;"):
+        return 400, "need to (one address), subject, html, text"
+    now = time.time()
+    with _branded_lock:
+        _branded_times[:] = [t for t in _branded_times if now - t < 3600]
+        if len(_branded_times) >= BRANDED_MAX_PER_HOUR:
+            return 429, "branded send limit reached, try later"
+        _branded_times.append(now)
+    sender = branded_from()
+    if _gmail_call(lambda: gmail_client.already_sent(service, f'to:{to} subject:"{subject}"'), _sleep=_sleep):
+        return 200, "duplicate (already in Sent)"
+    resp = _gmail_call(lambda: service.users().messages().send(
+        userId="me", body=gmail_client.build_message(to, subject, text, sender, html=html)).execute(), _sleep=_sleep)
+    log.info("Branded email sent to %s from %s (id %s)", to, sender, (resp or {}).get("id"))
+    return 200, {"sent": True, "id": (resp or {}).get("id"), "from": sender}
+
+
 # --- HTTP server ------------------------------------------------------------
 
 def make_handler(intake):
@@ -370,7 +431,31 @@ def make_handler(intake):
                 return self._reply(200, "ok")
             self._reply(404, "not found")
 
+        def _send_branded(self):
+            headers = {k.lower(): v for k, v in self.headers.items()}
+            if not branded_token_ok(headers):
+                return self._reply(401, "unauthorized")
+            if intake.dry_run:
+                return self._reply(503, "dry run: not sending")
+            length = int(headers.get("content-length") or 0)
+            if length <= 0 or length > 1_000_000:
+                return self._reply(400, "bad body")
+            try:
+                payload = json.loads(self.rfile.read(length).decode())
+                if not isinstance(payload, dict):
+                    raise ValueError("not an object")
+            except ValueError:
+                return self._reply(400, "bad json")
+            try:
+                code, result = send_branded(intake.service(), payload)
+            except Exception:
+                log.exception("Branded send failed")
+                return self._reply(502, "send failed")
+            self._reply(code, result)
+
         def do_POST(self):
+            if urlparse(self.path).path.rstrip("/") == "/send-branded":
+                return self._send_branded()
             if urlparse(self.path).path.rstrip("/") != "/webhooks/posh":
                 return self._reply(404, "not found")
             headers = {k.lower(): v for k, v in self.headers.items()}
