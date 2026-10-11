@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
+import newsletter
 import posh
 import posh_lookup
 
@@ -413,8 +414,48 @@ def send_branded(service, payload, _sleep=None):
 
 # --- HTTP server ------------------------------------------------------------
 
-def make_handler(intake):
+def make_handler(intake, store=None):
     class Handler(BaseHTTPRequestHandler):
+        def _send(self, code, ctype, data):
+            data = data.encode() if isinstance(data, str) else data
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _newsletter_click(self, action, source):
+            q = parse_qs(urlparse(self.path).query)
+            email = (q.get("e") or [""])[0].strip().lower()
+            name = (q.get("n") or [""])[0][:120]
+            sig = (q.get("t") or [""])[0]
+            if not newsletter.verify(email, action, sig):
+                return self._send(400, "text/html; charset=utf-8", newsletter.page("invalid"))
+            status = newsletter.ACTIONS[action]
+            if store is None:
+                return self._send(503, "text/html; charset=utf-8", newsletter.page("invalid"))
+            try:
+                store.record(email, name, status, source)
+            except Exception:
+                log.exception("Newsletter %s failed for %s", action, email)
+                return self._send(502, "text/html; charset=utf-8", newsletter.page("invalid"))
+            self._send(200, "text/html; charset=utf-8", newsletter.page(status, name))
+
+        def _newsletter_export(self):
+            headers = {k.lower(): v for k, v in self.headers.items()}
+            if not branded_token_ok(headers):
+                return self._reply(401, "unauthorized")
+            if store is None:
+                return self._reply(503, "store unavailable")
+            fmt = (parse_qs(urlparse(self.path).query).get("format") or ["json"])[0].lower()
+            try:
+                ctype, body = newsletter.export(store.all(refresh=True), "csv" if fmt == "csv" else "json")
+            except Exception:
+                log.exception("Newsletter export failed")
+                return self._reply(502, "export failed")
+            self._send(200, ctype, body)
+
         def _reply(self, code, text):
             data = json.dumps({"result": text}).encode()
             self.send_response(code)
@@ -427,8 +468,15 @@ def make_handler(intake):
             log.info("%s %s", self.command, urlparse(self.path).path)
 
         def do_GET(self):
-            if urlparse(self.path).path == "/healthz":
+            path = urlparse(self.path).path.rstrip("/")
+            if path == "/healthz":
                 return self._reply(200, "ok")
+            if path == "/newsletter/optin":
+                return self._newsletter_click("optin", "follow_up_email")
+            if path == "/unsubscribe":
+                return self._newsletter_click("unsubscribe", "follow_up_email")
+            if path == "/newsletter/export":
+                return self._newsletter_export()
             self._reply(404, "not found")
 
         def _send_branded(self):
@@ -446,6 +494,13 @@ def make_handler(intake):
                     raise ValueError("not an object")
             except ValueError:
                 return self._reply(400, "bad json")
+            if payload.get("marketing") and store is not None:
+                try:
+                    if store.is_opted_out(payload.get("to") or ""):
+                        return self._reply(200, {"sent": False, "suppressed": "unsubscribed"})
+                except Exception:
+                    log.exception("Opt-out check failed")
+                    return self._reply(502, "opt-out check failed")
             try:
                 code, result = send_branded(intake.service(), payload)
             except Exception:
@@ -456,6 +511,8 @@ def make_handler(intake):
         def do_POST(self):
             if urlparse(self.path).path.rstrip("/") == "/send-branded":
                 return self._send_branded()
+            if urlparse(self.path).path.rstrip("/") == "/unsubscribe":  # RFC 8058 one-click
+                return self._newsletter_click("unsubscribe", "list_unsubscribe_one_click")
             if urlparse(self.path).path.rstrip("/") != "/webhooks/posh":
                 return self._reply(404, "not found")
             headers = {k.lower(): v for k, v in self.headers.items()}
@@ -482,11 +539,11 @@ def make_handler(intake):
     return Handler
 
 
-def serve(intake, port=None, host="0.0.0.0"):
+def serve(intake, port=None, host="0.0.0.0", store=None):
     """Start the webhook server on a daemon thread; returns the server."""
     port = int(port if port is not None else os.environ.get("PORT", "8080"))
-    server = ThreadingHTTPServer((host, port), make_handler(intake))
+    server = ThreadingHTTPServer((host, port), make_handler(intake, store))
     threading.Thread(target=server.serve_forever, name="posh-webhook", daemon=True).start()
-    log.info("Posh webhook listening on :%d (POST /webhooks/posh, GET /healthz)%s", server.server_address[1],
+    log.info("Posh webhook listening on :%d (POST /webhooks/posh, GET /healthz, /newsletter/optin, /unsubscribe, /newsletter/export)%s", server.server_address[1],
              "" if expected_token() else " - POSH_WEBHOOK_TOKEN not set, every webhook will be rejected")
     return server

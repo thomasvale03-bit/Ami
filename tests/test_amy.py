@@ -994,7 +994,7 @@ class FollowUpTests(unittest.TestCase):
         from datetime import date
         sent, done = [], set(sent_ids)
 
-        def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None, html=None):
+        def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None, html=None, headers=None):
             if message_id in done:
                 return False
             done.add(message_id)

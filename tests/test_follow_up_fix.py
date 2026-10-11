@@ -42,7 +42,8 @@ class RecentConfirmationsTest(unittest.TestCase):
 class FollowUpThrottleTest(unittest.TestCase):
     def run_with(self, confs, today, env=None):
         sent = []
-        with mock.patch.dict(os.environ, env or {}), \
+        with mock.patch.dict(os.environ, {"NEWSLETTER_LINK_SECRET": "s", **(env or {})}), \
+             mock.patch.object(main, "marketing_blocked", return_value=False), \
              mock.patch.object(gmail_client, "recent_confirmations", return_value=confs), \
              mock.patch.object(gmail_client, "has_opted_out", return_value=False), \
              mock.patch.object(gmail_client, "send_once",

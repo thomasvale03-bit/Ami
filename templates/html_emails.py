@@ -35,8 +35,11 @@ def nights_block(nights):
                    for d, v, hl in nights)
 
 
-def render_follow_up(first_name):
-    return _fill(_read("follow_up.html"), first_name=_h.escape(first_name or "there"))
+def render_follow_up(first_name, optin_url="https://playmakerentertainment.com",
+                     unsubscribe_url="https://playmakerentertainment.com"):
+    return _fill(_read("follow_up.html"), first_name=_h.escape(first_name or "there"),
+                 optin_url=_h.escape(optin_url, quote=True),
+                 unsubscribe_url=_h.escape(unsubscribe_url, quote=True))
 
 
 def render_confirmation(first_name, nights, party_size=1, closed_note=None):
