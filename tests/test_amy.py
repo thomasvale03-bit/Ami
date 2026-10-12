@@ -1267,7 +1267,7 @@ class WeeklyLineupTests(unittest.TestCase):
             for _ in range(4):
                 self._send(api, d, self.WEDNESDAY)
         self.assertEqual(len(api.sent), 1)
-        self.assertEqual(api.sent[0]["to"], "team@playmakerentertainment.com")
+        self.assertEqual(api.sent[0]["to"], "newsletter@playmakerentertainment.com")
 
     def test_build_message_inline_cid(self):
         import tempfile, email as email_lib, email.policy
