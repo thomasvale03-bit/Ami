@@ -37,6 +37,8 @@ ALL_AUTHORIZED_VENUES = set(NIGHTCLUBS) | set(DAYLIFE_VENUES)
 
 INTAKE_EMAIL = "valeconsultingaz@gmail.com"
 PLAYMAKER_EMAIL = "team@playmakerentertainment.com"
+# Wednesday "This Week in Vegas" newsletter list (override with WEEKLY_LINEUP_TO).
+NEWSLETTER_EMAIL = "newsletter@playmakerentertainment.com"
 
 # Address Amy sends FROM. Defaults to the intake Gmail. Set AMY_SENDER_EMAIL
 # to team@playmakerentertainment.com once that address is verified as a

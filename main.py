@@ -832,7 +832,7 @@ def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=F
                   "Add data/flyers/weekly_nightclub.jpg and weekly_dayclub.jpg.", exc)
         return
     week_start = weekly_newsletter.week_window(today)[0]
-    recipient = os.environ.get("WEEKLY_LINEUP_TO", "").strip() or rules.PLAYMAKER_EMAIL
+    recipient = os.environ.get("WEEKLY_LINEUP_TO", "").strip() or rules.NEWSLETTER_EMAIL
     if mode == "dry-run":
         log.info("[dry run] would send weekly newsletter to %s (%d inline images)", recipient, len(inline))
         return

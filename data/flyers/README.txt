@@ -1,5 +1,5 @@
 Current-week TAO flyer images land here (written by the Monday capture job,
-committed so Railway can attach them to the weekly team lineup email).
+committed so Railway can use them in the Wednesday newsletter to newsletter@playmakerentertainment.com).
 
 weekly_nightclub.jpg / weekly_dayclub.jpg: TAO Group "Weekly Events" lineup flyers
 (from TAO's ALL VENUE WEEKLY ASSETS Dropbox). REQUIRED every week: the Wednesday
