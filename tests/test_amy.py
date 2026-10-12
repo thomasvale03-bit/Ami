@@ -1180,7 +1180,7 @@ class RecentConfirmationsTests(unittest.TestCase):
         from datetime import date
         body = ("Hi Ava,\n\nYou're on the Playmaker Entertainment guest list. Here's what you're set for:\n\n"
                 "Friday, October 9 — OMNIA Nightclub (Steve Aoki)\n\n"
-                "Saturday, October 10 — JEWEL Nightclub\n\nSee you in Vegas!\nPlaymaker Entertainment")
+                "Saturday, October 10 — JEWEL Nightclub\n\nPlaymaker Entertainment")
         sent_ms = str(int(__import__("datetime").datetime(2026, 10, 7).timestamp() * 1000))
         svc = mock.MagicMock()
         svc.users().messages().list().execute.return_value = {"messages": [{"id": "x1"}]}

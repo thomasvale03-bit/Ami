@@ -155,7 +155,6 @@ def follow_up_email(first_name, venues=()):
         "Know anyone coming to Vegas? We'd love the referral. Send them to "
         "PlaymakerEntertainment.com and we'll get them on the list for free, just like you. "
         "Playmaker Entertainment is not a secret ♥️\n\n"
-        "See you in Vegas!\n"
         "Playmaker Entertainment\n"
         "Questions? Email info@playmakerentertainment.com\n\n"
         "If you’d rather not get emails like this, just reply STOP."
@@ -265,7 +264,6 @@ def guest_confirmation(first_name, nights, drais=None):
     parts += [
         "Arrive early and bring a valid, government-issued 21+ photo ID. Guest-list admission "
         "is subject to each venue’s rules, dress code, and capacity.",
-        "See you in Vegas!",
         "Playmaker Entertainment",
     ]
     return "You're on the list — Playmaker Entertainment", "\n\n".join(parts)
@@ -370,7 +368,6 @@ def weekly_lineup_email(week_start, days, attached=False):
         "Bringing friends or family to town? Send them our way — we've got you covered.",
         "Follow us on Instagram @playmaker.entertainment for daily updates.",
         "",
-        "See you in Vegas! 🍾",
         "Playmaker Entertainment",
     ]
     subject = f"🎉 This Week in Vegas — {_long_date(week_start)}"
