@@ -766,60 +766,79 @@ def _week_flyer_files(flyers_dir=FLYERS_DIR):
     return [os.path.join(flyers_dir, n) for n in names]
 
 
-def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=False):
-    """Monday-morning (Vegas) email to the team with the upcoming week's
-    lineup, flyers attached. Deduped so it goes out once per week even if the
-    loop restarts (so Amy's hourly fallback and the capture job that attaches
-    flyers never double-send — first one wins). Set WEEKLY_LINEUP_ENABLED=false
-    in Railway to pause. force=True skips the Monday check (for the capture job).
+WEEKLY_LINEUP_WEEKDAY = 2  # Wednesday (Mon=0). Newsletter covers Wed-Tue, matching TAO's lineups.
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
-    Sends only from WEEKLY_LINEUP_HOUR (Vegas, default 9am) onward, so the early
-    Monday flyer-capture job has time to commit this week's images and Railway to
-    redeploy them before Amy sends — otherwise Amy's first tick would send
-    text-only and the dedupe would then block the flyered version. If capture
-    never lands, Amy still sends (text-only) once the hour arrives."""
+
+def _build_weekly(today, flyers_dir):
+    from templates import weekly_newsletter
+    try:
+        with open(os.path.join(DATA_DIR, "headliners.json")) as fh:
+            hmap = json.load(fh)
+    except (OSError, ValueError):
+        hmap = {}
+    return weekly_newsletter.build(today, DATA_DIR, flyers_dir, hmap)
+
+
+def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=False):
+    """Wednesday-morning (Vegas) HTML newsletter "This Week in Vegas" (Wed-Tue),
+    sent once per week (deduped, so hourly checks are safe). Always carries the
+    two TAO weekly lineup flyers (data/flyers/weekly_nightclub.jpg and
+    weekly_dayclub.jpg) as CID inline images; if either is missing it does NOT
+    send (fail closed) and logs an error. Top 3 picks come from
+    data/top_picks.json when its week_start matches, else a default (biggest
+    nightclub acts across venues, one JEWEL pick). WEEKLY_LINEUP_ENABLED=false
+    pauses; WEEKLY_LINEUP_HOUR (default 9) sets the hour.
+
+    WEEKLY_LINEUP_TEST_TO=<address> sends one "[TEST]" copy of this week's
+    newsletter to that address only (any day/hour, deduped), for previews.
+    A data/flyers/.send_now sentinel holding today's date forces one real send."""
+    from templates import weekly_newsletter
     now = datetime.now(VEGAS)
     today = today or now.date()
-    # A committed sentinel file (data/flyers/.send_now) holding today's Vegas date
-    # forces one send regardless of day/hour — how we fire a live test through
-    # Railway. It's date-scoped so a leftover file can't disturb the Monday 9am
-    # schedule, and still deduped so it goes out once.
+    test_to = os.environ.get("WEEKLY_LINEUP_TEST_TO", "").strip()
+    if test_to:
+        try:
+            subject, text, html, inline = _build_weekly(today, flyers_dir)
+        except weekly_newsletter.MissingLineup as exc:
+            log.error("Weekly newsletter TEST not sent: TAO lineup flyer missing (%s)", exc)
+        else:
+            subject = "[TEST] " + subject
+            if mode == "dry-run":
+                log.info("[dry run] would send weekly TEST to %s", test_to)
+            elif gmail_client.send_once(service, None, test_to, subject, text, sender=rules.SENDER_EMAIL,
+                                        html=html, inline_images=inline,
+                                        dedupe_query=f'to:{test_to} subject:"{subject}" newer_than:6d'):
+                log.info("Weekly newsletter TEST sent to %s (%d inline images)", test_to, len(inline))
     try:
         with open(os.path.join(flyers_dir, ".send_now")) as fh:
             sent_date = fh.read().strip()
-        # today or yesterday (Vegas), so a build finishing after midnight still fires.
         if sent_date in (today.isoformat(), (today - timedelta(days=1)).isoformat()):
             force = True
     except OSError:
         pass
     if not force:
-        if today.weekday() != 0:  # Monday only
+        if today.weekday() != WEEKLY_LINEUP_WEEKDAY:
             return
         send_hour = int(os.environ.get("WEEKLY_LINEUP_HOUR", "9"))
         if now.hour < send_hour:
             return
-    monday = today - timedelta(days=today.weekday())
-    week = [monday + timedelta(days=i) for i in range(7)]
-    catalog = tao_portal.catalog_snapshot()  # {(venue, date): {...}}, {} if unreadable
-    days = []
-    for d in week:
-        venues = sorted({venue for (venue, vd) in catalog if vd == d})
-        days.append({"date": d.isoformat(),
-                     "venues": [(v, headliners.headliner(v, d)) for v in venues]})
-    attachments = _week_flyer_files(flyers_dir)
-    subject, body = weekly_lineup_email(monday.isoformat(), days, attached=bool(attachments))
-    # Newsletter goes to the client/promoter group. Default: the team inbox;
-    # set WEEKLY_LINEUP_TO in Railway to the group address once it exists.
+    try:
+        subject, text, html, inline = _build_weekly(today, flyers_dir)
+    except weekly_newsletter.MissingLineup as exc:
+        log.error("Weekly newsletter NOT sent: TAO weekly lineup flyer missing (%s). "
+                  "Add data/flyers/weekly_nightclub.jpg and weekly_dayclub.jpg.", exc)
+        return
+    week_start = weekly_newsletter.week_window(today)[0]
     recipient = os.environ.get("WEEKLY_LINEUP_TO", "").strip() or rules.PLAYMAKER_EMAIL
     if mode == "dry-run":
-        log.info("[dry run] would send weekly lineup to %s (%d flyers)", recipient, len(attachments))
+        log.info("[dry run] would send weekly newsletter to %s (%d inline images)", recipient, len(inline))
         return
     if gmail_client.send_once(
-            service, f"amy-lineup-{monday.isoformat()}@playmakerentertainment.com",
-            recipient, subject, body, sender=rules.SENDER_EMAIL,
-            attachments=attachments,
+            service, f"amy-lineup-{week_start.isoformat()}@playmakerentertainment.com",
+            recipient, subject, text, sender=rules.SENDER_EMAIL, html=html, inline_images=inline,
             dedupe_query=f'to:{recipient} subject:"{subject}" newer_than:6d'):
-        log.info("Weekly lineup sent to %s (%d flyers)", recipient, len(attachments))
+        log.info("Weekly newsletter sent to %s (%d inline images)", recipient, len(inline))
 
 
 def run_speakeasy_test(service):
@@ -988,7 +1007,7 @@ def main():
                 raise
             log.exception("Follow-up pass failed; will retry next cycle")
         try:
-            # Monday-morning weekly lineup to the team (dedupe makes the hourly
+            # Wednesday-morning weekly newsletter to the team (dedupe makes the hourly
             # check safe — it sends once per week). On by default.
             lineup_on = os.environ.get("WEEKLY_LINEUP_ENABLED", "true").strip().lower() in ("1", "true", "yes")
             if lineup_on and time.time() - last_lineup_check >= 3600:

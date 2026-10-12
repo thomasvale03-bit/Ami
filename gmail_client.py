@@ -337,7 +337,7 @@ def set_labels(service, message_id, label_ids, add=(), remove=()):
 
 
 def build_message(to, subject, body, sender, cc=None, message_id=None, attachments=None, html=None,
-                  headers=None):
+                  headers=None, inline_images=None):
     """attachments: list of file paths to attach (images). html: optional
     text/html alternative; body stays as the plain-text fallback."""
     msg = EmailMessage()
@@ -353,6 +353,19 @@ def build_message(to, subject, body, sender, cc=None, message_id=None, attachmen
     msg.set_content(body)
     if html:
         msg.add_alternative(html, subtype="html")
+        # inline_images: [(path, cid)] shown in the HTML via src="cid:<cid>"
+        # (multipart/related under the html alternative).
+        html_part = msg.get_payload()[-1]
+        for path, cid in inline_images or []:
+            try:
+                with open(path, "rb") as fh:
+                    data = fh.read()
+            except OSError as exc:  # noqa: BLE001
+                log.warning("Skipping inline image %s: %s", path, exc)
+                continue
+            ext = os.path.splitext(path)[1].lower().lstrip(".") or "png"
+            html_part.add_related(data, maintype="image", subtype="jpeg" if ext in ("jpg", "jpeg") else ext,
+                                  cid=f"<{cid}>", filename=os.path.basename(path), disposition="inline")
     for path in attachments or []:
         try:
             with open(path, "rb") as fh:
@@ -393,7 +406,7 @@ def already_sent(service, query):
 
 
 def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None,
-              attachments=None, html=None, headers=None):
+              attachments=None, html=None, headers=None, inline_images=None):
     """Send unless the Sent folder already has a matching email (dedupe_query,
     a Gmail search; default: same recipient and exact subject), so a
     restarted run never emails the same person twice. Returns True if sent."""
@@ -403,6 +416,6 @@ def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_qu
     service.users().messages().send(
         userId="me",
         body=build_message(to, subject, body, sender, cc, message_id, attachments=attachments, html=html,
-                           headers=headers),
+                           headers=headers, inline_images=inline_images),
     ).execute()
     return True

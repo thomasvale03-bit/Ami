@@ -1213,62 +1213,107 @@ class TaoAppBlockTests(unittest.TestCase):
 
 
 class WeeklyLineupTests(unittest.TestCase):
-    """Monday team email: upcoming week's lineup from the live feed + headliners,
-    flyers attached, sent once per week."""
+    """Wednesday HTML newsletter: TAO lineups always inline (fail closed if
+    missing), 3 picks, Also This Week, sent once per week."""
 
-    MONDAY = date(2026, 10, 12)  # a Monday
-    CATALOG = {
-        ("OMNIA Nightclub", date(2026, 10, 16)): {"url": "u1", "event": "Guest List", "event_time": "10:30 PM"},
-        ("XS Nightclub", date(2026, 10, 17)): {"url": "u2", "event": "Guest List", "event_time": "10:00 PM"},
-    }
+    WEDNESDAY = date(2026, 10, 14)
 
-    def test_body_lists_live_nights_with_headliner(self):
-        from templates.emails import weekly_lineup_email
-        days = [{"date": "2026-10-16", "venues": [("OMNIA Nightclub", "Steve Aoki")]},
-                {"date": "2026-10-17", "venues": [("XS Nightclub", None)]}]
-        subject, body = weekly_lineup_email("2026-10-12", days, attached=True)
+    def _flyers(self, d, lineups=True):
+        names = ["261017_HKLV_SS_Ohgeesy_1080x1350.jpg", "261016_JWL_Lucky-Lou_1080x1350.jpg"]
+        if lineups:
+            names += ["weekly_nightclub.jpg", "weekly_dayclub.jpg"]
+        for n in names:
+            with open(os.path.join(d, n), "wb") as fh:
+                fh.write(b"\xff\xd8\xff\xe0fakejpeg")
+
+    def _send(self, api, d, today, env=None, **kw):
+        e = {"WEEKLY_LINEUP_HOUR": "0", "WEEKLY_LINEUP_TEST_TO": ""}
+        e.update(env or {})
+        with mock.patch.dict(os.environ, e):
+            main.send_weekly_lineup(api, "live", today=today, flyers_dir=d, **kw)
+
+    def test_html_content_and_rules(self):
+        import tempfile
+        from templates import weekly_newsletter as w
+        with tempfile.TemporaryDirectory() as d:
+            self._flyers(d)
+            subject, text, html, inline = w.build(self.WEDNESDAY, main.DATA_DIR, d, {})
         self.assertIn("This Week in Vegas", subject)
-        self.assertIn("OMNIA Nightclub — Steve Aoki", body)
-        self.assertIn("XS Nightclub", body)
-        self.assertIn("flyers are attached", body)
-        self.assertIn("PlaymakerEntertainment.com", body)  # the sign-up CTA
+        self.assertIn("Zedd", html); self.assertIn("OhGeesy", html); self.assertIn("Lucky Lou", html)
+        self.assertIn("cid:lineup-nightclub", html); self.assertIn("cid:lineup-dayclub", html)
+        self.assertIn("Also This Week", html); self.assertIn("DJ Shift", html)
+        self.assertIn("info@playmakerentertainment.com", html)
+        for body in (html, text):
+            self.assertNotIn("see you in vegas", body.lower())
+            self.assertIsNone(re.search(r"\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}", body))
+        self.assertEqual({c for _, c in inline} >= {"lineup-nightclub", "lineup-dayclub", "pick-2", "pick-3"}, True)
 
-    def test_sent_once_per_week_with_attachments(self):
+    def test_default_picks_one_jewel(self):
+        from templates import weekly_newsletter as w
+        h = {"2026-10-21": {"OMNIA Nightclub": "Steve Aoki", "JEWEL Nightclub": "DJ Shift",
+                            "Marquee Nightclub": "Deorro", "OMNIA Dayclub": "Alesso"},
+             "2026-10-23": {"JEWEL Nightclub": "Lucky Lou", "Hakkasan Nightclub": "Tyga"}}
+        picks = w.default_picks(date(2026, 10, 21), date(2026, 10, 27), h)
+        self.assertEqual(len(picks), 3)
+        self.assertEqual(sum(p["venue"] == "JEWEL Nightclub" for p in picks), 1)
+        self.assertNotIn("Alesso", [p["artist"] for p in picks])  # dayclub excluded
+        self.assertEqual(picks[0]["artist"], "Steve Aoki")
+
+    def test_sent_once_per_week_with_inline_images(self):
         import tempfile
         api = FakeSentFolder()
         with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "omnia.jpg")
-            with open(path, "wb") as fh:
-                fh.write(b"\xff\xd8\xff\xe0fakejpeg")
-            with mock.patch.object(tao_portal, "catalog_snapshot", return_value=self.CATALOG), \
-                 mock.patch.object(main.headliners, "headliner", return_value="Steve Aoki"), \
-                 mock.patch.dict(os.environ, {"WEEKLY_LINEUP_HOUR": "0"}):  # past the send hour
-                for _ in range(4):  # hourly checks across the Monday
-                    main.send_weekly_lineup(api, "live", today=self.MONDAY, flyers_dir=d)
+            self._flyers(d)
+            for _ in range(4):
+                self._send(api, d, self.WEDNESDAY)
         self.assertEqual(len(api.sent), 1)
         self.assertEqual(api.sent[0]["to"], "team@playmakerentertainment.com")
-        self.assertIn("omnia.jpg", api.sent[0]["attachments"])
 
-    def test_not_sent_on_non_monday(self):
+    def test_build_message_inline_cid(self):
+        import tempfile, email as email_lib, email.policy
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "weekly_nightclub.jpg")
+            with open(p, "wb") as fh:
+                fh.write(b"\xff\xd8\xff\xe0fakejpeg")
+            raw = gmail_client.build_message("a@b.com", "s", "text", "info@playmakerentertainment.com",
+                                             html='<img src="cid:lineup-nightclub">',
+                                             inline_images=[(p, "lineup-nightclub")])["raw"]
+        msg = email_lib.message_from_bytes(base64.urlsafe_b64decode(raw), policy=email.policy.default)
+        cids = [part["Content-ID"] for part in msg.walk() if part.get_content_maintype() == "image"]
+        self.assertEqual(cids, ["<lineup-nightclub>"])
+        self.assertIsNotNone(msg.get_body(preferencelist=("plain",)))
+
+    def test_fail_closed_without_lineups(self):
         import tempfile
         api = FakeSentFolder()
-        with tempfile.TemporaryDirectory() as d, \
-             mock.patch.object(tao_portal, "catalog_snapshot", return_value=self.CATALOG):
-            main.send_weekly_lineup(api, "live", today=date(2026, 10, 14), flyers_dir=d)  # Wed
+        with tempfile.TemporaryDirectory() as d:
+            self._flyers(d, lineups=False)
+            self._send(api, d, self.WEDNESDAY)
+        self.assertEqual(len(api.sent), 0)
+
+    def test_not_sent_on_monday(self):
+        import tempfile
+        api = FakeSentFolder()
+        with tempfile.TemporaryDirectory() as d:
+            self._flyers(d)
+            self._send(api, d, date(2026, 10, 12))
         self.assertEqual(len(api.sent), 0)
 
     def test_not_sent_before_send_hour(self):
         import tempfile
         api = FakeSentFolder()
-        with tempfile.TemporaryDirectory() as d, \
-             mock.patch.object(tao_portal, "catalog_snapshot", return_value=self.CATALOG), \
-             mock.patch.dict(os.environ, {"WEEKLY_LINEUP_HOUR": "24"}):  # before any hour
-            main.send_weekly_lineup(api, "live", today=self.MONDAY, flyers_dir=d)
+        with tempfile.TemporaryDirectory() as d:
+            self._flyers(d)
+            self._send(api, d, self.WEDNESDAY, env={"WEEKLY_LINEUP_HOUR": "24"})
         self.assertEqual(len(api.sent), 0)
 
-    def test_force_ignores_monday_and_hour_gate(self):
+    def test_test_address_only(self):
+        import tempfile
         api = FakeSentFolder()
-        with mock.patch.object(tao_portal, "catalog_snapshot", return_value=self.CATALOG), \
-             mock.patch.dict(os.environ, {"WEEKLY_LINEUP_HOUR": "24"}):
-            main.send_weekly_lineup(api, "live", today=date(2026, 10, 14), force=True)  # Wednesday
+        with tempfile.TemporaryDirectory() as d:
+            self._flyers(d)
+            for _ in range(3):
+                self._send(api, d, date(2026, 10, 12), env={"WEEKLY_LINEUP_TEST_TO": "info@playmakerentertainment.com"})
         self.assertEqual(len(api.sent), 1)
+        self.assertEqual(api.sent[0]["to"], "info@playmakerentertainment.com")
+        self.assertTrue(api.sent[0]["subject"].startswith("[TEST]"))
