@@ -1317,3 +1317,5 @@ class WeeklyLineupTests(unittest.TestCase):
         self.assertEqual(len(api.sent), 1)
         self.assertEqual(api.sent[0]["to"], "info@playmakerentertainment.com")
         self.assertTrue(api.sent[0]["subject"].startswith("[TEST]"))
+        self.assertIn("October 14", api.sent[0]["subject"])  # Monday previews the coming Wednesday
+        self.assertIn("Zedd", api.sent[0]["body"])

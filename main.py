@@ -798,8 +798,10 @@ def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=F
     today = today or now.date()
     test_to = os.environ.get("WEEKLY_LINEUP_TEST_TO", "").strip()
     if test_to:
+        # Preview the NEXT scheduled send: the Wednesday on/after today.
+        preview_day = today + timedelta(days=(WEEKLY_LINEUP_WEEKDAY - today.weekday()) % 7)
         try:
-            subject, text, html, inline = _build_weekly(today, flyers_dir)
+            subject, text, html, inline = _build_weekly(preview_day, flyers_dir)
         except weekly_newsletter.MissingLineup as exc:
             log.error("Weekly newsletter TEST not sent: TAO lineup flyer missing (%s)", exc)
         else:
