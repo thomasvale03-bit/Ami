@@ -998,17 +998,6 @@ def main():
         # Follow-ups and the weekly lineup each get their own guard so a failure
         # in one never blocks the other (or the inbox) from running.
         try:
-            # Follow-ups are ON by default now (wording approved, dedupe fixed,
-            # sending from info@). Set FOLLOW_UPS_ENABLED=false in Railway to pause.
-            follow_ups_on = os.environ.get("FOLLOW_UPS_ENABLED", "true").strip().lower() in ("1", "true", "yes")
-            if follow_ups_on and time.time() - last_follow_up_check >= 3600:  # hourly is plenty
-                send_follow_ups(service, mode, allowlist)
-                last_follow_up_check = time.time()
-        except Exception:
-            if not args.loop:
-                raise
-            log.exception("Follow-up pass failed; will retry next cycle")
-        try:
             # Wednesday-morning weekly newsletter to the team (dedupe makes the hourly
             # check safe — it sends once per week). On by default.
             lineup_on = os.environ.get("WEEKLY_LINEUP_ENABLED", "true").strip().lower() in ("1", "true", "yes")
@@ -1019,6 +1008,17 @@ def main():
             if not args.loop:
                 raise
             log.exception("Weekly lineup pass failed; will retry next cycle")
+        try:
+            # Follow-ups are ON by default now (wording approved, dedupe fixed,
+            # sending from info@). Set FOLLOW_UPS_ENABLED=false in Railway to pause.
+            follow_ups_on = os.environ.get("FOLLOW_UPS_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+            if follow_ups_on and time.time() - last_follow_up_check >= 3600:  # hourly is plenty
+                send_follow_ups(service, mode, allowlist)
+                last_follow_up_check = time.time()
+        except Exception:
+            if not args.loop:
+                raise
+            log.exception("Follow-up pass failed; will retry next cycle")
         if not args.loop:
             break
         tao_portal.reset_catalog()  # fresh promoter-page listings every cycle
