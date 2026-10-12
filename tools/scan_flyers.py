@@ -118,6 +118,30 @@ def _dismiss_cookie_banner(pg):
     return False
 
 
+def _lineup_kind(fn):
+    """'nightclub'/'dayclub' for TAO's all-venue "Weekly Events" lineup images
+    (e.g. "TAO_WEEKLY_EVENTS_NC.jpg"), else None. Name patterns are a best guess
+    at the ALL VENUE WEEKLY ASSETS folder; verify on the first live run."""
+    n = fn.lower()
+    if not n.endswith((".jpg", ".jpeg", ".png")) or "1080x1920" in n:
+        return None
+    if not re.search(r"weekly[ _-]?(events|lineup)|all[ _-]?venue", n):
+        return None
+    return "dayclub" if re.search(r"(^|[^a-z])(dc|day|dayclub|daylife|pool)([^a-z]|$)", n) else "nightclub"
+
+
+def _save_preview(pg, u, dest):
+    try:
+        pg.goto(u, wait_until="domcontentloaded"); pg.wait_for_timeout(2500)
+        _dismiss_cookie_banner(pg)
+        img = pg.locator("img[src*='previews'], img.sl-preview-image, div[data-testid='preview-content'] img").first
+        img.wait_for(timeout=15000); img.screenshot(path=dest)
+        return dest
+    except Exception as exc:  # noqa: BLE001
+        print("skip lineup", u, exc, file=sys.stderr)
+        return None
+
+
 def download_week_images(out_dir, target=None, start=None, end=None):
     """Save a week's flyer JPGs to out_dir (one per venue/show) by screenshotting
     each image preview, the method Dropbox doesn't block. Returns the saved file
@@ -131,10 +155,11 @@ def download_week_images(out_dir, target=None, start=None, end=None):
     import datetime
     target = target or datetime.date.today()
     if start is None or end is None:
-        start = target - datetime.timedelta(days=target.weekday())  # Monday
-        end = start + datetime.timedelta(days=6)                     # Sunday
+        # Newsletter week is Wed-Tue (sent Wednesday): the Wednesday on/after target.
+        start = target + datetime.timedelta(days=(2 - target.weekday()) % 7)
+        end = start + datetime.timedelta(days=6)
     os.makedirs(out_dir, exist_ok=True)
-    saved = []
+    saved, lineups = [], {}
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True, executable_path=os.environ["CHROMIUM_PATH"])
         pg = b.new_context(locale="en-US").new_page(); pg.set_default_timeout(20000)
@@ -149,6 +174,13 @@ def download_week_images(out_dir, target=None, start=None, end=None):
             print("month", month_folder, "weeks:", weeks, file=sys.stderr)
             for wk in weeks:
                 for vf in names(pg, url(month_folder, wk)):
+                    kind = _lineup_kind(vf)
+                    if kind and kind not in lineups:  # TAO "Weekly Events" lineup graphic
+                        dest = _save_preview(pg, url(month_folder, wk, vf),
+                                             os.path.join(out_dir, f"weekly_{kind}.jpg"))
+                        if dest:
+                            lineups[kind] = dest; saved.append(dest)
+                        continue
                     venue = FOLDER_TO_VENUE.get(vf.strip().upper())
                     if not venue:
                         continue
@@ -176,6 +208,9 @@ def download_week_images(out_dir, target=None, start=None, end=None):
                         except Exception as exc:  # noqa: BLE001 - one bad flyer must not sink the batch
                             print("skip", fn, exc, file=sys.stderr)
         b.close()
+    missing = {"nightclub", "dayclub"} - set(lineups)
+    if missing:  # newsletter fails closed without these; add them by hand
+        print("WARNING: TAO weekly lineup flyer(s) not found:", sorted(missing), file=sys.stderr)
     print("images saved:", len(saved), file=sys.stderr)
     return saved
 
