@@ -943,17 +943,6 @@ def main():
     parser.add_argument("--loop", action="store_true",
                         help="Keep running, checking the inbox every AMY_POLL_SECONDS (default 120)")
     args = parser.parse_args()
-    # TEMP AMYI diagnostic: lengths/hash prefixes only, plus one test ping.
-    try:
-        import hashlib
-        for _k in ("AMYI_WEBHOOK_URL", "AMYI_WEBHOOK_AUTH"):
-            _v = os.environ.get(_k) or ""
-            print(f"AMYI-DIAG {_k} len={len(_v)} sha={hashlib.sha256(_v.encode()).hexdigest()[:8]}", flush=True)
-        logging.basicConfig(level=logging.INFO)
-        amyi.notify("signup_job", name="AMYI Live Test", email="test@example.com", venue="TEST",
-                    dates="2026-10-13", ref="amyi-live-startup-test", test=True, wait=True)
-    except Exception as _e:
-        print("AMYI-DIAG error", type(_e).__name__, flush=True)
 
     # Flags win; otherwise AMY_MODE (how the server is configured); default dry-run.
     mode = ("dry-run" if args.dry_run else "test" if args.test else "live" if args.live
