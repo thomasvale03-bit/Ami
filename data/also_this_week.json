@@ -1,12 +1,12 @@
 {
   "week_start": "2026-10-14",
-  "note": "Typed from TAO's two Weekly Events lineup flyers (Oct 14-20). Picks are removed automatically.",
+  "note": "Re-verified Oct 13 from TAO's Dropbox (Oct 14-20 week): Weekly Events nightclub + dayclub lineups, Hip-Hop lineup, and each venue's weekly/per-show flyers. Picks are removed automatically.",
   "nights": [
-    {"date": "2026-10-14", "events": [["Hakkasan", "R&Bae Wednesdays w/ DJ Franzen"], ["Marquee", "Lincoln Jesser"], ["Palm Tree", "Drift Wednesdays"]]},
+    {"date": "2026-10-14", "events": [["Hakkasan", "R&Bae Wednesdays w/ DJ Franzen"], ["Marquee", "lowKEY: Lincoln Jesser"], ["Palm Tree", "Drift Wednesdays: Lucky Lou"]]},
     {"date": "2026-10-15", "events": [["TAO", "Worship Thursdays: J-Nice"], ["Hakkasan", "DJ Tay James"], ["OMNIA Dayclub", "Daycation Thursdays: 15Grams"], ["Palm Tree", "Mondo"]]},
-    {"date": "2026-10-16", "events": [["OMNIA", "Steve Aoki"], ["JEWEL", "Lucky Lou"], ["Marquee", "Deorro"], ["TAO", "CLA"], ["Hakkasan", "DJ Five"], ["OMNIA Dayclub", "Twinsick"], ["OMNIA Dayclub", "Night Time Edition: MK"], ["Marquee Dayclub Dome", "15Grams"], ["Palm Tree", "Good Life Fridays: E-Rock"]]},
-    {"date": "2026-10-17", "events": [["OMNIA", "Zedd"], ["Hakkasan", "OhGeesy"], ["OMNIA Dayclub", "Alesso"], ["JEWEL", "DJ Shift"], ["TAO", "Spydat.e.k"], ["Marquee", "Danny Avila"], ["OMNIA Dayclub", "Night Time Edition: Illenium"], ["Marquee Dayclub Dome", "Space Yacht presents What The Duck: Bijou"], ["Palm Tree", "Telykast"], ["LAVO Party Brunch", "Every Saturday"]]},
-    {"date": "2026-10-18", "events": [["TAO", "Ritual Sundays: DJ Franzen"], ["OMNIA", "Deseo: Latin Sundays"], ["OMNIA Dayclub", "Mikey Francis"], ["Marquee Dayclub Dome", "DJ Spider"]]},
+    {"date": "2026-10-16", "events": [["Marquee", "Deorro"], ["TAO", "CLA"], ["Hakkasan", "DJ Five"], ["OMNIA Dayclub", "Twinsick"], ["OMNIA Dayclub", "Night Time Edition: MK"], ["Marquee Dayclub Dome", "15Grams"], ["Palm Tree", "Good Life Fridays: E-Rock"]]},
+    {"date": "2026-10-17", "events": [["Hakkasan", "OhGeesy"], ["OMNIA Dayclub", "Alesso"], ["Marquee", "Danny Avila"], ["JEWEL", "DJ Shift"], ["TAO", "Spydat.e.k"], ["OMNIA Dayclub", "Night Time Edition: Illenium"], ["Marquee Dayclub Dome", "Space Yacht presents What The Duck: Bijou"], ["Palm Tree", "Telykast"], ["LAVO Party Brunch", "Every Saturday"]]},
+    {"date": "2026-10-18", "events": [["TAO", "Ritual Sundays: DJ Franzen"], ["OMNIA", "Deseo Latin Sundays: Yo Yolie"], ["OMNIA Dayclub", "Mikey Francis"], ["Marquee Dayclub Dome", "DJ Spider"]]},
     {"date": "2026-10-19", "events": [["Marquee", "Marquee Mondays: Eric DLux"], ["Marquee Dayclub Dome", "D-Miles"]]},
     {"date": "2026-10-20", "events": [["OMNIA", "Mikey Francis"]]}
   ]
