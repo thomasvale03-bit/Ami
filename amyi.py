@@ -25,9 +25,9 @@ def _post(payload):
         req = urllib.request.Request(url, data=json.dumps(payload, default=str).encode(),
                                      headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=10) as resp:
-            log.info("AMYI ping %s -> %s", payload.get("type"), resp.status)
+            print("AMYI ping %s -> %s" % (payload.get("type"), resp.status), flush=True); log.info("AMYI ping %s -> %s", payload.get("type"), resp.status)
     except Exception as e:  # never break the caller
-        log.warning("AMYI ping %s failed: %s", payload.get("type"), type(e).__name__)
+        print("AMYI ping failed: %s %s" % (type(e).__name__, getattr(e, "code", "")), flush=True); log.warning("AMYI ping %s failed: %s", payload.get("type"), type(e).__name__)
 
 
 def notify(type, name="", email="", venue="", dates="", ref="", test=False, wait=False):
