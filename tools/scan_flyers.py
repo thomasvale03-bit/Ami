@@ -27,7 +27,8 @@ NOISE={"ss","glf","lv","omlv","mon","tue","wed","thu","fri","sat","sun","weekly"
        "dw","deseo","r"}  # series/party prefix codes that aren't the artist
 # Post-cleanup fixes for names the filename mangles (keyed on the lowercased
 # cleaned result). Extend as new garbles show up in the spot-check.
-ALIASES={"chaseb":"Chase B","mk":"MK","dj cla":"DJ CLA","yo yolie":"Yo Yolie"}
+ALIASES={"chaseb":"Chase B","mk":"MK","dj cla":"DJ CLA","yo yolie":"Yo Yolie",
+         "lowkey linconjesser":"Lincoln Jesser"}
 def clean_artist(s):
     s=re.sub(r"_\d+x\d+.*$","",s)                 # drop size + ext
     s=re.sub(r"\.(jpg|jpeg|png)$","",s,flags=re.I)
