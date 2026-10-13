@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
+import amyi
 import newsletter
 import posh
 import posh_lookup
@@ -348,6 +349,11 @@ class Intake:
                 userId="me", body={"raw": raw, "labelIds": ["INBOX", "UNREAD"]}).execute()
             self._seen.add(key)
         log.info("Posh order %s for %s -> night %s (%s)", key[0], key[2], night, how)
+        amyi.notify("posh_guest", name=payload.get("account_first_name") and
+                    f"{payload.get('account_first_name', '')} {payload.get('account_last_name', '')}".strip()
+                    or payload.get("account_name") or "",
+                    email=key[2], venue=payload.get("event_name") or "",
+                    dates=str(night or ""), ref=key[0] or key[1])
         return 200, "queued"
 
 

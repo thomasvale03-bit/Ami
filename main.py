@@ -38,6 +38,7 @@ import posh_webhook
 import tao_portal
 import ticketsauce
 import assisted_jobs
+import amyi
 import headliners
 import speakeasy
 
@@ -401,9 +402,13 @@ def send_assisted_jobs(service, message_id, request, jobs, dry_run):
     if dry_run:
         print(f"[dry run] assisted sign-up jobs to {to}:\n{subject}\n{body}")
         return False
-    return gmail_client.send_once(
+    sent = gmail_client.send_once(
         service, f"amy-assisted-{message_id}@playmakerentertainment.com", to, subject, body,
         sender=rules.SENDER_EMAIL, dedupe_query=f'to:{to} "Ref: {message_id}" subject:"Amy sign-up"')
+    amyi.notify("signup_job", name=name, email=request.get("email", ""),
+                venue=sorted({j.get("venue", "") for j in jobs}),
+                dates=sorted({j.get("date", "") for j in jobs}), ref=message_id)
+    return sent
 
 
 def send_links_on():
@@ -563,6 +568,12 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
                                            and any(a in body.lower() for a in allowlist)):
             log.info("[test mode] leaving %s untouched (not from an allowlisted address)", message_id)
             return None
+
+    if raw.get("source") != "Posh" and not dry_run:
+        amyi.notify("contact_form", name=raw.get("name", ""), email=raw.get("email", ""),
+                    venue=raw.get("venues") or [],
+                    dates=[d for d in (raw.get("start_date"), raw.get("end_date")) if d],
+                    ref=message_id)
 
     if raw.get("source") == "Posh":
         order = raw["posh"].get("order_number")
