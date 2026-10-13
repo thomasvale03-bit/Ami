@@ -395,6 +395,47 @@ def _gmail_call(fn, attempts=4, base_delay=5.0, _sleep=None):
             _sleep(min(base_delay * (2 ** i), 60.0))
 
 
+_zoho_sent = set()
+
+
+def zoho_configured():
+    return bool(os.environ.get("ZOHO_SMTP_USER", "").strip() and os.environ.get("ZOHO_SMTP_PASSWORD", "").strip())
+
+
+def _zoho_send(to, subject, text, html, sender):
+    """Send through Zoho SMTP (465 SSL, then 587 STARTTLS) so Zoho DKIM-signs it. Returns Message-ID."""
+    import base64
+    import email
+    import email.utils
+    import smtplib
+    import gmail_client
+    user = os.environ["ZOHO_SMTP_USER"].strip()
+    pw = os.environ["ZOHO_SMTP_PASSWORD"].strip()
+    host = os.environ.get("ZOHO_SMTP_HOST", "").strip() or "smtp.zoho.com"
+    mid = email.utils.make_msgid(domain=sender.split("@")[-1])
+    raw = gmail_client.build_message(to, subject, text, sender, html=html, message_id=mid.strip("<>"))["raw"]
+    msg = email.message_from_bytes(base64.urlsafe_b64decode(raw))
+    msg["Date"] = email.utils.formatdate(localtime=False)
+    last = None
+    for port in (465, 587):
+        try:
+            if port == 465:
+                s = smtplib.SMTP_SSL(host, port, timeout=15)
+            else:
+                s = smtplib.SMTP(host, port, timeout=15)
+                s.starttls()
+            with s:
+                s.login(user, pw)
+                s.send_message(msg, from_addr=sender, to_addrs=[to])
+            return mid.strip("<>")
+        except smtplib.SMTPAuthenticationError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.warning("Zoho SMTP %s:%s failed: %s: %s", host, port, type(e).__name__, e)
+            last = e
+    raise last
+
+
 def send_branded(service, payload, _sleep=None):
     """Returns (status_code, result). payload: to, subject, html, text."""
     import time
@@ -412,10 +453,22 @@ def send_branded(service, payload, _sleep=None):
     sender = branded_from()
     if _gmail_call(lambda: gmail_client.already_sent(service, f'to:{to} subject:"{subject}"'), _sleep=_sleep):
         return 200, "duplicate (already in Sent)"
+    with _branded_lock:
+        if (to.lower(), subject) in _zoho_sent:
+            return 200, "duplicate (already in Sent)"
+    if zoho_configured():
+        try:
+            mid = _zoho_send(to, subject, text, html, sender)
+            with _branded_lock:
+                _zoho_sent.add((to.lower(), subject))
+            log.info("Branded email sent via zoho to %s from %s (id %s)", to, sender, mid)
+            return 200, {"sent": True, "id": mid, "from": sender, "via": "zoho"}
+        except Exception as e:  # noqa: BLE001
+            log.warning("Branded zoho send failed (%s: %s); falling back to gmail", type(e).__name__, e)
     resp = _gmail_call(lambda: service.users().messages().send(
         userId="me", body=gmail_client.build_message(to, subject, text, sender, html=html)).execute(), _sleep=_sleep)
-    log.info("Branded email sent to %s from %s (id %s)", to, sender, (resp or {}).get("id"))
-    return 200, {"sent": True, "id": (resp or {}).get("id"), "from": sender}
+    log.info("Branded email sent via gmail to %s from %s (id %s)", to, sender, (resp or {}).get("id"))
+    return 200, {"sent": True, "id": (resp or {}).get("id"), "from": sender, "via": "gmail"}
 
 
 # --- HTTP server ------------------------------------------------------------

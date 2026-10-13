@@ -110,3 +110,26 @@ class ServerTests(unittest.TestCase):
     def test_sends_with_bearer(self):
         code, body = self.post({"Authorization": "Bearer sekret"})
         self.assertEqual((code, body["result"]["id"]), (200, "gm123"))
+
+
+class ZohoPath(unittest.TestCase):
+    P = {"to": "a@b.com", "subject": "Hi", "html": "<p>x</p>", "text": "x"}
+
+    def setUp(self):
+        pw._branded_times.clear(); pw._zoho_sent.clear()
+
+    @mock.patch.dict(os.environ, {"ZOHO_SMTP_USER": "info@playmakerentertainment.com", "ZOHO_SMTP_PASSWORD": "p"})
+    def test_zoho_used_then_dedupes(self):
+        g = FakeGmail()
+        with mock.patch.object(pw, "_zoho_send", return_value="mid1") as z:
+            code, r = pw.send_branded(g, dict(self.P), _sleep=lambda s: None)
+            self.assertEqual((code, r["via"], r["id"]), (200, "zoho", "mid1"))
+            self.assertEqual(pw.send_branded(g, dict(self.P))[1], "duplicate (already in Sent)")
+        self.assertEqual(z.call_count, 1); self.assertEqual(g.sent, [])
+
+    @mock.patch.dict(os.environ, {"ZOHO_SMTP_USER": "u", "ZOHO_SMTP_PASSWORD": "p"})
+    def test_zoho_failure_falls_back_to_gmail(self):
+        g = FakeGmail()
+        with mock.patch.object(pw, "_zoho_send", side_effect=TimeoutError("t")):
+            code, r = pw.send_branded(g, dict(self.P), _sleep=lambda s: None)
+        self.assertEqual((code, r["via"], r["id"]), (200, "gmail", "gm123")); self.assertEqual(len(g.sent), 1)
