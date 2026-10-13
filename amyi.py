@@ -17,7 +17,9 @@ def _post(payload):
         if not url:
             return
         headers = {"Content-Type": "application/json"}
-        auth = os.environ.get("AMYI_WEBHOOK_AUTH")
+        auth = (os.environ.get("AMYI_WEBHOOK_AUTH") or "").strip()
+        if auth.lower().startswith("authorization:"):  # tolerate a full "Authorization: ..." line
+            auth = auth.split(":", 1)[1].strip()
         if auth:
             headers["Authorization"] = auth
         req = urllib.request.Request(url, data=json.dumps(payload, default=str).encode(),
