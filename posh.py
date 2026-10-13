@@ -75,6 +75,8 @@ def _clean(value):
 
 def venue_from_event(event_name):
     text = (event_name or "").lower()
+    if rules.is_scottsdale(text):
+        return None  # Scottsdale event: never map to a Vegas venue
     for alias, venue in VENUE_ALIASES:
         if re.search(r"(?<![a-z])" + re.escape(alias) + r"(?![a-z])", text):
             return venue
@@ -147,7 +149,10 @@ def parse_signup(message_id, body_text):
         fields["start_date"] = fields["end_date"] = night.isoformat()
 
     venue = venue_from_event(posh.get("event_name"))
-    fields["venues"] = [venue] if venue else []
+    # An event that names no known venue (e.g. Scottsdale) keeps its event
+    # name as the venue so routing rejects it instead of using the Vegas default.
+    event_name = posh.get("event_name")
+    fields["venues"] = [venue] if venue else ([event_name] if event_name else [])
 
     female, male, unknown = ticket_counts(posh.get("ticket"))
     fields["female_count"], fields["male_count"] = str(female), str(male)

@@ -82,6 +82,20 @@ VENUE_ALIASES = {
 }
 
 
+# Scottsdale (AZ) venues. Not TAO Las Vegas venues: never route them to a
+# Vegas club or create TAO assisted sign-up jobs for them.
+SCOTTSDALE_VENUE_KEYWORDS = ("scottsdale", "almost famous", "riot house", "riothouse")
+
+
+def is_scottsdale(name):
+    text = (name or "").lower().replace("’", "'")
+    return any(k in text for k in SCOTTSDALE_VENUE_KEYWORDS)
+
+
+def is_known_vegas_venue(name):
+    return name in ALL_AUTHORIZED_VENUES or is_drais(name)
+
+
 def normalize_venue_name(name):
     key = name.strip().lower()
     return VENUE_ALIASES.get(key, name.strip())

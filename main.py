@@ -537,6 +537,18 @@ def manual_handoff(service, message_id, raw, dry_run):
     return gmail_client.PROCESSED_LABEL
 
 
+def non_vegas_venue_problem(raw):
+    """'scottsdale', 'unknown', or None. Scottsdale venues (and any venue we
+    don't recognize) must never be routed to a TAO Vegas club."""
+    venues = [rules.normalize_venue_name(v) for v in (raw.get("venues") or []) if v]
+    event = (raw.get("posh") or {}).get("event_name") or ""
+    if rules.is_scottsdale(event) or any(rules.is_scottsdale(v) for v in venues):
+        return "scottsdale"
+    if any(not rules.is_known_vegas_venue(v) for v in venues):
+        return "unknown"
+    return None
+
+
 def handle_message(service, message_id, dry_run, labels, allowlist=None):
     """Process one request email end to end. Returns the outcome label, or
     None when test mode skips a request that isn't from an allowlisted
@@ -601,6 +613,21 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
             venue=", ".join(raw.get("venues") or []) or "(none specified)",
             date=raw.get("start_date", "(unknown)"), issue=issue, required_action=action,
         ) + details], dry_run)
+        return gmail_client.EXCEPTION_LABEL
+
+    venue_problem = non_vegas_venue_problem(raw)
+    if venue_problem == "scottsdale":
+        # Scottsdale request: the AMYI notice above covers it; no TAO routing,
+        # no assisted sign-up job, no Vegas default.
+        log.info("%s: Scottsdale venue %s; not routed to TAO Vegas", message_id, raw.get("venues"))
+        return gmail_client.EXCEPTION_LABEL
+    if venue_problem == "unknown":
+        team_alert(service, message_id, raw, [internal_action_needed(
+            raw.get("name", "(unknown)"), raw.get("email", "(unknown)"),
+            venue=", ".join(raw.get("venues") or []), date=raw.get("start_date", "(unknown)"),
+            issue="Unrecognized venue; not routed to a default Vegas club.",
+            required_action="Check the request and register the guest manually.",
+        )], dry_run)
         return gmail_client.EXCEPTION_LABEL
 
     if concierge_on():

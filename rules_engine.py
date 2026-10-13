@@ -49,6 +49,20 @@ def normalize_guest_request(raw):
         )
 
     requested_venues = [rules.normalize_venue_name(v) for v in (raw.get("venues") or [])]
+    # Scottsdale venues are not TAO Vegas venues: never route or book them.
+    scottsdale = [v for v in requested_venues if rules.is_scottsdale(v)]
+    if scottsdale:
+        raise ActionNeeded(
+            issue=f"Scottsdale venue ({', '.join(scottsdale)}) is not a TAO Las Vegas venue.",
+            required_action="Handle on the Scottsdale guest list; no TAO sign-up.",
+        )
+    # A requested venue we don't recognize never falls back to the Vegas default.
+    unknown = [v for v in requested_venues if not rules.is_known_vegas_venue(v)]
+    if unknown:
+        raise ActionNeeded(
+            issue=f"Unrecognized venue ({', '.join(unknown)}); not routed to a default Vegas club.",
+            required_action="Check the request and register the guest manually.",
+        )
     drais = any(rules.is_drais(v) for v in requested_venues)
     requested_venues = [v for v in requested_venues if not rules.is_drais(v)]
     for v in requested_venues:
