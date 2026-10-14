@@ -366,14 +366,16 @@ def build_message(to, subject, body, sender, cc=None, message_id=None, attachmen
             ext = os.path.splitext(path)[1].lower().lstrip(".") or "png"
             html_part.add_related(data, maintype="image", subtype="jpeg" if ext in ("jpg", "jpeg") else ext,
                                   cid=f"<{cid}>", filename=os.path.basename(path), disposition="inline")
-    for path in attachments or []:
+    for item in attachments or []:
+        # a file path, or (path, filename) to name the attachment
+        path, fname = item if isinstance(item, (tuple, list)) else (item, os.path.basename(item))
         try:
             with open(path, "rb") as fh:
                 data = fh.read()
             ext = os.path.splitext(path)[1].lower().lstrip(".") or "png"
             subtype = "jpeg" if ext in ("jpg", "jpeg") else ext
             msg.add_attachment(data, maintype="image", subtype=subtype,
-                               filename=os.path.basename(path))
+                               filename=fname)
         except OSError as exc:  # noqa: BLE001 - skip a missing/unreadable image, still send
             log.warning("Skipping attachment %s: %s", path, exc)
     return {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")}

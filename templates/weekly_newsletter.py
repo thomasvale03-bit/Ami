@@ -1,9 +1,11 @@
-"""HTML "This Week in Vegas" newsletter (sent Wednesdays, covers Wed-Tue).
+"""HTML "This Week in Vegas" newsletter (sent Wednesdays, covers the official
+Tue-Mon week that includes the send day).
 
 Layout (approved by Thomas, Oct 2026): compact header + one line of copy, the two
 TAO "Weekly Events" lineup flyers (nightclub + dayclub, ALWAYS included), three
 "Don't Miss" picks with their flyer (or a text card) and a guest-list button, a
-compact "Also This Week" list, short footer. Images ride as CID inline parts.
+compact "Also This Week" list, short footer. Images ride as CID inline parts,
+and every flyer for the Tue-Mon week also rides as a regular attachment.
 
 Rules: no phone numbers, never "See you in Vegas", contact is
 info@playmakerentertainment.com.
@@ -36,10 +38,18 @@ class MissingLineup(Exception):
     """A TAO weekly lineup flyer is missing; the newsletter must not go out."""
 
 
+WEEK_START_WEEKDAY = 1  # Tuesday (Mon=0). Thomas's official week is Tue-Mon.
+
+
 def week_window(today):
-    """(wednesday, tuesday) the newsletter covers: the Wed on/before today."""
-    wed = today - timedelta(days=(today.weekday() - 2) % 7)
-    return wed, wed + timedelta(days=6)
+    """(tuesday, monday) the newsletter covers: the Tue on/before today."""
+    tue = today - timedelta(days=(today.weekday() - WEEK_START_WEEKDAY) % 7)
+    return tue, tue + timedelta(days=6)
+
+
+def _date_order(picks):
+    """Picks in calendar order (stable: same-night picks keep their order)."""
+    return sorted(picks, key=lambda p: p["date"])
 
 
 def _norm(s):
@@ -75,10 +85,10 @@ def load_picks(data_dir, start, end, headliners_map):
         with open(os.path.join(data_dir, "top_picks.json")) as fh:
             cfg = json.load(fh)
         if cfg.get("week_start") == start.isoformat() and cfg.get("picks"):
-            return cfg["picks"][:3]
+            return _date_order(cfg["picks"][:3])
     except (OSError, ValueError):
         pass
-    return default_picks(start, end, headliners_map)
+    return _date_order(default_picks(start, end, headliners_map))
 
 
 def load_also(data_dir, start, end, headliners_map, picks):
@@ -125,6 +135,92 @@ def find_flyer(flyers_dir, pick):
         if art and art in _norm(n):
             return os.path.join(flyers_dir, n)
     return None
+
+
+VENUE_LABELS = {"OMNC": "OMNIA", "OMDC": "OMNIA-Dayclub", "HKLV": "Hakkasan", "JWL": "JEWEL",
+                "MNC": "Marquee", "MDC": "Marquee-Dayclub", "TNC": "TAO", "LQD": "Liquid",
+                "PTBC": "Palm-Tree"}
+SERIES_TAGS = {"ss", "mon", "dw", "glf", "lowkey"}  # TAO series prefixes, not the act
+ACT_FIXES = {"linconjesser": "Lincoln-Jesser", "r-bae-wednesdays": "RnBae-Wednesdays", "zedd": "Zedd",
+             "ritualsundays": "Ritual-Sundays"}  # tidy TAO's file-name typos/casing
+ATTACH_LIMIT = 18 * 1024 * 1024  # stay well under Gmail's 25MB (base64 adds ~33%)
+
+
+def _flyer_parse(name):
+    """'261016_OMNC_Steve-Aoki_1080x1350.jpg' -> (date, venue code, act) or None."""
+    stem, ext = os.path.splitext(name)
+    m = re.match(r"^(\d{6})_([A-Z]+)_(.+)$", stem)
+    if not m or ext.lower() not in (".jpg", ".jpeg", ".png"):
+        return None
+    try:
+        d = date(2000 + int(m.group(1)[:2]), int(m.group(1)[2:4]), int(m.group(1)[4:]))
+    except ValueError:
+        return None
+    parts = [x for x in m.group(3).split("_") if x and not re.fullmatch(r"\d+x\d+", x)]
+    if len(parts) > 1:
+        parts = [x for x in parts if x.lower() not in SERIES_TAGS] or parts
+    act = re.sub(r"[^A-Za-z0-9-]+", "-", "-".join(parts)).strip("-")
+    return d, m.group(2), ACT_FIXES.get(act.lower(), act)
+
+
+def attachment_name(d, code, act, ext):
+    """-> 'Fri-10-16_OMNIA_Steve-Aoki.jpg'"""
+    return f"{d:%a-%m-%d}_{VENUE_LABELS.get(code, code)}_{act}{ext.lower().replace('.jpeg', '.jpg')}"
+
+
+def _shrink(path, out_dir, quality=70, max_side=1080):
+    """Re-encode a flyer smaller (needs Pillow; returns path unchanged without it)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return path
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        dest = os.path.join(out_dir, os.path.splitext(os.path.basename(path))[0] + ".jpg")
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            im.thumbnail((max_side, max_side * 2))
+            im.save(dest, "JPEG", quality=quality, optimize=True)
+        return dest
+    except Exception:  # noqa: BLE001 - keep the original if it can't be re-encoded
+        return path
+
+
+def week_attachments(flyers_dir, start, end, limit=ATTACH_LIMIT):
+    """Every event flyer dated start..end (inclusive) plus the two TAO weekly
+    lineups, as [(path, filename)] in date order, named like
+    'Fri-10-16_OMNIA_Steve-Aoki.jpg'. If the total is over `limit`, re-encodes
+    smaller; if still over, drops the largest-last until it fits."""
+    import tempfile
+    try:
+        names = sorted(os.listdir(flyers_dir))
+    except OSError:
+        return []
+    out, seen = [], set()
+    for fn, _, alt in LINEUP_FILES:
+        path = os.path.join(flyers_dir, fn)
+        if os.path.isfile(path):
+            out.append((path, f"TAO-Weekly-Lineup_{'Nightclub' if 'night' in fn else 'Dayclub'}.jpg"))
+    events = []
+    for n in names:
+        parsed = _flyer_parse(n)
+        if not parsed or not (start <= parsed[0] <= end):
+            continue
+        d, code, act = parsed
+        fname = attachment_name(d, code, act, os.path.splitext(n)[1])
+        if fname.lower() in seen:
+            continue
+        seen.add(fname.lower())
+        events.append((d, list(VENUE_LABELS).index(code) if code in VENUE_LABELS else 99,
+                       os.path.join(flyers_dir, n), fname))
+    out += [(p, f) for _, _, p, f in sorted(events)]
+    total = lambda items: sum(os.path.getsize(p) for p, _ in items)
+    if total(out) > limit:
+        tmp = tempfile.mkdtemp(prefix="flyers_")
+        out = [(_shrink(p, tmp), os.path.splitext(f)[0] + ".jpg") for p, f in out]
+    while out and total(out) > limit:
+        out.pop()
+    return out
 
 
 def _day(iso):
@@ -208,13 +304,14 @@ def render_text(start, end, picks, also):
         lines += ["", "ALSO THIS WEEK"]
         lines += [f"{_day(iso)}: " + " · ".join(f"{a} @ {v}" for v, a in ev) for iso, ev in also]
     lines += ["", f"Get on the guest list: {SIGNUP}",
-              "The TAO Group weekly lineups are attached.", "",
+              "All of this week's flyers are attached.", "",
               f"Questions? {CONTACT}", "Playmaker Entertainment · Las Vegas"]
     return "\n".join(lines) + "\n"
 
 
 def build(today, data_dir, flyers_dir, headliners_map):
-    """-> (subject, text, html, inline_images [(path, cid)]). Raises
+    """-> (subject, text, html, inline_images [(path, cid)], attachments
+    [(path, filename)]). Raises
     MissingLineup if either TAO weekly lineup flyer is absent (fail closed)."""
     start, end = week_window(today)
     inline = []
@@ -232,5 +329,9 @@ def build(today, data_dir, flyers_dir, headliners_map):
             inline.append((path, cid))
         cids.append(cid)
     also = load_also(data_dir, start, end, headliners_map, picks)
-    subject = f"🎉 This Week in Vegas — {start:%A, %B} {start.day}"
-    return subject, render_text(start, end, picks, also), render_html(start, end, picks, cids, also), inline
+    # Subject names the Wednesday send day (unchanged wording, so the weekly
+    # dedupe still matches an issue that already went out).
+    send_day = start + timedelta(days=(2 - start.weekday()) % 7)
+    subject = f"🎉 This Week in Vegas — {send_day:%A, %B} {send_day.day}"
+    return (subject, render_text(start, end, picks, also), render_html(start, end, picks, cids, also), inline,
+            week_attachments(flyers_dir, start, end))

@@ -1237,7 +1237,7 @@ class WeeklyLineupTests(unittest.TestCase):
         from templates import weekly_newsletter as w
         with tempfile.TemporaryDirectory() as d:
             self._flyers(d)
-            subject, text, html, inline = w.build(self.WEDNESDAY, main.DATA_DIR, d, {})
+            subject, text, html, inline, files = w.build(self.WEDNESDAY, main.DATA_DIR, d, {})
         self.assertIn("This Week in Vegas", subject)
         self.assertIn("Zedd", html); self.assertIn("OhGeesy", html); self.assertIn("Lucky Lou", html)
         self.assertIn("cid:lineup-nightclub", html); self.assertIn("cid:lineup-dayclub", html)
@@ -1246,7 +1246,32 @@ class WeeklyLineupTests(unittest.TestCase):
         for body in (html, text):
             self.assertNotIn("see you in vegas", body.lower())
             self.assertIsNone(re.search(r"\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}", body))
-        self.assertEqual({c for _, c in inline} >= {"lineup-nightclub", "lineup-dayclub", "pick-2", "pick-3"}, True)
+        self.assertEqual({c for _, c in inline} >= {"lineup-nightclub", "lineup-dayclub", "pick-2"}, True)  # Lucky Lou (Fri) is 2nd by date
+
+    def test_week_is_tue_to_mon(self):
+        from templates import weekly_newsletter as w
+        self.assertEqual(w.week_window(self.WEDNESDAY), (date(2026, 10, 13), date(2026, 10, 19)))
+        self.assertEqual(w.week_window(date(2026, 10, 13)), (date(2026, 10, 13), date(2026, 10, 19)))
+        self.assertEqual(w.week_window(date(2026, 10, 19)), (date(2026, 10, 13), date(2026, 10, 19)))
+        self.assertEqual(w.week_window(date(2026, 10, 20))[0], date(2026, 10, 20))
+
+    def test_picks_in_date_order_and_flyers_attached(self):
+        import tempfile
+        from templates import weekly_newsletter as w
+        with tempfile.TemporaryDirectory() as d:
+            self._flyers(d)
+            for n in ("261013_OMNC_Justin-Credible_1080x1350.jpg", "261016_OMNC_Steve-Aoki_1080x1350.jpg",
+                      "261012_MNC_Mon_Chase-B_1080x1350.jpg", "261020_OMNC_Mikey-Francis_1080x1350.jpg"):
+                open(os.path.join(d, n), "wb").write(b"x")
+            subject, text, html, inline, files = w.build(self.WEDNESDAY, main.DATA_DIR, d, {})
+        self.assertIn("Wednesday, October 14", subject)
+        self.assertIn("Oct 13", html); self.assertIn("Oct 19", html)
+        self.assertLess(html.index("Steve Aoki"), html.index("Zedd"))
+        names = [f for _, f in files]
+        self.assertIn("Fri-10-16_OMNIA_Steve-Aoki.jpg", names)
+        self.assertIn("Tue-10-13_OMNIA_Justin-Credible.jpg", names)
+        self.assertIn("Sat-10-17_Hakkasan_Ohgeesy.jpg", names)
+        self.assertFalse(any("10-12" in n or "10-20" in n for n in names))
 
     def test_default_picks_one_jewel(self):
         from templates import weekly_newsletter as w

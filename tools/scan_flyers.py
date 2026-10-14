@@ -148,16 +148,17 @@ def download_week_images(out_dir, target=None, start=None, end=None):
     each image preview, the method Dropbox doesn't block. Returns the saved file
     paths. Best-effort: skips anything it can't render.
 
-    The window is [start, end] inclusive; if not given it's the Mon–Sun week of
-    target (default today). A Mon–Sun week can straddle two of TAO's Dropbox week
+    The window is [start, end] inclusive; if not given it's the Tue–Mon week starting on/after
+    target (default today). A Tue–Mon week can straddle two of TAO's Dropbox week
     folders (and month folders), so this walks every folder that overlaps the
     window and keeps only flyers whose own date falls inside it. Keeps only the
     feed-ratio (1080x1350) image per show, so each event appears once."""
     import datetime
     target = target or datetime.date.today()
     if start is None or end is None:
-        # Newsletter week is Wed-Tue (sent Wednesday): the Wednesday on/after target.
-        start = target + datetime.timedelta(days=(2 - target.weekday()) % 7)
+        # Official week is Tue-Mon (newsletter sent Wednesday): the Tuesday
+        # on/after target, so the Tuesday prep run captures that same week.
+        start = target + datetime.timedelta(days=(1 - target.weekday()) % 7)
         end = start + datetime.timedelta(days=6)
     os.makedirs(out_dir, exist_ok=True)
     saved, lineups = [], {}

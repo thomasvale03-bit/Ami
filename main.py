@@ -804,7 +804,7 @@ def _week_flyer_files(flyers_dir=FLYERS_DIR):
     return [os.path.join(flyers_dir, n) for n in names]
 
 
-WEEKLY_LINEUP_WEEKDAY = 2  # Wednesday (Mon=0). Newsletter covers Wed-Tue, matching TAO's lineups.
+WEEKLY_LINEUP_WEEKDAY = 2  # Sent Wednesday (Mon=0). Covers the official Tue-Mon week (Tue before the send).
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 
@@ -819,7 +819,7 @@ def _build_weekly(today, flyers_dir):
 
 
 def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=False):
-    """Wednesday-morning (Vegas) HTML newsletter "This Week in Vegas" (Wed-Tue),
+    """Wednesday-morning (Vegas) HTML newsletter "This Week in Vegas" (Tue-Mon),
     sent once per week (deduped, so hourly checks are safe). Always carries the
     two TAO weekly lineup flyers (data/flyers/weekly_nightclub.jpg and
     weekly_dayclub.jpg) as CID inline images; if either is missing it does NOT
@@ -839,7 +839,7 @@ def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=F
         # Preview the NEXT scheduled send: the Wednesday on/after today.
         preview_day = today + timedelta(days=(WEEKLY_LINEUP_WEEKDAY - today.weekday()) % 7)
         try:
-            subject, text, html, inline = _build_weekly(preview_day, flyers_dir)
+            subject, text, html, inline, files = _build_weekly(preview_day, flyers_dir)
         except weekly_newsletter.MissingLineup as exc:
             log.error("Weekly newsletter TEST not sent: TAO lineup flyer missing (%s)", exc)
         else:
@@ -847,7 +847,7 @@ def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=F
             if mode == "dry-run":
                 log.info("[dry run] would send weekly TEST to %s", test_to)
             elif gmail_client.send_once(service, None, test_to, subject, text, sender=rules.SENDER_EMAIL,
-                                        html=html, inline_images=inline,
+                                        html=html, inline_images=inline, attachments=files,
                                         dedupe_query=f'to:{test_to} subject:"{subject}" newer_than:6d'):
                 log.info("Weekly newsletter TEST sent to %s (%d inline images)", test_to, len(inline))
     try:
@@ -864,7 +864,7 @@ def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=F
         if now.hour < send_hour:
             return
     try:
-        subject, text, html, inline = _build_weekly(today, flyers_dir)
+        subject, text, html, inline, files = _build_weekly(today, flyers_dir)
     except weekly_newsletter.MissingLineup as exc:
         log.error("Weekly newsletter NOT sent: TAO weekly lineup flyer missing (%s). "
                   "Add data/flyers/weekly_nightclub.jpg and weekly_dayclub.jpg.", exc)
@@ -877,8 +877,9 @@ def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=F
     if gmail_client.send_once(
             service, f"amy-lineup-{week_start.isoformat()}@playmakerentertainment.com",
             recipient, subject, text, sender=rules.SENDER_EMAIL, html=html, inline_images=inline,
-            dedupe_query=f'to:{recipient} subject:"{subject}" newer_than:6d'):
-        log.info("Weekly newsletter sent to %s (%d inline images)", recipient, len(inline))
+            attachments=files, dedupe_query=f'to:{recipient} subject:"{subject}" newer_than:6d'):
+        log.info("Weekly newsletter sent to %s (%d inline images, %d attachments)", recipient,
+                 len(inline), len(files))
 
 
 def run_speakeasy_test(service):
