@@ -2,6 +2,8 @@
 # Newsletter opt-out store: tests never touch Gmail; default "nobody opted out".
 import os as _os
 _os.environ.setdefault("NEWSLETTER_LINK_SECRET", "test-link-secret")
+_os.environ["AMYI_DISABLED"] = "true"  # tests never ping the live AMYI webhook
+_os.environ.pop("AMYI_WEBHOOK_URL", None)
 
 
 class _NullNewsletterStore:
