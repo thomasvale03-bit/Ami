@@ -880,6 +880,85 @@ def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=F
             attachments=files, dedupe_query=f'to:{recipient} subject:"{subject}" newer_than:6d'):
         log.info("Weekly newsletter sent to %s (%d inline images, %d attachments)", recipient,
                  len(inline), len(files))
+    send_weekly_to_subscribers(service, subject, text, html, inline, files, week_start, recipient)
+
+
+WEEKLY_BCC_CHUNK = 50
+
+
+def weekly_subscribers(store=None, exclude=()):
+    """Deduped opted-in subscriber emails (newest record per email wins)."""
+    skip = {newsletter.norm(e) for e in exclude}
+    recs = (store or newsletter_store()).all(refresh=True)
+    out = []
+    for email, rec in sorted(recs.items()):
+        e = newsletter.norm(email)
+        if rec.get("status") == "opted_in" and e and "@" in e and e not in skip and e not in out:
+            out.append(e)
+    return sorted(out)
+
+
+def _with_unsub(text, html, url):
+    text = f"{text}\n\nUnsubscribe: {url}\n"
+    foot = (f'<p style="font-size:12px;color:#888;text-align:center">'
+            f'<a href="{url}" style="color:#888">Unsubscribe</a></p>')
+    if html and "</body>" in html:
+        html = html.replace("</body>", foot + "</body>", 1)
+    elif html:
+        html = html + foot
+    return text, html
+
+
+def send_weekly_to_subscribers(service, subject, text, html, inline, files, week_start, primary,
+                               store=None):
+    """Also send the weekly to every opted-in subscriber. Per-recipient
+    unsubscribe links need individual sends (when NEWSLETTER_LINK_SECRET is
+    set); otherwise BCC in chunks with To: newsletter@ and a mailto
+    List-Unsubscribe. Each send is deduped via the Sent folder, so a capped run
+    resumes on the next loop. Store failures are logged, never raised."""
+    try:
+        subs = weekly_subscribers(store, exclude=[primary, rules.NEWSLETTER_EMAIL])
+    except Exception:  # noqa: BLE001
+        log.exception("Weekly newsletter: subscriber store failed to load; sent to %s only", primary)
+        return 0
+    if not subs:
+        return 0
+    cap = int(os.environ.get("WEEKLY_SUBSCRIBER_MAX_PER_RUN", "400"))
+    sent = 0
+    if newsletter.secret():
+        for addr in subs:
+            if sent >= cap:
+                log.info("Weekly subscriber send capped at %d this run; rest next run", cap)
+                break
+            url = newsletter.link(addr, "unsubscribe")
+            t, h = _with_unsub(text, html, url)
+            try:
+                if gmail_client.send_once(
+                        service, None, addr, subject, t, sender=rules.SENDER_EMAIL, html=h,
+                        inline_images=inline, attachments=files,
+                        headers=newsletter.list_unsubscribe_headers(url),
+                        dedupe_query=f'to:{addr} subject:"{subject}" newer_than:6d'):
+                    sent += 1
+            except Exception:  # noqa: BLE001
+                log.exception("Weekly newsletter send to subscriber %s failed", addr)
+    else:
+        mailto = "mailto:info@playmakerentertainment.com?subject=unsubscribe"
+        t, h = _with_unsub(text, html, mailto)
+        for i in range(0, len(subs), WEEKLY_BCC_CHUNK):
+            chunk = subs[i:i + WEEKLY_BCC_CHUNK]
+            mid = f"amy-lineup-{week_start.isoformat()}-bcc{i // WEEKLY_BCC_CHUNK}@playmakerentertainment.com"
+            try:
+                if gmail_client.send_once(
+                        service, mid, rules.NEWSLETTER_EMAIL, subject, t, sender=rules.SENDER_EMAIL,
+                        html=h, inline_images=inline, attachments=files,
+                        headers={"Bcc": ", ".join(chunk),
+                                 "List-Unsubscribe": f"<{mailto}>"},
+                        dedupe_query=f"rfc822msgid:{mid}"):
+                    sent += len(chunk)
+            except Exception:  # noqa: BLE001
+                log.exception("Weekly newsletter BCC chunk %d failed", i // WEEKLY_BCC_CHUNK)
+    log.info("Weekly newsletter sent to %d subscribers", sent)
+    return sent
 
 
 def run_speakeasy_test(service):
