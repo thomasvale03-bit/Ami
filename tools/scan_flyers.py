@@ -24,11 +24,15 @@ def names(page, u):
     return page.locator("div._sl-file-name-text_mzi4c_1").evaluate_all("els=>els.map(e=>e.textContent.trim())")
 
 NOISE={"ss","glf","lv","omlv","mon","tue","wed","thu","fri","sat","sun","weekly","socials","nc","dc",
-       "dw","deseo","r"}  # series/party prefix codes that aren't the artist
+       "dw","deseo","r","count","counthakkasan","d2d","dusk2dawn"}  # series/party prefixes, not the artist
 # Post-cleanup fixes for names the filename mangles (keyed on the lowercased
 # cleaned result). Extend as new garbles show up in the spot-check.
 ALIASES={"chaseb":"Chase B","mk":"MK","dj cla":"DJ CLA","yo yolie":"Yo Yolie",
-         "lowkey linconjesser":"Lincoln Jesser"}
+         "lowkey linconjesser":"Lincoln Jesser","benassi":"Benny Benassi","bigx":"BigXthaPlug",
+         "lowkey clubdecombat eclipse":"Club De Combat","clubdecombat eclipse":"Club De Combat",
+         "clubdecombat":"Club De Combat"}
+# Overview/lineup graphics that aren't a single artist (skipped in parse()).
+_SKIP_ART={"lineup","overview"}
 def clean_artist(s):
     s=re.sub(r"_\d+x\d+.*$","",s)                 # drop size + ext
     s=re.sub(r"\.(jpg|jpeg|png)$","",s,flags=re.I)
@@ -49,7 +53,7 @@ def parse(fn, venue):
         date=f"20{yy}-{mm}-{dd}"; import datetime; datetime.date.fromisoformat(date)
     except Exception: return None
     art=clean_artist(rest)
-    if not art or art.lower().startswith("weekly"): return None
+    if not art or art.lower().startswith("weekly") or art.lower() in _SKIP_ART: return None
     return date, art
 
 def _week_bounds(week_name, year):
