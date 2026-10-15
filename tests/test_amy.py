@@ -88,15 +88,17 @@ class RoutingTests(unittest.TestCase):
 
     def test_jewel_is_pushed_to_the_front_by_default(self):
         # No specific request: JEWEL (the main club) leads every day it's considered.
-        for d in (12, 13, 14, 15, 16, 17, 18):
+        for d in (12, 13, 14, 15, 16, 17):
             self.assertEqual(self.order([], date(2026, 10, d))[0], "JEWEL Nightclub")
+        # Sundays: OMNIA first, then TAO (owner rule 2026-10-14).
+        self.assertEqual(self.order([], date(2026, 10, 18))[:2], ["OMNIA Nightclub", "TAO Nightclub"])
 
     def test_single_pick_beats_the_schedule(self):
         self.assertEqual(self.order(["OMNIA Nightclub"], date(2026, 10, 12))[0], "OMNIA Nightclub")
 
     def test_extra_backups_except_tuesday(self):
         self.assertEqual(self.order([], date(2026, 10, 18)),
-                         ["JEWEL Nightclub", "TAO Nightclub", "Hakkasan Nightclub", "Marquee Nightclub"])
+                         ["OMNIA Nightclub", "TAO Nightclub", "JEWEL Nightclub", "Hakkasan Nightclub", "Marquee Nightclub"])
         self.assertEqual(self.order([], date(2026, 10, 13)),
                          ["JEWEL Nightclub", "OMNIA Nightclub", "TAO Nightclub"])
 

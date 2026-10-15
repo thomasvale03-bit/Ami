@@ -138,7 +138,11 @@ def candidate_venues(request, date_obj, previous_night_venue=None):
     if day not in rules.NO_EXTRA_BACKUP_DAYS:
         schedule += rules.EXTRA_BACKUP_NIGHTCLUBS
     # Always push the main club to the front of the default schedule.
-    schedule = [rules.MAIN_NIGHTCLUB] + schedule
+    # Sundays: OMNIA first, then TAO, before JEWEL (owner rule 2026-10-14).
+    if day == "Sunday":
+        schedule = schedule[:2] + [rules.MAIN_NIGHTCLUB] + schedule[2:]
+    else:
+        schedule = [rules.MAIN_NIGHTCLUB] + schedule
 
     requested = [v for v in request["requested_venues"] if v in rules.NIGHTCLUBS]
     ordered = [v for v in schedule if v in requested] + requested + schedule
