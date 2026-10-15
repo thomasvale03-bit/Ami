@@ -135,7 +135,7 @@ DEFAULT_ROUTING = {
     "Thursday":  {"primary": "Hakkasan Nightclub", "fallback": "TAO Nightclub"},
     "Friday":    {"primary": "JEWEL Nightclub", "fallback": "Hakkasan Nightclub"},
     "Saturday":  {"primary": "JEWEL Nightclub", "fallback": "Marquee Nightclub"},
-    "Sunday":    {"primary": "OMNIA Nightclub", "fallback": ["TAO Nightclub", "best_available"]},  # owner rule 2026-10-14: Sundays OMNIA first, then TAO
+    "Sunday":    {"primary": "TAO Nightclub", "fallback": "best_available"},
 }
 
 # JEWEL and Liquid are Playmaker's main clubs — always lead with them when
