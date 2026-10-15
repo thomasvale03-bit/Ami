@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from rules_engine import (
     normalize_guest_request, ActionNeeded, date_range,
     resolve_dayclub_for_date, resolve_venue_for_date,
-    candidate_venues, dayclub_candidates, is_dayclub_season, omnia_closed_for_same_day,
+    candidate_venues, dayclub_candidates, is_fallback_venue, is_dayclub_season, omnia_closed_for_same_day,
 )
 from config import rules
 from templates import html_emails
@@ -89,6 +89,7 @@ def process_one_request(raw, dry_run=True, today=None, now=None):
                 "female_count": request["female_count"], "male_count": request["male_count"],
                 "arrival_text": "[would be read from live listing]",
                 "confirmation_id": "[DRY RUN — not submitted]",
+                "fallback": category == "nightclub" and is_fallback_venue(request, venue),
             })
             return True
         try:
@@ -117,6 +118,7 @@ def process_one_request(raw, dry_run=True, today=None, now=None):
             "female_count": request["female_count"], "male_count": request["male_count"],
             "arrival_text": result.get("arrival_text") or listing.get("arrival_text", ""),
             "confirmation_id": result["confirmation_id"],
+            "fallback": category == "nightclub" and is_fallback_venue(request, venue),
         })
         return True
 
@@ -318,6 +320,7 @@ def concierge_handoff(service, message_id, raw, dry_run):
                        "backups": [v for v in opts if v != chosen][:3],
                        "dayclub": dayclub, "rerouted_from": rerouted_from,
                        "unverified": not live, "none_live": none_live,
+                       "fallback": is_fallback_venue(request, chosen),
                        "headliner": headliners.headliner(chosen, d),
                        "signup_url": signup_url, "dayclub_url": dayclub_url})
         prev = chosen

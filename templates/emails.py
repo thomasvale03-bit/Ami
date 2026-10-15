@@ -43,6 +43,17 @@ def _event_line(r):
     return f"{when} — {what}\nOrder ID: {r['confirmation_id']}"
 
 
+FALLBACK_NOTICE = ("Oh No, You Did Not Meet this Venue's GuestList Cut off. "
+                   "But we signed you up for another amazing venue!")
+
+
+def _fallback_line(nights):
+    """One notice line when any night (dict with 'fallback': True) was booked at
+    a fallback venue instead of the guest's requested one; "" otherwise."""
+    dates = list(dict.fromkeys(_long_date(n["date"]) for n in (nights or []) if n.get("fallback")))
+    return f"{FALLBACK_NOTICE} ({', '.join(dates)})" if dates else ""
+
+
 def drais_guestlist(drais):
     """Drai's After Hours has no portal: guests show this at the door
     (owner's text, Oct 4 2026). drais: name, female_count, male_count, nights."""
@@ -69,6 +80,9 @@ def consolidated_confirmation(first_name, guest_email, date_label, registrations
     event_time (optional), date, female_count, male_count, confirmation_id.
     drais: see drais_guestlist; added when the guest asked for Drai's."""
     parts = [f"Hi {first_name},"]
+    fb = _fallback_line(registrations)
+    if fb:
+        parts.append(fb)
     if registrations:
         first = registrations[0]
         parts += [
@@ -241,7 +255,11 @@ def guest_confirmation(first_name, nights, drais=None):
     """Plain 'you're on the list' confirmation for the guest. No signup link;
     it just states the clubs they're set for. nights: [{'date','venue'}]."""
     greeting = f"Hi {first_name}," if first_name else "Hi,"
-    parts = [greeting, "You're on the Playmaker Entertainment guest list. Here's what you're set for:"]
+    parts = [greeting]
+    fb = _fallback_line(nights)
+    if fb:
+        parts.append(fb)
+    parts.append("You're on the Playmaker Entertainment guest list. Here's what you're set for:")
     for n in nights:
         line = f"{_long_date(n['date'])} — {n['venue']}"
         if n.get("headliner"):

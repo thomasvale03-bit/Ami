@@ -42,10 +42,35 @@ def render_follow_up(first_name, optin_url="https://playmakerentertainment.com",
                  unsubscribe_url=_h.escape(unsubscribe_url, quote=True))
 
 
-def render_confirmation(first_name, nights, party_size=1, closed_note=None):
+FALLBACK_NOTICE = ("Oh No, You Did Not Meet this Venue's GuestList Cut off. "
+                   "But we signed you up for another amazing venue!")
+
+
+def fallback_note_html(fallback_nights=None):
+    """fallback_nights: True, or a list of night labels (e.g. ["Sat, Oct 17"]).
+    Falsy => "" (no change for guests whose nights all matched)."""
+    if not fallback_nights:
+        return ""
+    txt = ""
+    if isinstance(fallback_nights, (list, tuple)) and fallback_nights:
+        txt = " (" + ", ".join(_h.escape(str(n)) for n in fallback_nights) + ")"
+    return _fill(_read("partials/fallback_note.html"), fallback_nights_text=txt)
+
+
+def fallback_note_text(fallback_nights=None):
+    """Plain-text version of the fallback notice ("" when not needed)."""
+    if not fallback_nights:
+        return ""
+    if isinstance(fallback_nights, (list, tuple)) and fallback_nights:
+        return FALLBACK_NOTICE + " (" + ", ".join(str(n) for n in fallback_nights) + ")"
+    return FALLBACK_NOTICE
+
+
+def render_confirmation(first_name, nights, party_size=1, closed_note=None, fallback_nights=None):
     note = (_fill(_read("partials/closed_note.html"), closed_note_text=_h.escape(closed_note))
             if closed_note else "")
     return _fill(_read("guest_confirmation.html"),
+                 fallback_note=fallback_note_html(fallback_nights),
                  first_name=_h.escape(first_name or "there"),
                  nights_block=nights_block(nights),
                  closed_note=note,
@@ -71,7 +96,8 @@ def concierge_confirmation_html(first_name, nights, size, drais=None):
         if n.get("rerouted_from"):
             notes.append(f"{n['rerouted_from']}'s guest list was already closed for same-day "
                          f"sign-ups, so we moved you to {n['venue']}.")
-    return render_confirmation(first_name, rows, size, " ".join(notes) or None)
+    fb = [_short_date(n["date"]) for n in nights if n.get("fallback")]
+    return render_confirmation(first_name, rows, size, " ".join(notes) or None, fallback_nights=fb or None)
 
 
 def consolidated_confirmation_html(first_name, registrations, drais=None):
@@ -80,4 +106,6 @@ def consolidated_confirmation_html(first_name, registrations, drais=None):
         return None
     first = registrations[0]
     rows = [(_short_date(r["date"]), r["venue"], r.get("event")) for r in registrations]
-    return render_confirmation(first_name, rows, party_size(first.get("female_count"), first.get("male_count")))
+    fb = list(dict.fromkeys(_short_date(r["date"]) for r in registrations if r.get("fallback")))
+    return render_confirmation(first_name, rows, party_size(first.get("female_count"), first.get("male_count")),
+                               fallback_nights=fb or None)

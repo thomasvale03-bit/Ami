@@ -159,6 +159,14 @@ def candidate_venues(request, date_obj, previous_night_venue=None):
     return result
 
 
+def is_fallback_venue(request, venue):
+    """True when the guest asked for specific nightclub(s) and was signed up
+    at a different one instead (missed the requested venue's guest-list
+    cut-off / not live). No request, or a matched request, is not a fallback."""
+    requested = [v for v in (request.get("requested_venues") or []) if v in rules.NIGHTCLUBS]
+    return bool(requested and venue and venue not in requested)
+
+
 def resolve_venue_for_date(request, date_obj, live_availability_checker, previous_night_venue=None):
     """
     live_availability_checker(venue, date_obj) -> dict or None
