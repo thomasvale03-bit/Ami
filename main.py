@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from rules_engine import (
     normalize_guest_request, ActionNeeded, date_range,
     resolve_dayclub_for_date, resolve_venue_for_date,
-    candidate_venues, dayclub_candidates, is_fallback_venue, is_dayclub_season, omnia_closed_for_same_day,
+    candidate_venues, dayclub_candidates, is_closed_list_fallback, requested_nightclubs, is_dayclub_season, omnia_closed_for_same_day,
 )
 from config import rules
 from templates import html_emails
@@ -89,7 +89,7 @@ def process_one_request(raw, dry_run=True, today=None, now=None):
                 "female_count": request["female_count"], "male_count": request["male_count"],
                 "arrival_text": "[would be read from live listing]",
                 "confirmation_id": "[DRY RUN — not submitted]",
-                "fallback": category == "nightclub" and is_fallback_venue(request, venue),
+                "fallback": category == "nightclub" and bool((listing or {}).get("_requested_closed")),
             })
             return True
         try:
@@ -118,7 +118,7 @@ def process_one_request(raw, dry_run=True, today=None, now=None):
             "female_count": request["female_count"], "male_count": request["male_count"],
             "arrival_text": result.get("arrival_text") or listing.get("arrival_text", ""),
             "confirmation_id": result["confirmation_id"],
-            "fallback": category == "nightclub" and is_fallback_venue(request, venue),
+            "fallback": category == "nightclub" and bool((listing or {}).get("_requested_closed")),
         })
         return True
 
@@ -169,8 +169,17 @@ def _book_nights(request, today, checker, dayclub_checker, book, exceptions):
         if dayclub:
             book(dayclub, day_listing, date_obj, "dayclub")
 
+        closed = set()
+
+        def tracking_checker(v, d, _closed=closed):
+            # Record requested venues whose guest list is closed (no open Passes).
+            res = checker(v, d)
+            if v in requested_nightclubs(request) and not (res and res.get("listing_type") == "Passes"):
+                _closed.add(v)
+            return res
+
         venue, listing = resolve_venue_for_date(
-            request, date_obj, live_availability_checker=checker,
+            request, date_obj, live_availability_checker=tracking_checker,
             previous_night_venue=previous_night_venue,
         )
         if not venue:
@@ -180,6 +189,8 @@ def _book_nights(request, today, checker, dayclub_checker, book, exceptions):
                 "issue": "No matching live Passes/Guest List event for requested or routed nightclubs.",
             })
             continue
+        if is_closed_list_fallback(request, venue, closed):
+            listing = dict(listing, _requested_closed=True)
         # Only a confirmed nightclub counts for the Fri/Sat no-repeat rule.
         previous_night_venue = venue if book(venue, listing, date_obj, "nightclub") else None
 
@@ -320,7 +331,11 @@ def concierge_handoff(service, message_id, raw, dry_run):
                        "backups": [v for v in opts if v != chosen][:3],
                        "dayclub": dayclub, "rerouted_from": rerouted_from,
                        "unverified": not live, "none_live": none_live,
-                       "fallback": is_fallback_venue(request, chosen),
+                       "fallback": is_closed_list_fallback(
+                           request, chosen,
+                           ({rerouted_from} if rerouted_from else set()) | (
+                               {v for v in requested_nightclubs(request) if (v, d) not in catalog}
+                               if live else set())),
                        "headliner": headliners.headliner(chosen, d),
                        "signup_url": signup_url, "dayclub_url": dayclub_url})
         prev = chosen

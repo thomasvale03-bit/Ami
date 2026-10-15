@@ -1,5 +1,5 @@
 import unittest
-from rules_engine import is_fallback_venue
+from rules_engine import is_closed_list_fallback
 from templates import emails, html_emails
 
 NOTICE = "Oh No, You Did Not Meet this Venue's GuestList Cut off. But we signed you up for another amazing venue!"
@@ -7,10 +7,13 @@ HTML_NOTICE = NOTICE.replace("'", "'")
 
 
 class FallbackNotice(unittest.TestCase):
-    def test_is_fallback_venue(self):
-        self.assertTrue(is_fallback_venue({"requested_venues": ["OMNIA Nightclub"]}, "TAO Nightclub"))
-        self.assertFalse(is_fallback_venue({"requested_venues": ["OMNIA Nightclub"]}, "OMNIA Nightclub"))
-        self.assertFalse(is_fallback_venue({"requested_venues": []}, "TAO Nightclub"))
+    def test_closed_list_fallback(self):
+        req = {"requested_venues": ["OMNIA Nightclub"]}
+        self.assertTrue(is_closed_list_fallback(req, "TAO Nightclub", {"OMNIA Nightclub"}))
+        # moved for another reason (list not closed): no notice
+        self.assertFalse(is_closed_list_fallback(req, "TAO Nightclub", set()))
+        self.assertFalse(is_closed_list_fallback(req, "OMNIA Nightclub", {"OMNIA Nightclub"}))
+        self.assertFalse(is_closed_list_fallback({"requested_venues": []}, "TAO Nightclub", {"OMNIA Nightclub"}))
 
     def test_guest_confirmation_text_and_html(self):
         nights = [{"date": "2026-10-16", "venue": "JEWEL Nightclub"},
