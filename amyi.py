@@ -7,7 +7,9 @@ Guards (each ping wakes a costly routine):
 - never under unittest/pytest (or AMYI_DISABLED=true);
 - never for test traffic: test=True, empty email, example.com/.test emails,
   or test/sample names;
-- at most once per 24h per type+ref and per type+email+venue+dates
+- at most ONE ping per guest job per 24h, whatever its type: keyed on ref and
+  on email+dates (not type/venue), so signup_job/contact_form/posh_guest for the
+  same submission never all fire
   (persisted to AMYI_DEDUPE_FILE, default data/amyi_sent.json);
 - a single attempt, no retries."""
 import json
@@ -75,11 +77,14 @@ def _save(sent):
 
 
 def _keys(payload):
-    t = payload["type"]
     keys = []
     if payload.get("ref"):
-        keys.append(f"ref|{t}|{payload['ref']}")
-    keys.append(f"ev|{t}|{payload['email'].lower()}|{payload['venue'].lower()}|{payload['dates']}")
+        keys.append(f"ref|{payload['ref']}")
+    email = payload["email"].strip().lower()
+    if email and payload.get("dates"):
+        keys.append(f"ev|{email}|{payload['dates']}")
+    elif email and not payload.get("ref"):
+        keys.append(f"ev|{email}|")
     return keys
 
 
@@ -119,9 +124,14 @@ def _post(payload):
         log.warning("AMYI ping %s failed: %s", payload.get("type"), type(e).__name__)
 
 
+def _norm_dates(dates):
+    if isinstance(dates, str):
+        dates = [d.strip() for d in dates.split(",")]
+    return ", ".join(sorted({str(d).strip() for d in dates if d and str(d).strip()}))
+
+
 def build_payload(type, name="", email="", venue="", dates="", ref=""):
-    if isinstance(dates, (list, tuple)):
-        dates = ", ".join(str(d) for d in dates if d)
+    dates = _norm_dates(dates or [])
     if isinstance(venue, (list, tuple)):
         venue = ", ".join(str(v) for v in venue if v)
     return {"type": type, "name": name or "", "email": email or "",
@@ -147,3 +157,34 @@ def notify(type, name="", email="", venue="", dates="", ref="", test=False, wait
         return True
     except Exception:
         return False
+
+
+# --- One ping per handled message --------------------------------------------
+# handle_message() defers its contact_form ping; if the same message yields a
+# signup_job, only the signup_job ping goes out.
+_local = threading.local()
+
+
+def begin_message():
+    _local.pending = None
+    _local.job_sent = False
+
+
+def defer_contact_form(**kw):
+    if getattr(_local, "job_sent", None) is None:
+        return notify("contact_form", **kw)
+    _local.pending = kw
+    return False
+
+
+def mark_job():
+    _local.job_sent = True
+
+
+def end_message():
+    pending, job = getattr(_local, "pending", None), getattr(_local, "job_sent", False)
+    _local.pending = None
+    _local.job_sent = None
+    if pending and not job:
+        return notify("contact_form", **pending)
+    return False

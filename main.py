@@ -405,6 +405,7 @@ def send_assisted_jobs(service, message_id, request, jobs, dry_run):
     sent = gmail_client.send_once(
         service, f"amy-assisted-{message_id}@playmakerentertainment.com", to, subject, body,
         sender=rules.SENDER_EMAIL, dedupe_query=f'to:{to} "Ref: {message_id}" subject:"Amy sign-up"')
+    amyi.mark_job()
     amyi.notify("signup_job", name=name, email=request.get("email", ""),
                 venue=sorted({j.get("venue", "") for j in jobs}),
                 dates=sorted({j.get("date", "") for j in jobs}), ref=message_id)
@@ -550,6 +551,14 @@ def non_vegas_venue_problem(raw):
 
 
 def handle_message(service, message_id, dry_run, labels, allowlist=None):
+    amyi.begin_message()
+    try:
+        return _handle_message(service, message_id, dry_run, labels, allowlist)
+    finally:
+        amyi.end_message()
+
+
+def _handle_message(service, message_id, dry_run, labels, allowlist=None):
     """Process one request email end to end. Returns the outcome label, or
     None when test mode skips a request that isn't from an allowlisted
     address (it is left completely untouched)."""
@@ -582,7 +591,7 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
             return None
 
     if raw.get("source") != "Posh" and not dry_run:
-        amyi.notify("contact_form", name=raw.get("name", ""), email=raw.get("email", ""),
+        amyi.defer_contact_form(name=raw.get("name", ""), email=raw.get("email", ""),
                     venue=raw.get("venues") or [],
                     dates=[d for d in (raw.get("start_date"), raw.get("end_date")) if d],
                     ref=message_id)
