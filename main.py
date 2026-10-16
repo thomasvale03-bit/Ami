@@ -568,6 +568,13 @@ def non_vegas_venue_problem(raw):
     return None
 
 
+def _party(raw):
+    try:
+        return (int(raw.get("female_count") or 0) + int(raw.get("male_count") or 0)) or ""
+    except (TypeError, ValueError):
+        return ""
+
+
 def handle_message(service, message_id, dry_run, labels, allowlist=None):
     amyi.begin_message()
     try:
@@ -610,7 +617,9 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
 
     if raw.get("source") != "Posh" and not dry_run:
         amyi.defer_contact_form(name=raw.get("name", ""), email=raw.get("email", ""),
-                    venue=raw.get("venues") or [],
+                    venue=raw.get("venues") or [], phone=raw.get("phone", ""),
+                    event=raw.get("event", "") or ", ".join(raw.get("venues") or []),
+                    party=_party(raw), source=raw.get("source") or "website",
                     dates=[d for d in (raw.get("start_date"), raw.get("end_date")) if d],
                     ref=message_id)
 

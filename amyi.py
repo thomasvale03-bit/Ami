@@ -88,6 +88,12 @@ def _keys(payload):
     return keys
 
 
+def _party_keys(payload):
+    """Base keys tagged with the party size: a changed party re-pings once."""
+    party = str(payload.get("party") or "").strip()
+    return [f"{k}|p{party}" for k in _keys(payload)] if party else []
+
+
 def claim(payload, now=None):
     """True (and record it) if this ping wasn't sent in the last 24h."""
     now = now or time.time()
@@ -95,9 +101,15 @@ def claim(payload, now=None):
         sent = _load()
         for k in [k for k, ts in sent.items() if now - ts > DEDUPE_SECONDS]:
             del sent[k]
-        keys = _keys(payload)
-        if any(k in sent for k in keys):
+        keys, pkeys = _keys(payload), _party_keys(payload)
+        if pkeys:
+            # Known party size: skip only if this exact guest+party was sent.
+            # (A ping for the same guest with another party size = a change.)
+            if any(k in sent for k in pkeys):
+                return False
+        elif any(k in sent for k in keys):
             return False
+        keys = keys + pkeys
         for k in keys:
             sent[k] = now
         _save(sent)
@@ -130,15 +142,19 @@ def _norm_dates(dates):
     return ", ".join(sorted({str(d).strip() for d in dates if d and str(d).strip()}))
 
 
-def build_payload(type, name="", email="", venue="", dates="", ref=""):
+def build_payload(type, name="", email="", venue="", dates="", ref="",
+                  phone="", event="", party="", source=""):
     dates = _norm_dates(dates or [])
     if isinstance(venue, (list, tuple)):
         venue = ", ".join(str(v) for v in venue if v)
-    return {"type": type, "name": name or "", "email": email or "",
-            "venue": venue or "", "dates": str(dates or ""), "ref": str(ref or "")}
+    return {"type": type, "name": name or "", "email": email or "", "phone": str(phone or ""),
+            "event": event or "", "venue": venue or "", "dates": str(dates or ""),
+            "date": str(dates or ""), "party": str(party or ""),
+            "source": source or "", "ref": str(ref or "")}
 
 
-def notify(type, name="", email="", venue="", dates="", ref="", test=False, wait=False):
+def notify(type, name="", email="", venue="", dates="", ref="", test=False, wait=False,
+           phone="", event="", party="", source=""):
     """Returns True if a ping was dispatched."""
     try:
         if disabled():
@@ -146,7 +162,7 @@ def notify(type, name="", email="", venue="", dates="", ref="", test=False, wait
         if is_test_traffic(name, email, test):
             log.info("AMYI ping %s skipped (test traffic)", type)
             return False
-        payload = build_payload(type, name, email, venue, dates, ref)
+        payload = build_payload(type, name, email, venue, dates, ref, phone, event, party, source)
         if not claim(payload):
             log.info("AMYI ping %s skipped (duplicate within 24h)", type)
             return False

@@ -349,12 +349,34 @@ class Intake:
                 userId="me", body={"raw": raw, "labelIds": ["INBOX", "UNREAD"]}).execute()
             self._seen.add(key)
         log.info("Posh order %s for %s -> night %s (%s)", key[0], key[2], night, how)
-        amyi.notify("posh_guest", name=payload.get("account_first_name") and
-                    f"{payload.get('account_first_name', '')} {payload.get('account_last_name', '')}".strip()
-                    or payload.get("account_name") or "",
-                    email=key[2], venue=payload.get("event_name") or "",
-                    dates=str(night or ""), ref=key[0] or key[1])
+        _ping_amyi(payload, key, night)
         return 200, "queued"
+
+
+def party_size(payload):
+    """Tickets on the order (sum of quantities when Posh sends them)."""
+    total = 0
+    for i in payload.get("items") or []:
+        try:
+            total += int(i.get("quantity") or 1)
+        except (TypeError, ValueError):
+            total += 1
+    return total or ""
+
+
+def _ping_amyi(payload, key, night):
+    """Every new Posh order (all events: Vegas, Drai's, Riot House Scottsdale,
+    Almost Famous) pings AMYI once, before any booking filter."""
+    name = (f"{payload.get('account_first_name', '')} {payload.get('account_last_name', '')}".strip()
+            or payload.get("account_name") or "")
+    event = payload.get("event_name") or ""
+    try:
+        venue = posh.venue_from_event(event) or ""
+    except Exception:
+        venue = ""
+    return amyi.notify("posh_guest", name=name, email=key[2], phone=payload.get("account_phone") or "",
+                       event=event, venue=venue or event, dates=str(night or ""),
+                       party=party_size(payload), source="posh", ref=key[0] or key[1])
 
 
 # --- Branded send (POST /send-branded) -------------------------------------
