@@ -1,0 +1,13 @@
+# Secrets — never commit
+token.json
+client_secret*.json
+credentials.json
+
+# Runtime output
+amy_records.jsonl
+
+__pycache__/
+*.pyc
+.venv/
+.env
+data/amyi_sent.json*
