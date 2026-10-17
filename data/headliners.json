@@ -1,7 +1,7 @@
 {
   "2026-10-07": {
     "Hakkasan Nightclub": "R&Bae Wednesdays",
-    "Marquee Nightclub": "Lowkey Lema",
+    "Marquee Nightclub": "Lema",
     "Palm Tree Beach Club": "D Miles"
   },
   "2026-10-08": {
@@ -74,18 +74,32 @@
     "OMNIA Nightclub": "Mikey Francis"
   },
   "2026-10-21": {
-    "Hakkasan Nightclub": "R&Bae Red"
+    "Hakkasan Nightclub": "R&Bae Red",
+    "Marquee Nightclub": "Lema"
   },
   "2026-10-22": {
     "Hakkasan Nightclub": "Vice"
   },
   "2026-10-23": {
     "Hakkasan Nightclub": "DJ Boof",
-    "JEWEL Nightclub": "D Miles"
+    "JEWEL Nightclub": "D Miles",
+    "Marquee Nightclub": "Benny Benassi",
+    "OMNIA Nightclub": "Steve Aoki"
   },
   "2026-10-24": {
     "Hakkasan Nightclub": "Ohgeesy",
-    "JEWEL Nightclub": "Lucky Lou"
+    "JEWEL Nightclub": "Lucky Lou",
+    "Marquee Nightclub": "Jonas Blue",
+    "OMNIA Nightclub": "Zedd"
+  },
+  "2026-10-25": {
+    "OMNIA Nightclub": "Yo Yolie"
+  },
+  "2026-10-26": {
+    "Marquee Nightclub": "Justin Credible"
+  },
+  "2026-10-27": {
+    "OMNIA Nightclub": "Alesso"
   },
   "2026-10-28": {
     "Hakkasan Nightclub": "R&Bae Halloween",
@@ -97,11 +111,22 @@
   "2026-10-30": {
     "Hakkasan Nightclub": "BigXthaPlug",
     "JEWEL Nightclub": "Stretch",
-    "Marquee Nightclub": "Illenium"
+    "Marquee Nightclub": "Illenium",
+    "OMNIA Nightclub": "Tiesto"
   },
   "2026-10-31": {
     "Hakkasan Nightclub": "Mustard",
     "JEWEL Nightclub": "Phoreyz",
-    "Marquee Nightclub": "Steve Aoki"
+    "Marquee Nightclub": "Steve Aoki",
+    "OMNIA Nightclub": "Martin Garrix"
+  },
+  "2026-11-01": {
+    "OMNIA Nightclub": "Yo Yolie"
+  },
+  "2026-11-02": {
+    "Marquee Nightclub": "Hot Import Nights"
+  },
+  "2026-11-03": {
+    "OMNIA Nightclub": "Steve Aoki"
   }
 }

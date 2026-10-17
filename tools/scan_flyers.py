@@ -24,13 +24,14 @@ def names(page, u):
     return page.locator("div._sl-file-name-text_mzi4c_1").evaluate_all("els=>els.map(e=>e.textContent.trim())")
 
 NOISE={"ss","glf","lv","omlv","mon","tue","wed","thu","fri","sat","sun","weekly","socials","nc","dc",
-       "dw","deseo","r","count","counthakkasan","d2d","dusk2dawn"}  # series/party prefixes, not the artist
+       "dw","deseo","r","count","counthakkasan","d2d","dusk2dawn","lowkey"}  # series/party prefixes, not the artist
 # Post-cleanup fixes for names the filename mangles (keyed on the lowercased
 # cleaned result). Extend as new garbles show up in the spot-check.
 ALIASES={"chaseb":"Chase B","mk":"MK","dj cla":"DJ CLA","yo yolie":"Yo Yolie",
-         "lowkey linconjesser":"Lincoln Jesser","benassi":"Benny Benassi","bigx":"BigXthaPlug",
+         "lowkey linconjesser":"Lincoln Jesser","linconjesser":"Lincoln Jesser",
+         "benassi":"Benny Benassi","bigx":"BigXthaPlug",
          "lowkey clubdecombat eclipse":"Club De Combat","clubdecombat eclipse":"Club De Combat",
-         "clubdecombat":"Club De Combat"}
+         "clubdecombat":"Club De Combat","martin garrrix":"Martin Garrix"}
 # Overview/lineup graphics that aren't a single artist (skipped in parse()).
 _SKIP_ART={"lineup","overview"}
 def clean_artist(s):
