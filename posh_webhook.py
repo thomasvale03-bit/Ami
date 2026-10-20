@@ -495,6 +495,136 @@ def send_branded(service, payload, _sleep=None):
 
 # --- HTTP server ------------------------------------------------------------
 
+# --- Website form intake (POST /webhooks/website) ---------------------------
+# Public browser form (GuestlistGo). No secret token: CORS origin allowlist,
+# honeypot, size + rate limits, strict validation. Off unless enabled.
+# Same subject/layout as the playmakerentertainment.com contact-form notice so
+# gmail_client.SEARCH_QUERY + parse_request pick it up unchanged.
+WEBSITE_SUBJECT = "New guest list request submission"
+WEBSITE_MAX_BODY = 16 * 1024
+WEBSITE_VENUES = {
+    "Las Vegas": {"OMNIA", "Hakkasan", "Marquee", "TAO", "JEWEL", "AYU", "Drai's After Hours"},
+    "Scottsdale": {"Almost Famous", "Riot House"},
+}
+WEBSITE_SOURCES = {"guestlistgo": "GuestlistGo"}
+_web_times, _web_lock = {}, threading.Lock()
+
+
+def website_enabled():
+    return os.environ.get("WEBSITE_FORM_ENABLED", "").strip() == "1"
+
+
+def website_origins():
+    raw = (os.environ.get("ALLOWED_ORIGINS") or os.environ.get("WEBSITE_FORM_ORIGINS")
+           or "https://guestlistgo.me,https://www.guestlistgo.me")
+    return {o.strip().rstrip("/") for o in raw.split(",") if o.strip()}
+
+
+def website_rate_ok(ip, now=None, per_ip=10, total=200):
+    now = now or datetime.now(timezone.utc).timestamp()
+    with _web_lock:
+        for k in list(_web_times):
+            _web_times[k] = [t for t in _web_times[k] if now - t < 3600]
+            if not _web_times[k]:
+                del _web_times[k]
+        if len(_web_times.get(ip, [])) >= per_ip or sum(map(len, _web_times.values())) >= total:
+            return False
+        _web_times.setdefault(ip, []).append(now)
+        return True
+
+
+def validate_website(p):
+    """Returns (clean_dict, None) or (None, error)."""
+    g = lambda k, n=200: str(p.get(k) or "").strip()[:n]
+    src = g("source", 40).lower()
+    if src not in WEBSITE_SOURCES:
+        return None, "unknown source"
+    first, last, email, city, venue, date = g("first_name", 60), g("last_name", 60), g("email", 120).lower(), g("city"), g("venue"), g("date", 10)
+    phone = re.sub(r"[^\d+]", "", g("phone", 30))
+    if not (first and last):
+        return None, "name required"
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]{2,}", email):
+        return None, "bad email"
+    if not 10 <= len(re.sub(r"\D", "", phone)) <= 15:
+        return None, "bad phone"
+    if venue not in WEBSITE_VENUES.get(city, ()):
+        return None, "bad city/venue"
+    try:
+        night = datetime.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        return None, "bad date"
+    today = datetime.now(VEGAS).date()
+    if not today <= night <= today + timedelta(days=90):
+        return None, "date out of range"
+    try:
+        women, men = int(p.get("women") or 0), int(p.get("men") or 0)
+    except (TypeError, ValueError):
+        return None, "bad party"
+    if not (0 <= women <= 30 and 0 <= men <= 30 and women + men >= 1):
+        return None, "bad party"
+    if p.get("age_21_confirmed") is not True:
+        return None, "21+ not confirmed"
+    ig = re.sub(r"^@", "", g("instagram", 31))
+    if ig and not re.fullmatch(r"[A-Za-z0-9._]{1,30}", ig):
+        ig = ""
+    return {"source": src, "promoter": WEBSITE_SOURCES[src], "first_name": first, "last_name": last,
+            "name": f"{first} {last}", "email": email, "phone": phone, "city": city, "venue": venue,
+            "event": f"{venue} | Guest List", "night": night, "women": women, "men": men,
+            "party": women + men, "instagram": ig, "notes": g("notes", 500),
+            "ref": re.sub(r"[^\w-]", "", g("ref", 40))}, None
+
+
+def to_website_text(c):
+    """Mirror of the playmakerentertainment.com contact-form notice
+    (tests/fixtures/new_form.txt), with Promoter = GuestlistGo and an extra
+    Source line so Amy brands the guest side as GuestlistGo."""
+    night = c["night"].isoformat()
+    comments = c["notes"]
+    if c["instagram"]:
+        comments = (comments + " | " if comments else "") + "Instagram: @" + c["instagram"]
+    return "\n".join([
+        f" has received a new message -", "", f"From: {c['name']}", "", f"Email: {c['email']}", "",
+        "Submitted From: guestlistgo.me", "", "---", "",
+        "Message: New guest list request submission", "",
+        f"Full name: {c['name']}", f"Email: {c['email']}", f"Phone: {c['phone']}", "ZIP code:",
+        f"Visit start date: {night}", f"Visit end date: {night}",
+        f"Requested venues: {c['venue']}",
+        f"Female guests: {c['women']}", f"Male guests: {c['men']}",
+        f"Promoter first name: {c['promoter']}", "Promoter last name:",
+        f"Additional comments: {comments.replace(chr(10), ' ')}",
+        "Authorization accepted: YES",
+        f"Originating page: GuestlistGo {c['city']} ({c['venue']})",
+        f"Source: {c['source']}", f"Ref: {c['ref']}",
+        f"Submission date and time: {datetime.now(VEGAS).strftime('%m/%d/%Y, %I:%M:%S %p')} PT",
+        "", "---", "", "This message came from the GuestlistGo website form (guestlistgo.me)",
+    ])
+
+
+def accept_website(intake, payload):
+    clean, err = validate_website(payload)
+    if err:
+        return 400, err
+    key = ("web", clean["ref"] or clean["email"], clean["night"].isoformat(), clean["venue"])
+    with intake._lock:
+        if key in intake._seen:
+            return 200, "duplicate (this run)"
+        if intake.dry_run:
+            intake._seen.add(key)
+            log.info("[dry run] would add website signup %s:\n%s", key, to_website_text(clean))
+            return 200, "dry run"
+        msg = EmailMessage()
+        msg["To"] = intake.intake_email
+        msg["From"] = intake.intake_email
+        msg["Subject"] = f"{WEBSITE_SUBJECT} - GuestlistGo {clean['venue']} {clean['night'].isoformat()}"
+        msg.set_content(to_website_text(clean))
+        import base64
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        intake.service().users().messages().insert(
+            userId="me", body={"raw": raw, "labelIds": ["INBOX", "UNREAD"]}).execute()
+        intake._seen.add(key)
+    return 200, "queued"
+
+
 def make_handler(intake, store=None):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code, ctype, data):
@@ -589,7 +719,60 @@ def make_handler(intake, store=None):
                 return self._reply(502, "send failed")
             self._reply(code, result)
 
+        def _cors(self):
+            origin = (self.headers.get("Origin") or "").rstrip("/")
+            return origin if origin in website_origins() else None
+
+        def do_OPTIONS(self):
+            origin = self._cors()
+            if urlparse(self.path).path.rstrip("/") != "/webhooks/website" or not origin or not website_enabled():
+                return self._reply(404, "not found")
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Max-Age", "600")
+            self.send_header("Vary", "Origin")
+            self.end_headers()
+
+        def _website(self):
+            if not website_enabled():
+                return self._reply(404, "not found")
+            origin = self._cors()
+            if not origin:
+                return self._reply(403, "origin not allowed")
+            ip = (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
+            if not website_rate_ok(ip):
+                return self._reply(429, "slow down")
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > WEBSITE_MAX_BODY:
+                return self._reply(400, "bad body")
+            try:
+                payload = json.loads(self.rfile.read(length).decode())
+                if not isinstance(payload, dict):
+                    raise ValueError
+            except ValueError:
+                return self._reply(400, "bad json")
+            if payload.get("company"):  # honeypot
+                code, text = 200, "ok"
+            else:
+                try:
+                    code, text = accept_website(intake, payload)
+                except Exception:
+                    log.exception("Website form failed")
+                    code, text = 500, "error"
+            data = json.dumps({"ok": code == 200, "result": text}).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.end_headers()
+            self.wfile.write(data)
+
         def do_POST(self):
+            if urlparse(self.path).path.rstrip("/") == "/webhooks/website":
+                return self._website()
             if urlparse(self.path).path.rstrip("/") == "/send-branded":
                 return self._send_branded()
             if urlparse(self.path).path.rstrip("/") == "/unsubscribe":  # RFC 8058 one-click

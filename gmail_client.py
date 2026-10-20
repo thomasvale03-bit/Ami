@@ -59,6 +59,8 @@ LABEL_TO_FIELD = {
     "originating page": "originating_page",
     "submission date and time": "submitted_at",
     "submission date": "submitted_at",
+    "source": "source",  # GuestlistGo form notices: "Source: guestlistgo"
+    "ref": "form_ref",
 }
 
 LINE_RE = re.compile(r"^[ \t]*([A-Za-z][A-Za-z \t\(\)/\-]*?)[ \t]*:[ \t]*(.*?)[ \t]*$", re.MULTILINE)
@@ -298,6 +300,12 @@ def parse_request(message_id, body_text):
 
     promoter = f"{fields.pop('promoter_first', '')} {fields.pop('promoter_last', '')}".strip()
     fields["promoter"] = promoter or None
+    src = (fields.get("source") or "").strip().lower()
+    if src == "guestlistgo" or (promoter or "").lower() == "guestlistgo":
+        fields["source"] = "guestlistgo"
+        fields["brand"] = "GuestlistGo"  # guest-facing mail must be GuestlistGo-branded
+    else:
+        fields.pop("source", None)
 
     if fields.get("venues"):
         fields["venues"] = [

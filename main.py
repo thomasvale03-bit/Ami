@@ -280,6 +280,14 @@ def concierge_on():
     return os.environ.get("AMY_CONCIERGE", "").strip().lower() in ("1", "true", "yes")
 
 
+def is_guestlistgo(raw):
+    """GuestlistGo website sign-up (source guestlistgo / Promoter GuestlistGo).
+    Guest-facing mail for these must be GuestlistGo-branded and never mention
+    Playmaker; until confirmations@guestlistgo.me exists Amy sends the guest
+    nothing (team/AMYI flow unchanged)."""
+    return (raw or {}).get("source") == "guestlistgo"
+
+
 def guest_confirmation_on():
     """AMY_GUEST_CONFIRMATION=true: also email the guest "You're on the list"
     right away, before any TAO sign-up. Off by default (some lists close);
@@ -380,7 +388,10 @@ def concierge_handoff(service, message_id, raw, dry_run):
         print(f"[dry run] Jose sign-up to {rules.PLAYMAKER_EMAIL}:\n{tsub}\n{tbody}")
         return None
 
-    if guest_confirmation_on():
+    if is_guestlistgo(raw):
+        log.info("%s: GuestlistGo sign-up; Playmaker guest confirmation not sent "
+                 "(GuestlistGo-branded sender not set up yet)", message_id)
+    elif guest_confirmation_on():
         gmail_client.send_once(
             service, f"amy-confirm-{message_id}@playmakerentertainment.com",
             request["email"], gsub, gbody, sender=rules.SENDER_EMAIL, html=ghtml,
@@ -485,6 +496,9 @@ def send_signup_links(service, message_id, raw, dry_run):
         print(f"[dry run] guest links to {request['email']} (cc {rules.PLAYMAKER_EMAIL}):\n{subject}\n{body}")
         return None
 
+    if is_guestlistgo(raw):
+        log.info("%s: GuestlistGo sign-up; Playmaker guest links email not sent", message_id)
+        return gmail_client.PROCESSED_LABEL
     gmail_client.send_once(
         service, f"amy-links-{message_id}@playmakerentertainment.com",
         request["email"], subject, body, sender=rules.SENDER_EMAIL, cc=rules.PLAYMAKER_EMAIL)
@@ -707,6 +721,8 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
             print(f"[dry run] would email {request['email']} (cc {rules.PLAYMAKER_EMAIL}):")
             print(email["subject"])
             print(email["body"])
+        elif is_guestlistgo(raw):
+            log.info("%s: GuestlistGo sign-up; Playmaker confirmation not sent", message_id)
         else:
             gmail_client.send_once(
                 service, f"amy-confirm-{message_id}@playmakerentertainment.com",
