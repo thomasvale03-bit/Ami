@@ -506,7 +506,7 @@ WEBSITE_VENUES = {
     "Las Vegas": {"OMNIA", "Hakkasan", "Marquee", "TAO", "JEWEL", "AYU", "Drai's After Hours",
                   "Marquee Dayclub", "TAO Beach Dayclub", "OMNIA Dayclub", "Liquid Pool Lounge",
                   "Palm Tree Beach Club", "LAVO Party Brunch"},
-    "Scottsdale": {"Almost Famous", "Riot House", "Cake", "El Hefe"},
+    "Scottsdale": {"Almost Famous", "Riot House", "Cake", "El Hefe", "Maya Day Club", "Maya Night Club"},
 }
 WEBSITE_SOURCES = {"guestlistgo": "GuestlistGo", "playmaker": "Playmaker"}
 # Playmaker site (preview + production) is always allowed next to the env list.
