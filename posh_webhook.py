@@ -622,7 +622,24 @@ def accept_website(intake, payload):
         intake.service().users().messages().insert(
             userId="me", body={"raw": raw, "labelIds": ["INBOX", "UNREAD"]}).execute()
         intake._seen.add(key)
+        notify_team_website(intake.service(), clean, msg["Subject"])
     return 200, "queued"
+
+
+def notify_team_website(service, clean, subject):
+    """Also send the same notice to the team inbox (team@playmakerentertainment.com)
+    via Amy's normal send path. Best effort: a failure here never breaks intake."""
+    import gmail_client
+    from config import rules
+    tag = clean["ref"] or re.sub(r"[^\w-]", "", clean["email"])
+    try:
+        return gmail_client.send_once(
+            service, f"gg-web-{tag}-{clean['night'].isoformat()}@guestlistgo.me", rules.PLAYMAKER_EMAIL,
+            subject, to_website_text(clean), sender=rules.SENDER_EMAIL,
+            dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} subject:"{subject}" "Ref: {tag}"')
+    except Exception:
+        log.exception("Website form: team email to %s failed", rules.PLAYMAKER_EMAIL)
+        return False
 
 
 def make_handler(intake, store=None):

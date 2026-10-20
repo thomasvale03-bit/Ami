@@ -47,5 +47,40 @@ class WebsiteForm(unittest.TestCase):
             self.assertEqual(pw.website_origins(), {"https://guestlistgo.me", "https://www.guestlistgo.me"})
 
 
+class TeamNotice(unittest.TestCase):
+    def test_accept_inserts_and_emails_team(self):
+        from config import rules
+        svc = mock.MagicMock()
+        intake = mock.MagicMock(dry_run=False, intake_email="intake@example.com", _seen=set())
+        intake._lock = __import__("threading").Lock()
+        intake.service.return_value = svc
+        with mock.patch.object(gmail_client, "send_once", return_value=True) as so:
+            self.assertEqual(pw.accept_website(intake, payload(notes="Birthday")), (200, "queued"))
+        svc.users().messages().insert.assert_called_once()
+        so.assert_called_once()
+        a, k = so.call_args
+        self.assertEqual(a[2], "team@playmakerentertainment.com")
+        self.assertEqual(a[2], rules.PLAYMAKER_EMAIL)
+        self.assertTrue(a[3].startswith("New guest list request submission - GuestlistGo OMNIA "))
+        for line in ("Promoter first name: GuestlistGo", "Full name: TEST Guest", "Email: test@example.com",
+                     "Phone: 6025550100", "Requested venues: OMNIA", "Female guests: 2", "Male guests: 1",
+                     "Additional comments: Birthday", "Source: guestlistgo", "Ref: gg-123"):
+            self.assertIn(line, a[4])
+        self.assertEqual(k["sender"], rules.SENDER_EMAIL)
+
+    def test_team_failure_does_not_break_intake(self):
+        intake = mock.MagicMock(dry_run=False, intake_email="i@example.com", _seen=set())
+        intake._lock = __import__("threading").Lock()
+        with mock.patch.object(gmail_client, "send_once", side_effect=RuntimeError("boom")):
+            self.assertEqual(pw.accept_website(intake, payload()), (200, "queued"))
+
+    def test_dry_run_sends_nothing(self):
+        intake = mock.MagicMock(dry_run=True, _seen=set())
+        intake._lock = __import__("threading").Lock()
+        with mock.patch.object(gmail_client, "send_once") as so:
+            self.assertEqual(pw.accept_website(intake, payload()), (200, "dry run"))
+        so.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
