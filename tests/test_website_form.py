@@ -49,9 +49,58 @@ class WebsiteForm(unittest.TestCase):
 
     def test_origins_env(self):
         with mock.patch.dict(os.environ, {"ALLOWED_ORIGINS": "https://a.example, https://b.example/"}):
-            self.assertEqual(pw.website_origins(), {"https://a.example", "https://b.example"})
+            self.assertEqual(pw.website_origins(), {"https://a.example", "https://b.example"} | pw.PLAYMAKER_ORIGINS)
         with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(pw.website_origins(), {"https://guestlistgo.me", "https://www.guestlistgo.me"})
+            self.assertEqual(pw.website_origins(), {"https://guestlistgo.me", "https://www.guestlistgo.me"} | pw.PLAYMAKER_ORIGINS)
+
+
+class PlaymakerSource(unittest.TestCase):
+    def test_playmaker_parses_as_plain_playmaker_request(self):
+        import main
+        clean, err = pw.validate_website(payload(source="playmaker", ref="pm-1"))
+        self.assertIsNone(err)
+        text = pw.to_website_text(clean)
+        raw = gmail_client.parse_request("m1", text)
+        self.assertNotIn("source", raw)
+        self.assertNotIn("brand", raw)
+        self.assertIsNone(raw["promoter"])
+        self.assertFalse(main.is_guestlistgo(raw))
+        self.assertEqual(raw["venues"], ["OMNIA Nightclub"])
+        self.assertEqual(raw["start_date"], raw["end_date"])
+        self.assertNotIn("GuestlistGo", text)
+        self.assertNotIn("guestlistgo", text.lower())
+
+    def test_playmaker_date_range_and_lavo(self):
+        d0 = datetime.now(pw.VEGAS).date() + timedelta(days=3)
+        clean, err = pw.validate_website(payload(source="playmaker", venue="LAVO Party Brunch",
+                                                 date=d0.isoformat(), end_date=(d0 + timedelta(days=2)).isoformat()))
+        self.assertIsNone(err)
+        raw = gmail_client.parse_request("m", pw.to_website_text(clean))
+        self.assertEqual((raw["start_date"], raw["end_date"]), (d0.isoformat(), (d0 + timedelta(days=2)).isoformat()))
+        self.assertEqual(raw["venues"], ["LAVO Party Brunch"])
+
+    def test_bad_ranges(self):
+        d0 = datetime.now(pw.VEGAS).date() + timedelta(days=3)
+        for e in (d0 - timedelta(days=1), d0 + timedelta(days=14)):
+            self.assertEqual(pw.validate_website(payload(source="playmaker", date=d0.isoformat(),
+                                                         end_date=e.isoformat()))[1], "end date out of range")
+
+    def test_playmaker_origins_always_allowed(self):
+        with mock.patch.dict(os.environ, {"ALLOWED_ORIGINS": "https://guestlistgo.me"}):
+            for o in ("https://playmaker-web-production.up.railway.app", "https://playmakerentertainment.com",
+                      "https://www.playmakerentertainment.com", "https://guestlistgo.me"):
+                self.assertIn(o, pw.website_origins())
+
+    def test_playmaker_team_notice(self):
+        svc = mock.MagicMock()
+        intake = mock.MagicMock(dry_run=False, intake_email="intake@example.com", _seen=set())
+        intake._lock = __import__("threading").Lock()
+        intake.service.return_value = svc
+        with mock.patch.object(gmail_client, "send_once", return_value=True) as so:
+            self.assertEqual(pw.accept_website(intake, payload(source="playmaker", ref="pm-9")), (200, "queued"))
+        a, k = so.call_args
+        self.assertTrue(a[1].endswith("@playmakerentertainment.com"))
+        self.assertTrue(a[3].startswith("New guest list request submission - Playmaker OMNIA "))
 
 
 class TeamNotice(unittest.TestCase):

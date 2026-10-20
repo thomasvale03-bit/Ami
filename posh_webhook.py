@@ -505,10 +505,14 @@ WEBSITE_MAX_BODY = 16 * 1024
 WEBSITE_VENUES = {
     "Las Vegas": {"OMNIA", "Hakkasan", "Marquee", "TAO", "JEWEL", "AYU", "Drai's After Hours",
                   "Marquee Dayclub", "TAO Beach Dayclub", "OMNIA Dayclub", "Liquid Pool Lounge",
-                  "Palm Tree Beach Club"},
-    "Scottsdale": {"Almost Famous", "Riot House"},
+                  "Palm Tree Beach Club", "LAVO Party Brunch"},
+    "Scottsdale": {"Almost Famous", "Riot House", "Cake", "El Hefe"},
 }
-WEBSITE_SOURCES = {"guestlistgo": "GuestlistGo"}
+WEBSITE_SOURCES = {"guestlistgo": "GuestlistGo", "playmaker": "Playmaker"}
+# Playmaker site (preview + production) is always allowed next to the env list.
+PLAYMAKER_ORIGINS = {"https://playmaker-web-production.up.railway.app",
+                     "https://playmakerentertainment.com", "https://www.playmakerentertainment.com"}
+WEBSITE_MAX_NIGHTS = 14
 _web_times, _web_lock = {}, threading.Lock()
 
 
@@ -519,7 +523,7 @@ def website_enabled():
 def website_origins():
     raw = (os.environ.get("ALLOWED_ORIGINS") or os.environ.get("WEBSITE_FORM_ORIGINS")
            or "https://guestlistgo.me,https://www.guestlistgo.me")
-    return {o.strip().rstrip("/") for o in raw.split(",") if o.strip()}
+    return {o.strip().rstrip("/") for o in raw.split(",") if o.strip()} | PLAYMAKER_ORIGINS
 
 
 def website_rate_ok(ip, now=None, per_ip=10, total=200):
@@ -558,6 +562,14 @@ def validate_website(p):
     today = datetime.now(VEGAS).date()
     if not today <= night <= today + timedelta(days=90):
         return None, "date out of range"
+    end = night
+    if g("end_date", 10):
+        try:
+            end = datetime.strptime(g("end_date", 10), "%Y-%m-%d").date()
+        except ValueError:
+            return None, "bad end date"
+        if not night <= end <= today + timedelta(days=90) or (end - night).days >= WEBSITE_MAX_NIGHTS:
+            return None, "end date out of range"
     try:
         women, men = int(p.get("women") or 0), int(p.get("men") or 0)
     except (TypeError, ValueError):
@@ -571,34 +583,38 @@ def validate_website(p):
         ig = ""
     return {"source": src, "promoter": WEBSITE_SOURCES[src], "first_name": first, "last_name": last,
             "name": f"{first} {last}", "email": email, "phone": phone, "city": city, "venue": venue,
-            "event": f"{venue} | Guest List", "night": night, "women": women, "men": men,
+            "event": f"{venue} | Guest List", "night": night, "end": end, "women": women, "men": men,
             "party": women + men, "instagram": ig, "notes": g("notes", 500),
             "ref": re.sub(r"[^\w-]", "", g("ref", 40))}, None
 
 
 def to_website_text(c):
     """Mirror of the playmakerentertainment.com contact-form notice
-    (tests/fixtures/new_form.txt), with Promoter = GuestlistGo and an extra
-    Source line so Amy brands the guest side as GuestlistGo."""
-    night = c["night"].isoformat()
+    (tests/fixtures/new_form.txt). GuestlistGo: Promoter = GuestlistGo plus a
+    Source line so Amy brands the guest side as GuestlistGo. Playmaker: no
+    promoter, Source: playmaker (dropped by the parser), so Amy treats it
+    exactly like a playmakerentertainment.com notice (Playmaker branding)."""
+    night, end = c["night"].isoformat(), c.get("end", c["night"]).isoformat()
     comments = c["notes"]
     if c["instagram"]:
         comments = (comments + " | " if comments else "") + "Instagram: @" + c["instagram"]
+    pm = c["source"] == "playmaker"
+    site = "playmakerentertainment.com" if pm else "guestlistgo.me"
     return "\n".join([
         f" has received a new message -", "", f"From: {c['name']}", "", f"Email: {c['email']}", "",
-        "Submitted From: guestlistgo.me", "", "---", "",
+        f"Submitted From: {site}", "", "---", "",
         "Message: New guest list request submission", "",
         f"Full name: {c['name']}", f"Email: {c['email']}", f"Phone: {c['phone']}", "ZIP code:",
-        f"Visit start date: {night}", f"Visit end date: {night}",
+        f"Visit start date: {night}", f"Visit end date: {end}",
         f"Requested venues: {c['venue']}",
         f"Female guests: {c['women']}", f"Male guests: {c['men']}",
-        f"Promoter first name: {c['promoter']}", "Promoter last name:",
+        f"Promoter first name: {'' if pm else c['promoter']}", "Promoter last name:",
         f"Additional comments: {comments.replace(chr(10), ' ')}",
         "Authorization accepted: YES",
-        f"Originating page: GuestlistGo {c['city']} ({c['venue']})",
+        f"Originating page: {c['promoter']} {c['city']} ({c['venue']})",
         f"Source: {c['source']}", f"Ref: {c['ref']}",
         f"Submission date and time: {datetime.now(VEGAS).strftime('%m/%d/%Y, %I:%M:%S %p')} PT",
-        "", "---", "", "This message came from the GuestlistGo website form (guestlistgo.me)",
+        "", "---", "", f"This message came from the {c['promoter']} website form ({site})",
     ])
 
 
@@ -606,7 +622,7 @@ def accept_website(intake, payload):
     clean, err = validate_website(payload)
     if err:
         return 400, err
-    key = ("web", clean["ref"] or clean["email"], clean["night"].isoformat(), clean["venue"])
+    key = ("web", clean["ref"] or clean["email"], clean["night"].isoformat(), clean["end"].isoformat(), clean["venue"])
     with intake._lock:
         if key in intake._seen:
             return 200, "duplicate (this run)"
@@ -617,7 +633,7 @@ def accept_website(intake, payload):
         msg = EmailMessage()
         msg["To"] = intake.intake_email
         msg["From"] = intake.intake_email
-        msg["Subject"] = f"{WEBSITE_SUBJECT} - GuestlistGo {clean['venue']} {clean['night'].isoformat()}"
+        msg["Subject"] = f"{WEBSITE_SUBJECT} - {clean['promoter']} {clean['venue']} {clean['night'].isoformat()}"
         msg.set_content(to_website_text(clean))
         import base64
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
@@ -636,7 +652,8 @@ def notify_team_website(service, clean, subject):
     tag = clean["ref"] or re.sub(r"[^\w-]", "", clean["email"])
     try:
         return gmail_client.send_once(
-            service, f"gg-web-{tag}-{clean['night'].isoformat()}@guestlistgo.me", rules.PLAYMAKER_EMAIL,
+            service, (f"pm-web-{tag}-{clean['night'].isoformat()}@playmakerentertainment.com" if clean["source"] == "playmaker"
+             else f"gg-web-{tag}-{clean['night'].isoformat()}@guestlistgo.me"), rules.PLAYMAKER_EMAIL,
             subject, to_website_text(clean), sender=rules.SENDER_EMAIL,
             dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} subject:"{subject}" "Ref: {tag}"')
     except Exception:
