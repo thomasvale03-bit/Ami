@@ -40,6 +40,13 @@ class WebsiteForm(unittest.TestCase):
         self.assertEqual(pw.validate_website(payload(age_21_confirmed=False))[1], "21+ not confirmed")
         self.assertEqual(pw.validate_website(payload(venue="Nope"))[1], "bad city/venue")
 
+    def test_dayclubs_accepted_and_canonical(self):
+        for v in ("Marquee Dayclub", "TAO Beach Dayclub", "OMNIA Dayclub", "Liquid Pool Lounge", "Palm Tree Beach Club"):
+            clean, err = pw.validate_website(payload(venue=v))
+            self.assertIsNone(err, v)
+            raw = gmail_client.parse_request("m", pw.to_website_text(clean))
+            self.assertEqual(raw["venues"], [v])
+
     def test_origins_env(self):
         with mock.patch.dict(os.environ, {"ALLOWED_ORIGINS": "https://a.example, https://b.example/"}):
             self.assertEqual(pw.website_origins(), {"https://a.example", "https://b.example"})

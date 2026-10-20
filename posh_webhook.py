@@ -503,7 +503,9 @@ def send_branded(service, payload, _sleep=None):
 WEBSITE_SUBJECT = "New guest list request submission"
 WEBSITE_MAX_BODY = 16 * 1024
 WEBSITE_VENUES = {
-    "Las Vegas": {"OMNIA", "Hakkasan", "Marquee", "TAO", "JEWEL", "AYU", "Drai's After Hours"},
+    "Las Vegas": {"OMNIA", "Hakkasan", "Marquee", "TAO", "JEWEL", "AYU", "Drai's After Hours",
+                  "Marquee Dayclub", "TAO Beach Dayclub", "OMNIA Dayclub", "Liquid Pool Lounge",
+                  "Palm Tree Beach Club"},
     "Scottsdale": {"Almost Famous", "Riot House"},
 }
 WEBSITE_SOURCES = {"guestlistgo": "GuestlistGo"}
