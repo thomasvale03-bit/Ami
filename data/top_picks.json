@@ -1,8 +1,8 @@
 {
-  "week_start": "2026-10-13",
+  "week_start": "2026-10-20",
   "picks": [
-    {"date": "2026-10-17", "venue": "OMNIA Nightclub", "artist": "Zedd"},
-    {"date": "2026-10-16", "venue": "OMNIA Nightclub", "artist": "Steve Aoki"},
-    {"date": "2026-10-16", "venue": "JEWEL Nightclub", "artist": "Lucky Lou"}
+    {"date": "2026-10-25", "venue": "OMNIA Nightclub", "artist": "JAY-Z hosts Armand de Brignac 20th"},
+    {"date": "2026-10-24", "venue": "OMNIA Nightclub", "artist": "Zedd"},
+    {"date": "2026-10-23", "venue": "JEWEL Nightclub", "artist": "D-Miles"}
   ]
 }

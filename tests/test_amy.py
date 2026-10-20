@@ -1234,12 +1234,15 @@ class WeeklyLineupTests(unittest.TestCase):
         with mock.patch.dict(os.environ, e):
             main.send_weekly_lineup(api, "live", today=today, flyers_dir=d, **kw)
 
+    # Frozen picks for the Oct 13 test week, so updating data/ each week doesn't break these.
+    NEWSLETTER_DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "newsletter_2026-10-13")
+
     def test_html_content_and_rules(self):
         import tempfile
         from templates import weekly_newsletter as w
         with tempfile.TemporaryDirectory() as d:
             self._flyers(d)
-            subject, text, html, inline, files = w.build(self.WEDNESDAY, main.DATA_DIR, d, {})
+            subject, text, html, inline, files = w.build(self.WEDNESDAY, self.NEWSLETTER_DATA, d, {})
         self.assertIn("This Week in Vegas", subject)
         self.assertIn("Zedd", html); self.assertIn("OhGeesy", html); self.assertIn("Lucky Lou", html)
         self.assertIn("cid:lineup-nightclub", html); self.assertIn("cid:lineup-dayclub", html)
@@ -1265,7 +1268,7 @@ class WeeklyLineupTests(unittest.TestCase):
             for n in ("261013_OMNC_Justin-Credible_1080x1350.jpg", "261016_OMNC_Steve-Aoki_1080x1350.jpg",
                       "261012_MNC_Mon_Chase-B_1080x1350.jpg", "261020_OMNC_Mikey-Francis_1080x1350.jpg"):
                 open(os.path.join(d, n), "wb").write(b"x")
-            subject, text, html, inline, files = w.build(self.WEDNESDAY, main.DATA_DIR, d, {})
+            subject, text, html, inline, files = w.build(self.WEDNESDAY, self.NEWSLETTER_DATA, d, {})
         self.assertIn("Wednesday, October 14", subject)
         self.assertIn("Oct 13", html); self.assertIn("Oct 19", html)
         self.assertLess(html.index("Steve Aoki"), html.index("Zedd"))
