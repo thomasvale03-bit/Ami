@@ -37,8 +37,37 @@ EXCEPTION_LABEL = "Amy/Exception"
 SEARCH_QUERY = (
     '(subject:"New guest list request submission" OR subject:"Guest List Request" '
     'OR subject:"NEW POSH SIGNUP") '
-    f'newer_than:30d -in:trash -label:{PROCESSED_LABEL} -label:{EXCEPTION_LABEL}'
+    f'newer_than:30d -in:trash -label:{PROCESSED_LABEL} -label:{EXCEPTION_LABEL} '
+    # Amy's own team@ copy of a website sign-up (sent from this mailbox) is not a new request.
+    '-(from:info@playmakerentertainment.com to:team@playmakerentertainment.com) '
+    '-(from:me to:team@playmakerentertainment.com)'
 )
+
+
+def is_own_team_copy(msg):
+    """Amy's outgoing team@ copy of a website notice: sent from this mailbox
+    (SENT label, not in INBOX) to the team address. Never a new request.
+    GoDaddy Airo notices to Team@ arrive from GoDaddy into INBOX, so they pass."""
+    from config import rules
+    labels = set((msg or {}).get("labelIds") or [])
+    if "INBOX" in labels or "SENT" not in labels:
+        return False
+    hdrs = {h.get("name", "").lower(): h.get("value", "") for h in
+            ((msg or {}).get("payload") or {}).get("headers") or []}
+    return rules.PLAYMAKER_EMAIL.lower() in hdrs.get("to", "").lower()
+
+
+def website_ref_already_handled(service, ref, exclude_message_id):
+    """True if another notice carrying this website submission Ref was already
+    handled (labeled Amy/Processed or Amy/Exception)."""
+    if not ref:
+        return False
+    resp = service.users().messages().list(
+        userId="me",
+        q=f'"Ref: {ref}" (label:{PROCESSED_LABEL} OR label:{EXCEPTION_LABEL})',
+        maxResults=10,
+    ).execute()
+    return any(m["id"] != exclude_message_id for m in resp.get("messages", []))
 
 # Lowercased label -> internal field name. Older emails labeled the counts
 # "Female guests (free before 1am)", so counts are matched by prefix below.

@@ -597,6 +597,9 @@ def handle_message(service, message_id, dry_run, labels, allowlist=None):
         amyi.end_message()
 
 
+_WEBSITE_REFS_SEEN = set()  # website submission refs handled by this process
+
+
 def _handle_message(service, message_id, dry_run, labels, allowlist=None):
     """Process one request email end to end. Returns the outcome label, or
     None when test mode skips a request that isn't from an allowlisted
@@ -620,7 +623,15 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
         log.info("%s: source POSH, order %s, event %r, ticket %r", message_id, order or "(none)",
                  raw["posh"].get("event_name"), raw["posh"].get("ticket"))
     else:
+        if gmail_client.is_own_team_copy(msg):
+            log.info("%s: Amy's own team@ copy of a website notice; not a new request", message_id)
+            return gmail_client.PROCESSED_LABEL
         raw = gmail_client.parse_request(message_id, body)
+        ref = raw.get("form_ref")
+        if ref:
+            if ref in _WEBSITE_REFS_SEEN or gmail_client.website_ref_already_handled(service, ref, message_id):
+                log.info("%s: website submission %s was already processed; not booking it again", message_id, ref)
+                return gmail_client.PROCESSED_LABEL
 
     if allowlist is not None:
         guest = (raw.get("email") or "").lower()
@@ -628,6 +639,9 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
                                            and any(a in body.lower() for a in allowlist)):
             log.info("[test mode] leaving %s untouched (not from an allowlisted address)", message_id)
             return None
+
+    if raw.get("form_ref") and raw.get("source") != "Posh":
+        _WEBSITE_REFS_SEEN.add(raw["form_ref"])
 
     if raw.get("source") != "Posh" and not dry_run:
         amyi.defer_contact_form(name=raw.get("name", ""), email=raw.get("email", ""),

@@ -21,7 +21,7 @@ from config import rules
 
 JOB_VERSION = 1
 FIELDS = ("url", "first_name", "last_name", "email", "phone", "female_count",
-          "male_count", "billing_zip", "notes", "venue", "date", "event", "ref")
+          "male_count", "billing_zip", "notes", "venue", "date", "event", "ref", "promoter")
 
 
 def signup_mode():
@@ -49,11 +49,20 @@ def make_job(url, guest, venue=None, date=None, event=None, ref=None, notes=None
         "female_count": int(guest.get("female_count") or 0),
         "male_count": int(guest.get("male_count") or 0),
         "billing_zip": rules.zip_or_default(guest.get("billing_zip")),
-        "notes": notes or guest.get("notes") or "",
+        "notes": _with_promoter(notes or guest.get("notes") or "", guest.get("promoter")),
+        "promoter": (guest.get("promoter") or "").strip(),
         "venue": venue or "", "date": str(date or ""), "event": event or "", "ref": ref or "",
     }
     validate(job)
     return job
+
+
+def _with_promoter(notes, promoter):
+    """Credit the guest's promoter in the TAO sign-up notes (\"Promoter: X\")."""
+    promoter = (promoter or "").strip()
+    if not promoter or f"Promoter: {promoter}" in notes:
+        return notes
+    return f"Promoter: {promoter}" + (f" | {notes}" if notes else "")
 
 
 def validate(job):
@@ -93,6 +102,9 @@ def job_email(jobs, guest_name):
         "Cloudflare check, click it yourself. Amy then fills in and submits the form.",
         "",
     ]
+    promoters = sorted({j.get("promoter") for j in jobs if j.get("promoter")})
+    if promoters:
+        lines += [f"Promoter: {', '.join(promoters)}", ""]
     for job in jobs:
         party = f"{job['female_count']} women, {job['male_count']} men"
         lines += [f"{job['date']} — {job['venue'] or job['event']} — {party}",
