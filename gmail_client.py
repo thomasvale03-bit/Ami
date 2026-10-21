@@ -392,11 +392,11 @@ def set_labels(service, message_id, label_ids, add=(), remove=()):
 
 
 def build_message(to, subject, body, sender, cc=None, message_id=None, attachments=None, html=None,
-                  headers=None, inline_images=None):
+                  headers=None, inline_images=None, from_name="Playmaker Entertainment"):
     """attachments: list of file paths to attach (images). html: optional
     text/html alternative; body stays as the plain-text fallback."""
     msg = EmailMessage()
-    msg["From"] = f"Playmaker Entertainment <{sender}>"
+    msg["From"] = f"{from_name} <{sender}>"
     msg["To"] = to
     if cc:
         msg["Cc"] = cc

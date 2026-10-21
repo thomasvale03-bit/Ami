@@ -458,6 +458,9 @@ def _zoho_send(to, subject, text, html, sender):
     raise last
 
 
+GUESTLISTGO_FROM = "confirmations@guestlistgo.me"  # only extra sender allowed
+
+
 def send_branded(service, payload, _sleep=None):
     """Returns (status_code, result). payload: to, subject, html, text."""
     import time
@@ -472,13 +475,18 @@ def send_branded(service, payload, _sleep=None):
         if len(_branded_times) >= BRANDED_MAX_PER_HOUR:
             return 429, "branded send limit reached, try later"
         _branded_times.append(now)
-    sender = branded_from()
+    sender, from_name = branded_from(), None
+    requested = (payload.get("from") or "").strip().lower()
+    if requested == GUESTLISTGO_FROM:
+        sender, from_name = GUESTLISTGO_FROM, "GuestlistGo"  # Gmail send-as (relayed via Zoho SMTP)
+    elif requested:
+        return 400, "from not allowed"
     if _gmail_call(lambda: gmail_client.already_sent(service, f'to:{to} subject:"{subject}"'), _sleep=_sleep):
         return 200, "duplicate (already in Sent)"
     with _branded_lock:
         if (to.lower(), subject) in _zoho_sent:
             return 200, "duplicate (already in Sent)"
-    if zoho_configured():
+    if zoho_configured() and not from_name:
         try:
             mid = _zoho_send(to, subject, text, html, sender)
             with _branded_lock:
@@ -487,8 +495,9 @@ def send_branded(service, payload, _sleep=None):
             return 200, {"sent": True, "id": mid, "from": sender, "via": "zoho"}
         except Exception as e:  # noqa: BLE001
             log.warning("Branded zoho send failed (%s: %s); falling back to gmail", type(e).__name__, e)
-    resp = _gmail_call(lambda: service.users().messages().send(
-        userId="me", body=gmail_client.build_message(to, subject, text, sender, html=html)).execute(), _sleep=_sleep)
+    body = (gmail_client.build_message(to, subject, text, sender, html=html, from_name=from_name) if from_name
+            else gmail_client.build_message(to, subject, text, sender, html=html))
+    resp = _gmail_call(lambda: service.users().messages().send(userId="me", body=body).execute(), _sleep=_sleep)
     log.info("Branded email sent via gmail to %s from %s (id %s)", to, sender, (resp or {}).get("id"))
     return 200, {"sent": True, "id": (resp or {}).get("id"), "from": sender, "via": "gmail"}
 
