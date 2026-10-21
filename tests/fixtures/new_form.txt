@@ -1,0 +1,36 @@
+ has received a new message -
+
+From: Jane Sample
+
+Email: jane.sample@example.com
+
+Submitted From:
+
+---
+
+Message: New guest list request submission
+
+Full name: Jane Sample
+Email: jane.sample@example.com
+Phone: 6025550100
+ZIP code: 85001
+Visit start date: 2026-10-30
+Visit end date: 2026-10-31
+Requested venues: Omnia Nightclub
+Female guests: 2
+Male guests: 1
+Promoter first name:
+Promoter last name:
+Additional comments:
+Authorization accepted: YES
+Originating page: OMNIA Guest List Page
+Submission date and time: 09/28/2026, 03:47:46 AM PT
+
+---
+
+Open Airo Inbox: https://airo-builder.godaddy.com/develop/x?view=inbox&ref=email
+
+This message came from your contact form, Playmaker Entertainment
+
+----------
+Sent via Airo

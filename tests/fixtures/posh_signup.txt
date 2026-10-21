@@ -1,0 +1,20 @@
+NEW POSH CLIENT
+
+CLIENT INFORMATION
+Name:Jane Sample
+ Email: jane.sample@example.com
+Phone: +16025550100
+
+EVENT INFORMATION
+Event:Playmaker Tuesdays at OMNIA
+Event Date: 2026-10-07T05:30:00.000Z
+Ticket: Ladies Guest List
+
+ORDER INFORMATION
+Order Number: 1001
+Promo Code: 
+Tracking Link: playmaker
+Date Purchased: 2026-09-28T14:19:17.996Z
+
+SOURCE: POSH
+

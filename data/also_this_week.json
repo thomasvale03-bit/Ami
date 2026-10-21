@@ -1,0 +1,13 @@
+{
+  "week_start": "2026-10-20",
+  "note": "Verified Oct 20 from TAO's ALL VENUE WEEKLY ASSETS Dropbox (Oct 14-20 and Oct 21-27 folders; official Tue-Mon week Oct 20-26): TGH Weekly Lineup Nightlife (no separate Daylife lineup this week; dayclub slot uses the Marquee Dayclub Dome Week 4 flyer) plus each venue's per-show flyers. TAO is closed Sun Oct 25. Picks are removed automatically.",
+  "nights": [
+    {"date": "2026-10-20", "events": [["OMNIA", "Mikey Francis"]]},
+    {"date": "2026-10-21", "events": [["Hakkasan", "R&Bae Wednesdays w/ DJ Franzen"], ["Marquee", "lowKEY: Lema"]]},
+    {"date": "2026-10-22", "events": [["TAO", "Worship Thursdays: E-Rock"], ["Hakkasan", "DJ Vice"], ["Marquee Dayclub Dome", "Greg Lopez"]]},
+    {"date": "2026-10-23", "events": [["OMNIA", "Steve Aoki"], ["Marquee", "Benny Benassi"], ["JEWEL", "D-Miles"], ["TAO", "Al Tamar"], ["Hakkasan", "DJ Boof"], ["Marquee Dayclub Dome", "CLA"]]},
+    {"date": "2026-10-24", "events": [["OMNIA", "Zedd"], ["Marquee", "Jonas Blue"], ["Hakkasan", "OhGeesy"], ["JEWEL", "Lucky Lou"], ["TAO", "Beatbreaker"], ["Marquee Dayclub Dome", "Laidback Luke Birthday Celebration"], ["LAVO Party Brunch", "Every Saturday"]]},
+    {"date": "2026-10-25", "events": [["OMNIA", "JAY-Z hosts Armand de Brignac 20th"], ["OMNIA", "Deseo Latin Sundays: Yo Yolie"], ["Marquee Dayclub Dome", "DJ Shift"]]},
+    {"date": "2026-10-26", "events": [["Marquee", "Marquee Mondays: Justin Credible"], ["Marquee Dayclub Dome", "Cable"]]}
+  ]
+}
