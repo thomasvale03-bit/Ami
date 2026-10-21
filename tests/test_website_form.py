@@ -79,6 +79,28 @@ class PlaymakerSource(unittest.TestCase):
         self.assertEqual((raw["start_date"], raw["end_date"]), (d0.isoformat(), (d0 + timedelta(days=2)).isoformat()))
         self.assertEqual(raw["venues"], ["LAVO Party Brunch"])
 
+    def test_playmaker_promoter_credited(self):
+        clean, _ = pw.validate_website(payload(source="playmaker", promoter="  Jose   Rivera "))
+        text = pw.to_website_text(clean)
+        self.assertIn("Promoter first name: Jose", text)
+        self.assertIn("Promoter last name: Rivera", text)
+        raw = gmail_client.parse_request("m", text)
+        self.assertEqual(raw["promoter"], "Jose Rivera")
+        self.assertNotIn("brand", raw)
+        clean, _ = pw.validate_website(payload(source="playmaker", promoter="Mike"))
+        self.assertEqual(gmail_client.parse_request("m", pw.to_website_text(clean))["promoter"], "Mike")
+
+    def test_playmaker_blank_or_guestlistgo_promoter_is_none(self):
+        for pr in ("", "   ", "GuestlistGo", "guestlist go"):
+            clean, _ = pw.validate_website(payload(source="playmaker", promoter=pr))
+            raw = gmail_client.parse_request("m", pw.to_website_text(clean))
+            self.assertIsNone(raw["promoter"], pr)
+            self.assertNotIn("brand", raw)
+
+    def test_guestlistgo_ignores_promoter_field(self):
+        clean, _ = pw.validate_website(payload(promoter="Someone"))
+        self.assertEqual(gmail_client.parse_request("m", pw.to_website_text(clean))["promoter"], "GuestlistGo")
+
     def test_bad_ranges(self):
         d0 = datetime.now(pw.VEGAS).date() + timedelta(days=3)
         for e in (d0 - timedelta(days=1), d0 + timedelta(days=14)):

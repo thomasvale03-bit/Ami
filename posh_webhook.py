@@ -578,14 +578,24 @@ def validate_website(p):
         return None, "bad party"
     if p.get("age_21_confirmed") is not True:
         return None, "21+ not confirmed"
+    promo = re.sub(r"\s+", " ", re.sub(r"[^\w .'&-]", "", g("promoter", 60))).strip()
+    if src != "playmaker" or promo.lower().replace(" ", "") == "guestlistgo":
+        promo = ""  # GuestlistGo keeps its fixed promoter; never let a guest pick the GuestlistGo brand
     ig = re.sub(r"^@", "", g("instagram", 31))
     if ig and not re.fullmatch(r"[A-Za-z0-9._]{1,30}", ig):
         ig = ""
     return {"source": src, "promoter": WEBSITE_SOURCES[src], "first_name": first, "last_name": last,
             "name": f"{first} {last}", "email": email, "phone": phone, "city": city, "venue": venue,
             "event": f"{venue} | Guest List", "night": night, "end": end, "women": women, "men": men,
-            "party": women + men, "instagram": ig, "notes": g("notes", 500),
+            "party": women + men, "instagram": ig, "promoter_name": promo, "notes": g("notes", 500),
             "ref": re.sub(r"[^\w-]", "", g("ref", 40))}, None
+
+
+def _promoter_lines(c):
+    """Playmaker: the guest's optional promoter, split like the Airo form
+    (first word / rest). Blank stays blank (no promoter)."""
+    parts = (c.get("promoter_name") or "").split(" ", 1)
+    return [f"Promoter first name: {parts[0]}", f"Promoter last name: {parts[1] if len(parts) > 1 else ''}"]
 
 
 def to_website_text(c):
@@ -608,7 +618,7 @@ def to_website_text(c):
         f"Visit start date: {night}", f"Visit end date: {end}",
         f"Requested venues: {c['venue']}",
         f"Female guests: {c['women']}", f"Male guests: {c['men']}",
-        f"Promoter first name: {'' if pm else c['promoter']}", "Promoter last name:",
+        *(_promoter_lines(c) if pm else [f"Promoter first name: {c['promoter']}", "Promoter last name:"]),
         f"Additional comments: {comments.replace(chr(10), ' ')}",
         "Authorization accepted: YES",
         f"Originating page: {c['promoter']} {c['city']} ({c['venue']})",
