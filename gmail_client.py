@@ -127,6 +127,13 @@ def get_service(token_path="token.json"):
     return build("gmail", "v1", credentials=creds)
 
 
+def is_rate_limited(e):
+    """True for Gmail per-minute quota errors (403 rateLimitExceeded / 429)."""
+    status = getattr(getattr(e, "resp", None), "status", None)
+    return status == 429 or (status == 403 and ("rateLimitExceeded" in str(e) or "Quota exceeded" in str(e)
+                                                 or "userRateLimitExceeded" in str(e)))
+
+
 def get_account_email(service, attempts=6, base_delay=5.0, _sleep=None):
     """Startup profile check. Retries Gmail per-minute quota errors (403/429
     rateLimitExceeded) with backoff instead of crashing, which made Railway
@@ -235,11 +242,17 @@ def _resolve_date(month_name, day, reference):
     return None
 
 
-def recent_confirmations(service, days=45):
+_CONFIRMATION_CACHE = {}  # message id -> parsed confirmation (sent mail never changes)
+
+
+def recent_confirmations(service, days=45, cache=None):
     """Guest confirmations Amy sent recently, for the 7-day follow-up:
     [{"id", "to", "first_name", "venues", "last_night"}]. Reads the clubs and
     the guest's last night out of the email body (the concierge confirmation
-    subject carries no dates)."""
+    subject carries no dates). Parsed messages are cached by id so each pass
+    only fetches new confirmations (re-reading all of them every cycle used up
+    the Gmail per-minute quota and broke the website form)."""
+    cache = _CONFIRMATION_CACHE if cache is None else cache
     resp = service.users().messages().list(
         userId="me",
         q=(f'in:sent (subject:"{CONFIRMATION_SUBJECT_CONCIERGE}" OR '
@@ -247,6 +260,9 @@ def recent_confirmations(service, days=45):
     ).execute()
     out = []
     for ref in resp.get("messages", []):
+        if ref["id"] in cache:
+            out.append(cache[ref["id"]])
+            continue
         msg = service.users().messages().get(
             userId="me", id=ref["id"], format="metadata", metadataHeaders=["To"],
         ).execute()
@@ -259,9 +275,11 @@ def recent_confirmations(service, days=45):
         dates = [d for d in (_resolve_date(m, day, sent)
                              for _wd, m, day in re.findall(r"([A-Z][a-z]+), ([A-Z][a-z]+) (\d{1,2})", body))
                  if d]
-        out.append({"id": ref["id"], "to": headers.get("to", ""),
-                    "first_name": first.group(1) if first else "",
-                    "venues": venues, "last_night": max(dates) if dates else None})
+        item = {"id": ref["id"], "to": headers.get("to", ""),
+                "first_name": first.group(1) if first else "",
+                "venues": venues, "last_night": max(dates) if dates else None}
+        cache[ref["id"]] = item
+        out.append(item)
     return out
 
 

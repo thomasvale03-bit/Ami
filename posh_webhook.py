@@ -628,11 +628,70 @@ def to_website_text(c):
     ])
 
 
-def accept_website(intake, payload):
+WEBSITE_RETRY_DELAYS = (1.0, 2.0, 4.0)
+
+
+def pending_dir():
+    """Where website sign-ups wait when Gmail is rate limited. Set
+    AMY_PENDING_DIR to a Railway volume path so they survive redeploys."""
+    d = os.environ.get("AMY_PENDING_DIR") or ("/data/pending" if os.path.isdir("/data") else
+                                              os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "pending"))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _pending_name(key):
+    return re.sub(r"[^\w.-]", "_", "-".join(key))[:200] + ".json"
+
+
+def _delivered_path():
+    return os.path.join(pending_dir(), "delivered.txt")
+
+
+def _delivered(key):
+    try:
+        with open(_delivered_path()) as fh:
+            return "|".join(key) in {line.strip() for line in fh}
+    except FileNotFoundError:
+        return False
+
+
+def _mark_delivered(key):
+    with open(_delivered_path(), "a") as fh:
+        fh.write("|".join(key) + "\n")
+
+
+def _website_key(clean):
+    return ("web", clean["ref"] or clean["email"], clean["night"].isoformat(), clean["end"].isoformat(), clean["venue"])
+
+
+def _deliver_website(intake, clean):
+    msg = EmailMessage()
+    msg["To"] = intake.intake_email
+    msg["From"] = intake.intake_email
+    msg["Subject"] = f"{WEBSITE_SUBJECT} - {clean['promoter']} {clean['venue']} {clean['night'].isoformat()}"
+    msg.set_content(to_website_text(clean))
+    import base64
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    intake.service().users().messages().insert(
+        userId="me", body={"raw": raw, "labelIds": ["INBOX", "UNREAD"]}).execute()
+    key = _website_key(clean)
+    intake._seen.add(key)
+    try:
+        _mark_delivered(key)
+    except OSError:
+        log.exception("Website form: could not record delivered %s", key)
+    notify_team_website(intake.service(), clean, msg["Subject"])
+
+
+def accept_website(intake, payload, _sleep=None):
+    import time
+    import gmail_client
+    _sleep = _sleep or time.sleep
     clean, err = validate_website(payload)
     if err:
         return 400, err
-    key = ("web", clean["ref"] or clean["email"], clean["night"].isoformat(), clean["end"].isoformat(), clean["venue"])
+    key = _website_key(clean)
     with intake._lock:
         if key in intake._seen:
             return 200, "duplicate (this run)"
@@ -640,18 +699,64 @@ def accept_website(intake, payload):
             intake._seen.add(key)
             log.info("[dry run] would add website signup %s:\n%s", key, to_website_text(clean))
             return 200, "dry run"
-        msg = EmailMessage()
-        msg["To"] = intake.intake_email
-        msg["From"] = intake.intake_email
-        msg["Subject"] = f"{WEBSITE_SUBJECT} - {clean['promoter']} {clean['venue']} {clean['night'].isoformat()}"
-        msg.set_content(to_website_text(clean))
-        import base64
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-        intake.service().users().messages().insert(
-            userId="me", body={"raw": raw, "labelIds": ["INBOX", "UNREAD"]}).execute()
-        intake._seen.add(key)
-        notify_team_website(intake.service(), clean, msg["Subject"])
-    return 200, "queued"
+        if _delivered(key):
+            intake._seen.add(key)
+            return 200, "duplicate"
+        path = os.path.join(pending_dir(), _pending_name(key))
+        if os.path.exists(path):
+            return 200, "queued (pending)"
+        for i, delay in enumerate((0.0,) + WEBSITE_RETRY_DELAYS):
+            if delay:
+                _sleep(delay)
+            try:
+                _deliver_website(intake, clean)
+                return 200, "queued"
+            except Exception as e:
+                if not gmail_client.is_rate_limited(e):
+                    raise
+                log.warning("Website form: Gmail rate limited (%d/%d) for %s", i + 1, len(WEBSITE_RETRY_DELAYS) + 1, key)
+        with open(path + ".tmp", "w") as fh:
+            json.dump({"key": list(key), "payload": payload, "saved": datetime.now(timezone.utc).isoformat()}, fh)
+        os.replace(path + ".tmp", path)
+        log.warning("Website form: saved %s for retry (Gmail rate limited)", key)
+        return 200, "queued (pending)"
+
+
+def retry_pending_website(intake):
+    """Deliver sign-ups saved while Gmail was rate limited. Dedupe-safe:
+    a key (pm- ref + night + venue) already delivered is just cleared.
+    Returns (delivered, left)."""
+    import gmail_client
+    done = left = 0
+    d = pending_dir()
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(d, name)
+        with intake._lock:
+            try:
+                with open(path) as fh:
+                    item = json.load(fh)
+                clean, err = validate_website(item["payload"])
+                if err:
+                    log.error("Website form: dropping invalid pending %s: %s", name, err)
+                    os.remove(path)
+                    continue
+                key = _website_key(clean)
+                if key in intake._seen or _delivered(key):
+                    os.remove(path)
+                    continue
+                _deliver_website(intake, clean)
+                os.remove(path)
+                done += 1
+                log.info("Website form: delivered pending %s", key)
+            except Exception as e:
+                left += 1
+                if gmail_client.is_rate_limited(e):
+                    log.warning("Website form: still rate limited; %s waits for next cycle", name)
+                    break
+                log.exception("Website form: pending %s failed", name)
+    return done, left
 
 
 def notify_team_website(service, clean, subject):

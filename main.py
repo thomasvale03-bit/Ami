@@ -1162,17 +1162,25 @@ def main():
         except Exception:
             log.exception("SpeakeasyGo test run failed")
 
+    intake = None
     if args.loop or os.environ.get("PORT"):
         try:
-            posh_webhook.serve(posh_webhook.Intake(gmail_client.get_service, rules.INTAKE_EMAIL,
-                                                   dry_run=mode == "dry-run"), store=newsletter_store())
+            intake = posh_webhook.Intake(gmail_client.get_service, rules.INTAKE_EMAIL, dry_run=mode == "dry-run")
+            posh_webhook.serve(intake, store=newsletter_store())
         except Exception:
             log.exception("Posh webhook server failed to start; inbox loop continues")
 
     poll_seconds = max(int(os.environ.get("AMY_POLL_SECONDS", "120")), 30)
-    last_follow_up_check = 0.0
+    follow_up_every = max(_int_env("FOLLOW_UP_INTERVAL_SECONDS", 600), 300)
+    follow_up_backoff = max(_int_env("FOLLOW_UP_RATE_LIMIT_BACKOFF_SECONDS", 900), 300)
+    next_follow_up = 0.0
     last_lineup_check = 0.0
     while True:
+        if intake is not None:
+            try:
+                posh_webhook.retry_pending_website(intake)
+            except Exception:
+                log.exception("Pending website retry failed; will retry next cycle")
         try:
             run_once(service, mode, labels, allowlist, start_after)
         except Exception:
@@ -1196,13 +1204,17 @@ def main():
             # Follow-ups are ON by default now (wording approved, dedupe fixed,
             # sending from info@). Set FOLLOW_UPS_ENABLED=false in Railway to pause.
             follow_ups_on = os.environ.get("FOLLOW_UPS_ENABLED", "true").strip().lower() in ("1", "true", "yes")
-            if follow_ups_on and time.time() - last_follow_up_check >= 3600:  # hourly is plenty
+            if follow_ups_on and time.time() >= next_follow_up:  # every ~10 min
+                next_follow_up = time.time() + follow_up_every
                 send_follow_ups(service, mode, allowlist)
-                last_follow_up_check = time.time()
-        except Exception:
-            if not args.loop:
+        except Exception as e:
+            if gmail_client.is_rate_limited(e):
+                next_follow_up = time.time() + follow_up_backoff
+                log.warning("Follow-up pass rate limited by Gmail; backing off %ds", follow_up_backoff)
+            elif not args.loop:
                 raise
-            log.exception("Follow-up pass failed; will retry next cycle")
+            else:
+                log.exception("Follow-up pass failed; will retry next cycle")
         if not args.loop:
             break
         tao_portal.reset_catalog()  # fresh promoter-page listings every cycle

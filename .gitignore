@@ -11,3 +11,4 @@ __pycache__/
 .venv/
 .env
 data/amyi_sent.json*
+data/pending/
