@@ -242,7 +242,46 @@ def _resolve_date(month_name, day, reference):
     return None
 
 
-_CONFIRMATION_CACHE = {}  # message id -> parsed confirmation (sent mail never changes)
+_CONFIRMATION_CACHE = None  # message id -> parsed confirmation (sent mail never changes)
+
+
+def _cache_path():
+    """Persist on the Railway volume (/data) so restarts don't re-read every
+    confirmation. AMY_CACHE_DIR overrides; no /data -> memory only."""
+    import os
+    d = os.environ.get("AMY_CACHE_DIR") or ("/data" if os.path.isdir("/data") else "")
+    return os.path.join(d, "confirmation_cache.json") if d else ""
+
+
+def _load_cache():
+    import json
+    path = _cache_path()
+    if path:
+        try:
+            with open(path) as fh:
+                raw = json.load(fh)
+            return {k: dict(v, last_night=date.fromisoformat(v["last_night"]) if v.get("last_night") else None)
+                    for k, v in raw.items()}
+        except FileNotFoundError:
+            pass
+        except Exception:  # noqa: BLE001 - a bad cache just means re-reading
+            log.exception("Ignoring unreadable confirmation cache %s", path)
+    return {}
+
+
+def _save_cache(cache):
+    import json, os
+    path = _cache_path()
+    if not path:
+        return
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump({k: dict(v, last_night=v["last_night"].isoformat() if v.get("last_night") else None)
+                       for k, v in cache.items()}, fh)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001
+        log.exception("Could not save confirmation cache %s", path)
 
 
 def recent_confirmations(service, days=45, cache=None):
@@ -252,7 +291,20 @@ def recent_confirmations(service, days=45, cache=None):
     subject carries no dates). Parsed messages are cached by id so each pass
     only fetches new confirmations (re-reading all of them every cycle used up
     the Gmail per-minute quota and broke the website form)."""
-    cache = _CONFIRMATION_CACHE if cache is None else cache
+    global _CONFIRMATION_CACHE
+    persist = cache is None
+    if persist:
+        if _CONFIRMATION_CACHE is None:
+            _CONFIRMATION_CACHE = _load_cache()
+        cache = _CONFIRMATION_CACHE
+    try:
+        return _recent_confirmations(service, days, cache)
+    finally:
+        if persist:
+            _save_cache(cache)  # keep progress even when Gmail rate limits mid-pass
+
+
+def _recent_confirmations(service, days, cache):
     resp = service.users().messages().list(
         userId="me",
         q=(f'in:sent (subject:"{CONFIRMATION_SUBJECT_CONCIERGE}" OR '

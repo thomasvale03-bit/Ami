@@ -69,3 +69,24 @@ def test_confirmations_cached_by_id():
 def test_is_rate_limited():
     assert gmail_client.is_rate_limited(_err(403)) and gmail_client.is_rate_limited(_err(429))
     assert not gmail_client.is_rate_limited(_err(500)) and not gmail_client.is_rate_limited(ValueError())
+
+
+def test_confirmation_cache_persists_across_restart(tmp_path):
+    from datetime import date
+    svc = mock.MagicMock()
+    svc.users().messages().list().execute.return_value = {"messages": [{"id": "m1"}, {"id": "m2"}]}
+    svc.users().messages().get().execute.side_effect = [
+        {"payload": {"headers": [{"name": "To", "value": "a@b.c"}]}, "internalDate": "1792000000000"}, _err()]
+    with mock.patch.object(gmail_client, "get_plain_text_body", return_value=(None, "Hi Al, Friday, October 23")):
+        import pytest
+        with pytest.raises(HttpError):
+            gmail_client.recent_confirmations(svc)  # rate limited after m1; m1 still saved
+    assert (tmp_path / "confirmation_cache.json").exists()
+    gmail_client._CONFIRMATION_CACHE = None  # simulate restart
+    svc.users().messages().get().execute.side_effect = None
+    svc.users().messages().get().execute.return_value = {"payload": {"headers": []}, "internalDate": "0"}
+    with mock.patch.object(gmail_client, "get_plain_text_body", return_value=(None, "")) as g:
+        out = gmail_client.recent_confirmations(svc)
+    assert g.call_count == 1  # only m2 fetched
+    m1 = [o for o in out if o["id"] == "m1"][0]
+    assert m1["to"] == "a@b.c" and isinstance(m1["last_night"], date)
