@@ -769,9 +769,8 @@ def last_night_from_subject(subject):
         return None
 
 
-# Matches every follow-up wording used so far.
-FOLLOW_UP_SEARCH = ('(subject:"Until next time" OR subject:"See you next time in Vegas" '
-                    'OR subject:"Hope you had fun in Vegas")')
+# Matches every follow-up wording used so far (Vegas and Scottsdale).
+FOLLOW_UP_SEARCH = gmail_client.FOLLOW_UP_SEARCH
 
 
 _NEWSLETTER_STORE = None
@@ -802,15 +801,36 @@ def send_follow_ups(service, mode, allowlist=None, today=None, store=None):
     cap = _int_env("FOLLOW_UP_MAX_PER_CYCLE", 5)
     late = _int_env("FOLLOW_UP_MAX_LATE_DAYS", 7)
     sent = deferred = 0
-    seen = set()
+    merged = {}
     for conf in gmail_client.recent_confirmations(service):
         last_night = conf.get("last_night")
         address = re.sub(r".*<([^>]+)>.*", r"\1", conf["to"]).strip().lower()
-        if not last_night or not address or today < last_night + timedelta(days=FOLLOW_UP_DELAY_DAYS):
+        if not last_night or not address:
             continue
-        if address in seen:
-            continue  # one guest can have both confirmation kinds: one follow-up only
-        seen.add(address)
+        if address not in merged:
+            merged[address] = {
+                "id": conf["id"],
+                "to": conf["to"],
+                "first_name": conf.get("first_name") or "",
+                "venues": list(conf.get("venues") or []),
+                "last_night": last_night,
+            }
+        else:
+            cur = merged[address]
+            if not cur["first_name"] and conf.get("first_name"):
+                cur["first_name"] = conf["first_name"]
+            for v in conf.get("venues") or []:
+                if v not in cur["venues"]:
+                    cur["venues"].append(v)
+            if last_night > cur["last_night"]:
+                cur["last_night"] = last_night
+                cur["id"] = conf["id"]
+                if conf.get("venues"):
+                    cur["venues"] = list(conf["venues"]) + [v for v in cur["venues"] if v not in conf["venues"]]
+    for address, conf in merged.items():
+        last_night = conf["last_night"]
+        if today < last_night + timedelta(days=FOLLOW_UP_DELAY_DAYS):
+            continue
         if today > last_night + timedelta(days=FOLLOW_UP_DELAY_DAYS + late):
             continue  # too overdue: don't send a stale follow-up after an outage
         if allowlist is not None and address not in allowlist:
@@ -839,7 +859,7 @@ def send_follow_ups(service, mode, allowlist=None, today=None, store=None):
         # Any follow-up to this guest in the last 60 days counts: never again.
         if gmail_client.send_once(service, f"amy-followup-{conf['id']}@playmakerentertainment.com",
                                   address, subject, body, sender=rules.SENDER_EMAIL,
-                                  html=html_emails.render_follow_up(conf["first_name"], optin_url, unsub_url),
+                                  html=html_emails.render_follow_up(conf["first_name"], optin_url, unsub_url, venues=conf.get("venues", [])),
                                   headers=newsletter.list_unsubscribe_headers(unsub_url),
                                   dedupe_query=f'to:{address} {FOLLOW_UP_SEARCH} newer_than:60d'):
             log.info("Follow-up sent to %s (last night %s)", address, last_night)

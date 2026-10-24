@@ -35,11 +35,34 @@ def nights_block(nights):
                    for d, v, hl in nights)
 
 
+SCOTTSDALE_FOLLOW_UP_SWAPS = (
+    ("Hope you had an amazing time in Vegas! Remember us for your next trip.",
+     "Hope you had an amazing time at {venue}! Remember us for your next night out."),
+    ("we hope you enjoyed the night and that Vegas treated you right.",
+     "we hope you enjoyed your night at {venue} in Scottsdale."),
+    ("Remember us for your next Vegas trip. We'd love to have you back.",
+     "Remember us for your next night out. We'd love to have you back."),
+    ("Know someone heading to Vegas?",
+     "Know someone who loves a night out?"),
+    ("If you know anyone coming to Vegas, we'd love to get referred!",
+     "If you know anyone looking for a great night out, we'd love to get referred!"),
+    ("Free guest list at the top Las Vegas clubs and dayclubs",
+     "Free guest list at top clubs in Scottsdale and Las Vegas"),
+)
+
+
 def render_follow_up(first_name, optin_url="https://playmakerentertainment.com",
-                     unsubscribe_url="https://playmakerentertainment.com"):
-    return _fill(_read("follow_up.html"), first_name=_h.escape(first_name or "there"),
-                 optin_url=_h.escape(optin_url, quote=True),
-                 unsubscribe_url=_h.escape(unsubscribe_url, quote=True))
+                     unsubscribe_url="https://playmakerentertainment.com", venues=()):
+    from config import rules
+    out = _fill(_read("follow_up.html"), first_name=_h.escape(first_name or "there"),
+                optin_url=_h.escape(optin_url, quote=True),
+                unsubscribe_url=_h.escape(unsubscribe_url, quote=True))
+    scottsdale = rules.scottsdale_venue(venues)
+    if scottsdale:
+        v = _h.escape(scottsdale)
+        for old, new in SCOTTSDALE_FOLLOW_UP_SWAPS:
+            out = out.replace(old, new.format(venue=v))
+    return out
 
 
 FALLBACK_NOTICE = ("Oh No, You Did Not Meet this Venue's GuestList Cut off. "

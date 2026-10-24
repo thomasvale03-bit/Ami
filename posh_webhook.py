@@ -481,16 +481,22 @@ def send_branded(service, payload, _sleep=None):
         sender, from_name = GUESTLISTGO_FROM, "GuestlistGo"  # Gmail send-as (relayed via Zoho SMTP)
     elif requested:
         return 400, "from not allowed"
-    if _gmail_call(lambda: gmail_client.already_sent(service, f'to:{to} subject:"{subject}"'), _sleep=_sleep):
+    is_followup = subject.lower().startswith("hope you had fun")
+    dedupe_q = (f"to:{to} {gmail_client.FOLLOW_UP_SEARCH} newer_than:60d"
+                if is_followup else f'to:{to} subject:"{subject}"')
+    if _gmail_call(lambda: gmail_client.already_sent(service, dedupe_q), _sleep=_sleep):
         return 200, "duplicate (already in Sent)"
     with _branded_lock:
-        if (to.lower(), subject) in _zoho_sent:
+        if (to.lower(), subject) in _zoho_sent or (is_followup and (to.lower(), "__followup__") in _zoho_sent):
             return 200, "duplicate (already in Sent)"
     if zoho_configured() and not from_name:
         try:
             mid = _zoho_send(to, subject, text, html, sender)
             with _branded_lock:
                 _zoho_sent.add((to.lower(), subject))
+                if is_followup:
+                    _zoho_sent.add((to.lower(), "__followup__"))
+            gmail_client.record_branded_sent(to, subject, text)
             log.info("Branded email sent via zoho to %s from %s (id %s)", to, sender, mid)
             return 200, {"sent": True, "id": mid, "from": sender, "via": "zoho"}
         except Exception as e:  # noqa: BLE001

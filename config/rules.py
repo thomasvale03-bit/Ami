@@ -238,3 +238,25 @@ POSH_SERIES_SEEDS = {
     "6a682ff9374ee034d5": ("guest-list-hakkasan", ("11-30", "12-30")),
     "6a80e79648e2b4a133": ("guestlist-tao-nc", ("8-30", "9-30")),
 }
+
+# Scottsdale venues (handled via custom confirmations / table partner routing,
+# not the Vegas TAO portal). Used so 7-day follow-ups send Scottsdale copy
+# ("Hope you had fun at <Venue> <Name>") instead of Vegas copy.
+SCOTTSDALE_VENUES = [
+    "Almost Famous",
+    "Riot House",
+    "Cake Nightclub",
+    "El Hefe",
+    "Maya Dayclub",
+]
+
+
+def scottsdale_venue(venues):
+    """Return the canonical Scottsdale venue name if any venue in `venues` is a
+    Scottsdale venue, else None."""
+    for v in venues or ():
+        vl = (v or "").lower()
+        for sv in SCOTTSDALE_VENUES:
+            if sv.lower() in vl or (sv == "Riot House" and "riothouse" in vl):
+                return sv
+    return None

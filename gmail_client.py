@@ -220,15 +220,27 @@ CONFIRMATION_SUBJECT_CONCIERGE = "You're on the list"
 # AMYI's post-signup guest confirmation (same body layout). Follow-ups key off both.
 CONFIRMATION_SUBJECT_POST_SIGNUP = "You're on the Playmaker Entertainment guest list"
 
-_MONTHS = {m: i for i, m in enumerate(
-    ["January", "February", "March", "April", "May", "June", "July",
-     "August", "September", "October", "November", "December"], start=1)}
+# Matches every follow-up wording used so far (Vegas and Scottsdale).
+FOLLOW_UP_SEARCH = ('(subject:"Until next time" OR subject:"See you next time in Vegas" '
+                    'OR subject:"Hope you had fun in Vegas" OR subject:"Hope you had fun at")')
+
+_MONTHS = {
+    "January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6,
+    "July": 7, "August": 8, "September": 9, "October": 10, "November": 11, "December": 12,
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Sept": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
+_WEEKDAY_RE = r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)"
+_MONTH_RE = (r"(?:January|February|March|April|May|June|July|August|September|October|November|December"
+             r"|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)")
+_CONFIRMATION_DATE_RE = re.compile(rf"\b{_WEEKDAY_RE},?\s+({_MONTH_RE})\s+(\d{{1,2}})\b")
 
 
 def _resolve_date(month_name, day, reference):
-    """A confirmation body shows 'Friday, October 9' (no year). Pick the year
-    so the night falls on/after when the email was sent (the visit is upcoming),
-    handling the Dec->Jan rollover."""
+    """A confirmation body shows 'Friday, October 9' or 'Sat, Oct 17' (no year).
+    Pick the year so the night falls on/after when the email was sent (the visit
+    is upcoming), handling the Dec->Jan rollover."""
     month = _MONTHS.get(month_name)
     if not month:
         return None
@@ -242,7 +254,51 @@ def _resolve_date(month_name, day, reference):
     return None
 
 
+def _parse_confirmation(body, subject="", sent=None):
+    """Extract (first_name, venues, last_night) from a confirmation email's
+    plain-text body (and subject fallback). Supports both Vegas ('Hi <Name>,')
+    and Scottsdale ('Hey <Name>,') templates and both full and abbreviated dates."""
+    sent = sent or date.today()
+    body = (body or "").replace("\r\n", "\n")
+    subject = subject or ""
+    combined = f"{subject}\n{body}"
+
+    first_match = (
+        re.search(r"\b(?:Hi|Hey)\s+([^,\s!]+),", body)
+        or re.search(r"You['’]re on the list,\s*([^.\n,!]+)", body)
+        or re.search(r"^([A-Z][A-Za-z'’-]+),\s+you['’]re on the list", body, re.M)
+    )
+    first_name = first_match.group(1).strip() if first_match else ""
+    if first_name.lower() == "there":
+        first_name = ""
+
+    venues = [v for v in rules.ALL_AUTHORIZED_VENUES if v in combined]
+    for sv in rules.SCOTTSDALE_VENUES:
+        if sv not in venues and (
+            re.search(re.escape(sv), combined, re.I)
+            or (sv == "Riot House" and "riothouse" in combined.lower())
+        ):
+            venues.append(sv)
+
+    # For "Booked:" / "Added:" subjects without "You're on the list", require
+    # guest-list phrasing in the body so unrelated messages are ignored.
+    subj_l = subject.lower()
+    is_booked_added_only = (
+        ("booked:" in subj_l or "added:" in subj_l)
+        and CONFIRMATION_SUBJECT_CONCIERGE.lower() not in subj_l
+        and CONFIRMATION_SUBJECT_POST_SIGNUP.lower() not in subj_l
+    )
+    if is_booked_added_only and "on the list" not in body.lower() and "guest list" not in body.lower():
+        dates = []
+    else:
+        raw_dates = _CONFIRMATION_DATE_RE.findall(body) or _CONFIRMATION_DATE_RE.findall(subject)
+        dates = [d for d in (_resolve_date(m, day, sent) for m, day in raw_dates) if d]
+
+    return first_name, venues, (max(dates) if dates else None)
+
+
 _CONFIRMATION_CACHE = None  # message id -> parsed confirmation (sent mail never changes)
+_CACHE_VERSION = 2
 
 
 def _cache_path():
@@ -260,8 +316,11 @@ def _load_cache():
         try:
             with open(path) as fh:
                 raw = json.load(fh)
-            return {k: dict(v, last_night=date.fromisoformat(v["last_night"]) if v.get("last_night") else None)
-                    for k, v in raw.items()}
+            return {
+                k: dict(v, last_night=date.fromisoformat(v["last_night"]) if v.get("last_night") else None)
+                for k, v in raw.items()
+                if isinstance(v, dict) and v.get("_v") == _CACHE_VERSION
+            }
         except FileNotFoundError:
             pass
         except Exception:  # noqa: BLE001 - a bad cache just means re-reading
@@ -277,8 +336,11 @@ def _save_cache(cache):
     try:
         tmp = path + ".tmp"
         with open(tmp, "w") as fh:
-            json.dump({k: dict(v, last_night=v["last_night"].isoformat() if v.get("last_night") else None)
-                       for k, v in cache.items()}, fh)
+            json.dump({
+                k: dict(v, _v=_CACHE_VERSION,
+                        last_night=v["last_night"].isoformat() if v.get("last_night") else None)
+                for k, v in cache.items()
+            }, fh)
         os.replace(tmp, path)
     except Exception:  # noqa: BLE001
         log.exception("Could not save confirmation cache %s", path)
@@ -308,7 +370,8 @@ def _recent_confirmations(service, days, cache):
     resp = service.users().messages().list(
         userId="me",
         q=(f'in:sent (subject:"{CONFIRMATION_SUBJECT_CONCIERGE}" OR '
-           f'subject:"{CONFIRMATION_SUBJECT_POST_SIGNUP}") newer_than:{days}d'), maxResults=200,
+           f'subject:"{CONFIRMATION_SUBJECT_POST_SIGNUP}" OR '
+           f'subject:"Booked:" OR subject:"Added:") newer_than:{days}d'), maxResults=200,
     ).execute()
     out = []
     for ref in resp.get("messages", []):
@@ -316,22 +379,30 @@ def _recent_confirmations(service, days, cache):
             out.append(cache[ref["id"]])
             continue
         msg = service.users().messages().get(
-            userId="me", id=ref["id"], format="metadata", metadataHeaders=["To"],
+            userId="me", id=ref["id"], format="metadata", metadataHeaders=["To", "Subject"],
         ).execute()
         headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
         sent = datetime.fromtimestamp(int(msg.get("internalDate", "0")) / 1000, tz=timezone.utc).date()
         _msg, body = get_plain_text_body(service, ref["id"])  # returns (message, text)
-        body = (body or "").replace("\r\n", "\n")
-        first = re.search(r"\bHi ([^,\s]+),", body)
-        venues = [v for v in rules.ALL_AUTHORIZED_VENUES if v in body]
-        dates = [d for d in (_resolve_date(m, day, sent)
-                             for _wd, m, day in re.findall(r"([A-Z][a-z]+), ([A-Z][a-z]+) (\d{1,2})", body))
-                 if d]
+        first_name, venues, last_night = _parse_confirmation(body, headers.get("subject", ""), sent)
         item = {"id": ref["id"], "to": headers.get("to", ""),
-                "first_name": first.group(1) if first else "",
-                "venues": venues, "last_night": max(dates) if dates else None}
+                "first_name": first_name, "venues": venues, "last_night": last_night,
+                "_v": _CACHE_VERSION}
         cache[ref["id"]] = item
         out.append(item)
+    for idx, entry in enumerate(_load_branded_sent()):
+        if entry.get("kind") == "confirmation" and entry.get("last_night"):
+            try:
+                ln = date.fromisoformat(entry["last_night"])
+            except ValueError:
+                continue
+            out.append({
+                "id": f"branded-{entry.get('ts', idx)}-{idx}",
+                "to": entry["to"],
+                "first_name": entry.get("first_name") or "",
+                "venues": list(entry.get("venues") or []),
+                "last_night": ln,
+            })
     return out
 
 
@@ -501,8 +572,110 @@ def draft_once(service, dedupe_query, to, subject, body, sender, cc=None):
     return True
 
 
+# Follow-up recipients already sent via /send-branded (Zoho SMTP) in Oct 2026,
+# which do not appear in Gmail's in:sent folder.
+_SEED_FOLLOWUP_RECIPIENTS = frozenset({
+    "cleach27@icloud.com",
+    "michaelkemas03@gmail.com",
+    "djrrrpro@gmail.com",
+    "camacho_efanny@yahoo.com",
+    "ejya2020@gmail.com",
+    "0pierre702@gmail.com",
+    "richardwoodley47@gmail.com",
+    "solblackwell@gmail.com",
+    "guajardo_tanya@yahoo.com",
+    "afzain.hossain2020@gmail.com",
+    "perez.abbym@gmail.com",
+    "solomonomage@gmail.com",
+    "emilyamber14@icloud.com",
+    "aurelliuscurry@gmail.com",
+    "demetriiious1999@gmail.com",
+    "tamar.sandonato@gmail.com",
+})
+
+
+def _branded_sent_path():
+    d = os.environ.get("AMY_CACHE_DIR") or ("/data" if os.path.isdir("/data") else "")
+    return os.path.join(d, "branded_sent.json") if d else ""
+
+
+def _load_branded_sent():
+    import json
+    path = _branded_sent_path()
+    if path:
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+            if isinstance(data, list):
+                return data
+        except FileNotFoundError:
+            pass
+        except Exception:  # noqa: BLE001
+            log.exception("Ignoring unreadable branded_sent log %s", path)
+    return []
+
+
+def record_branded_sent(to, subject, body=""):
+    """Persist a /send-branded send (e.g. Zoho SMTP, which bypasses Gmail Sent)
+    so already_sent() and send_follow_ups() never duplicate it, and confirmations
+    sent via Zoho are also visible to recent_confirmations()."""
+    import json, time
+    path = _branded_sent_path()
+    if not path:
+        return
+    m = EMAIL_RE.search(to or "")
+    addr = (m.group(0) if m else (to or "")).strip().lower()
+    if not addr:
+        return
+    subj = (subject or "").strip()
+    entry = {"to": addr, "subject": subj, "ts": int(time.time())}
+    sl = subj.lower()
+    if (CONFIRMATION_SUBJECT_CONCIERGE.lower() in sl
+            or CONFIRMATION_SUBJECT_POST_SIGNUP.lower() in sl
+            or sl.startswith("booked:") or sl.startswith("added:")):
+        first_name, venues, last_night = _parse_confirmation(body or "", subj, date.today())
+        if last_night:
+            entry["kind"] = "confirmation"
+            entry["first_name"] = first_name
+            entry["venues"] = venues
+            entry["last_night"] = last_night.isoformat()
+    entries = _load_branded_sent()
+    entries.append(entry)
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(entries[-2000:], fh)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001
+        log.exception("Could not save branded_sent log %s", path)
+
+
+def _branded_sent_matches(query):
+    """True if query matches a pre-seeded or persisted /send-branded email."""
+    q = query or ""
+    m_to = re.search(r"\bto:([^\s)]+)", q, re.I)
+    if not m_to:
+        return False
+    addr = m_to.group(1).strip().strip('"').lower()
+    ql = q.lower()
+    is_followup = "hope you had fun" in ql or "until next time" in ql or "see you next time" in ql
+    if is_followup and addr in _SEED_FOLLOWUP_RECIPIENTS:
+        return True
+    for entry in _load_branded_sent():
+        if (entry.get("to") or "").lower() != addr:
+            continue
+        esub = entry.get("subject") or ""
+        if is_followup and esub.lower().startswith("hope you had fun"):
+            return True
+        m_sub = re.search(r'subject:"([^"]+)"', q, re.I)
+        if m_sub and esub == m_sub.group(1):
+            return True
+    return False
+
+
 def already_sent(service, query):
-    """True if the Sent folder has a message matching this Gmail search.
+    """True if the Sent folder (or persisted /send-branded log) has a message
+    matching this search.
 
     (Searching by our own Message-ID header doesn't work: Gmail replaces it
     on messages sent through the API, which let the 2026-10-03 follow-up go
@@ -511,7 +684,9 @@ def already_sent(service, query):
     resp = service.users().messages().list(
         userId="me", q=f"in:sent {query}", maxResults=1
     ).execute()
-    return bool(resp.get("messages"))
+    if resp.get("messages"):
+        return True
+    return _branded_sent_matches(query)
 
 
 def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_query=None,

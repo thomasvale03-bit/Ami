@@ -1,3 +1,4 @@
+from config import rules
 """Confirmation email templates, verbatim from the approved Playmaker wording."""
 
 
@@ -158,8 +159,25 @@ def _clubs(venues):
 def follow_up_email(first_name, venues=()):
     """Sent once, FOLLOW_UP_DELAY_DAYS after a confirmed guest's last night.
     Owner's wording (Oct 4 2026): thank them, ask for referrals, point to
-    the website and Instagram. No phone number."""
+    the website and Instagram. No phone number. Scottsdale venues get
+    Scottsdale wording ('Hope you had fun at <Venue> <Name>')."""
     greeting = f"Hi {first_name}," if first_name else "Hi,"
+    scottsdale = rules.scottsdale_venue(venues)
+    if scottsdale:
+        subject = f"Hope you had fun at {scottsdale} {first_name}" if first_name else f"Hope you had fun at {scottsdale}"
+        body = (
+            f"{greeting}\n\n"
+            f"Thanks for coming out to {scottsdale}! Hope you had an amazing time, "
+            "and that you enjoyed the night.\n\n"
+            "Remember us for your next night out. We'd love to have you back.\n\n"
+            "Know anyone looking for a great night out? We'd love the referral. Send them to "
+            "PlaymakerEntertainment.com and we'll get them on the list for free, just like you. "
+            "Playmaker Entertainment is not a secret ♥️\n\n"
+            "Playmaker Entertainment\n"
+            "Questions? Email info@playmakerentertainment.com\n\n"
+            "If you’d rather not get emails like this, just reply STOP."
+        )
+        return subject, body
     subject = f"Hope you had fun in Vegas, {first_name}" if first_name else "Hope you had fun in Vegas"
     body = (
         f"{greeting}\n\n"
