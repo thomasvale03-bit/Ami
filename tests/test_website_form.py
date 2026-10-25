@@ -160,5 +160,110 @@ class TeamNotice(unittest.TestCase):
         so.assert_not_called()
 
 
+
+
+class ServerToServerAndBrandedFallback(unittest.TestCase):
+    def setUp(self):
+        pw._web_times.clear()
+        pw._branded_times.clear()
+        pw._zoho_sent.clear()
+
+    def test_server_to_server_flat_and_airo_payloads_validate(self):
+        d0 = (datetime.now(pw.VEGAS).date() + timedelta(days=4)).isoformat()
+        d1 = (datetime.now(pw.VEGAS).date() + timedelta(days=5)).isoformat()
+        # Flat camelCase payload
+        clean, err = pw.validate_website({
+            "firstName": "Gia",
+            "lastName": "Lee",
+            "email": "gia@example.com",
+            "phone": "4802875168",
+            "zip": "85311",
+            "females": 3,
+            "males": 1,
+            "venues": "Priority: OMNIA (Fri 10/30). Fri 10/30 OMNIA, Sat 10/31 JEWEL, open to other venues",
+            "dates": [d0, d1],
+            "promoter": "Tom - Grok",
+        })
+        self.assertIsNone(err)
+        self.assertEqual(clean["source"], "playmaker")
+        self.assertEqual(clean["name"], "Gia Lee")
+        self.assertEqual(clean["city"], "Las Vegas")
+        self.assertEqual(clean["venue"], "OMNIA")
+        self.assertEqual(clean["night"].isoformat(), d0)
+        self.assertEqual(clean["end"].isoformat(), d1)
+        self.assertEqual((clean["women"], clean["men"]), (3, 1))
+        self.assertEqual(clean["promoter_name"], "Tom - Grok")
+        self.assertIn("ZIP: 85311", clean["notes"])
+
+        # PartyEveryDay Airo-shaped payload with Scottsdale open-to-all preference & single-word name
+        clean2, err2 = pw.validate_website({
+            "conversation": {
+                "messages_attributes": [{"body": f"New guest list request submission\n\nFull name: Cher\nAdditional comments: Venues: [Scottsdale] Open to all venues on their dates. PartyEveryDay alert #99"}],
+                "data": {
+                    "Visit Start Date": d0,
+                    "Visit End Date": d0,
+                    "Venues": "[Scottsdale] Open to all venues on their dates",
+                    "Female Guests": "2",
+                    "Male Guests": "0",
+                    "Phone": "6025550199",
+                    "ZIP Code": "85251",
+                    "Promoter First Name": "Tom - Grok",
+                    "Promoter Last Name": "",
+                    "Authorization Accepted": "YES",
+                    "Originating Page": "PartyEveryDay instagram DM via @th3partyplug",
+                },
+            },
+            "user": {"name": "Cher", "email": "cher@example.com"},
+        })
+        self.assertIsNone(err2)
+        self.assertEqual(clean2["name"], "Cher")
+        self.assertEqual(clean2["city"], "Scottsdale")
+        self.assertEqual(clean2["venue"], "Almost Famous")
+        self.assertEqual(clean2["ref"], "ped-99")
+
+    def test_http_accepts_missing_origin_for_server_to_server_but_rejects_bad_origin(self):
+        import json, urllib.request, urllib.error
+        svc = mock.MagicMock()
+        intake = mock.MagicMock(dry_run=True, intake_email="i@example.com", _seen=set())
+        intake._lock = __import__("threading").Lock()
+        intake.service.return_value = svc
+        with mock.patch.dict(os.environ, {"WEBSITE_FORM_ENABLED": "1"}):
+            srv = pw.serve(intake, port=0, host="127.0.0.1")
+            base = f"http://127.0.0.1:{srv.server_address[1]}/webhooks/website"
+            try:
+                # Server-to-server (no Origin header) -> 200
+                req = urllib.request.Request(base, data=json.dumps(payload(source="playmaker", ref="s2s-1")).encode(),
+                                             headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    self.assertEqual(r.status, 200)
+                # Evil Origin header -> 403
+                req_bad = urllib.request.Request(base, data=json.dumps(payload(source="playmaker", ref="s2s-2")).encode(),
+                                                 headers={"Content-Type": "application/json", "Origin": "https://evil.example"})
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(req_bad, timeout=5)
+                self.assertEqual(ctx.exception.code, 403)
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_send_branded_static_guest_list_subject_does_not_drop_different_guests(self):
+        queries = []
+        svc = mock.MagicMock()
+        def fake_list(userId, q, maxResults):
+            queries.append(q)
+            return mock.Mock(execute=lambda: {})
+        svc.users().messages().list.side_effect = fake_list
+        svc.users().messages().send.return_value = mock.Mock(execute=lambda: {"id": "m1"})
+        body1 = "Message: New guest list request submission\n\nFull name: Alice Smith\nEmail: alice@example.com\nVisit start date: 2026-10-30\nRequested venues: Omnia Nightclub"
+        body2 = "Message: New guest list request submission\n\nFull name: Bob Jones\nEmail: bob@example.com\nVisit start date: 2026-10-31\nRequested venues: TAO Nightclub"
+        with mock.patch.object(pw, "zoho_configured", return_value=False):
+            c1, r1 = pw.send_branded(svc, {"to": "team@playmakerentertainment.com", "subject": "New guest list request submission", "text": body1, "html": "<p>1</p>"})
+            c2, r2 = pw.send_branded(svc, {"to": "team@playmakerentertainment.com", "subject": "New guest list request submission", "text": body2, "html": "<p>2</p>"})
+        self.assertEqual((c1, r1.get("sent")), (200, True))
+        self.assertEqual((c2, r2.get("sent")), (200, True))
+        self.assertIn('"alice@example.com"', queries[0])
+        self.assertIn('"bob@example.com"', queries[1])
+
+
 if __name__ == "__main__":
     unittest.main()

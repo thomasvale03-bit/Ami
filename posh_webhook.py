@@ -482,8 +482,13 @@ def send_branded(service, payload, _sleep=None):
     elif requested:
         return 400, "from not allowed"
     is_followup = subject.lower().startswith("hope you had fun")
-    dedupe_q = (f"to:{to} {gmail_client.FOLLOW_UP_SEARCH} newer_than:60d"
-                if is_followup else f'to:{to} subject:"{subject}"')
+    if subject.lower().startswith(WEBSITE_SUBJECT.lower()):
+        subject, dedupe_q = _branded_guestlist_subject_and_dedupe(to, subject, text, payload)
+    elif payload.get("dedupe_query"):
+        dedupe_q = str(payload["dedupe_query"])
+    else:
+        dedupe_q = (f"to:{to} {gmail_client.FOLLOW_UP_SEARCH} newer_than:60d"
+                    if is_followup else f'to:{to} subject:"{subject}"')
     if _gmail_call(lambda: gmail_client.already_sent(service, dedupe_q), _sleep=_sleep):
         return 200, "duplicate (already in Sent)"
     with _branded_lock:
@@ -554,8 +559,249 @@ def website_rate_ok(ip, now=None, per_ip=10, total=200):
         return True
 
 
+WEBSITE_VENUE_ALIASES = (
+    ("omnia dayclub", "Las Vegas", "OMNIA Dayclub"),
+    ("omnia nightclub", "Las Vegas", "OMNIA"),
+    ("omnia", "Las Vegas", "OMNIA"),
+    ("hakkasan nightclub", "Las Vegas", "Hakkasan"),
+    ("hakkasan", "Las Vegas", "Hakkasan"),
+    ("marquee dayclub", "Las Vegas", "Marquee Dayclub"),
+    ("marquee nightclub", "Las Vegas", "Marquee"),
+    ("marquee", "Las Vegas", "Marquee"),
+    ("tao beach dayclub", "Las Vegas", "TAO Beach Dayclub"),
+    ("tao beach", "Las Vegas", "TAO Beach Dayclub"),
+    ("tao nightclub", "Las Vegas", "TAO"),
+    ("tao", "Las Vegas", "TAO"),
+    ("jewel nightclub", "Las Vegas", "JEWEL"),
+    ("jewel", "Las Vegas", "JEWEL"),
+    ("ayu dayclub", "Las Vegas", "AYU"),
+    ("ayu", "Las Vegas", "AYU"),
+    ("drai's after hours", "Las Vegas", "Drai's After Hours"),
+    ("drais after hours", "Las Vegas", "Drai's After Hours"),
+    ("drai's", "Las Vegas", "Drai's After Hours"),
+    ("liquid pool lounge", "Las Vegas", "Liquid Pool Lounge"),
+    ("liquid pool", "Las Vegas", "Liquid Pool Lounge"),
+    ("palm tree beach club", "Las Vegas", "Palm Tree Beach Club"),
+    ("palm tree beach", "Las Vegas", "Palm Tree Beach Club"),
+    ("lavo party brunch", "Las Vegas", "LAVO Party Brunch"),
+    ("lavo", "Las Vegas", "LAVO Party Brunch"),
+    ("almost famous", "Scottsdale", "Almost Famous"),
+    ("riot house", "Scottsdale", "Riot House"),
+    ("cake nightclub", "Scottsdale", "Cake"),
+    ("cake", "Scottsdale", "Cake"),
+    ("el hefe", "Scottsdale", "El Hefe"),
+    ("maya day + nightclub", "Scottsdale", "Maya Day Club"),
+    ("maya day club", "Scottsdale", "Maya Day Club"),
+    ("maya dayclub", "Scottsdale", "Maya Day Club"),
+    ("maya night club", "Scottsdale", "Maya Night Club"),
+    ("maya nightclub", "Scottsdale", "Maya Night Club"),
+    ("maya", "Scottsdale", "Maya Day Club"),
+)
+
+
+def _match_website_venue(raw_text):
+    low = str(raw_text or "").strip().lower()
+    if not low:
+        return None, None
+    for alias, v_city, canonical in WEBSITE_VENUE_ALIASES:
+        if low == alias:
+            return v_city, canonical
+    prio = re.search(r"(?:priority|only)\s*:\s*([a-z0-9' +]+?)(?:\s*\(|,|;|\.|$)", low, re.I)
+    if prio:
+        p_low = prio.group(1).strip().lower()
+        for alias, v_city, canonical in WEBSITE_VENUE_ALIASES:
+            if p_low == alias or alias in p_low:
+                return v_city, canonical
+    best = None
+    best_idx = 10**9
+    for alias, v_city, canonical in WEBSITE_VENUE_ALIASES:
+        m = re.search(r"(?:^|[^a-z0-9])" + re.escape(alias) + r"(?:[^a-z0-9]|$)", low, re.I)
+        if m and m.start() < best_idx:
+            best_idx = m.start()
+            best = (v_city, canonical)
+    return best or (None, None)
+
+
+def _parse_kv_lines(text):
+    out = {}
+    for line in str(text or "").splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            k = k.strip().lower()
+            if k and k not in out:
+                out[k] = v.strip()
+    return out
+
+
+def _branded_guestlist_subject_and_dedupe(to, subject, text, payload):
+    if payload.get("dedupe_query"):
+        return subject, str(payload["dedupe_query"])
+    kv = _parse_kv_lines(text)
+    g_name = kv.get("full name") or ""
+    g_email = (kv.get("email") or "").lower()
+    g_start = kv.get("visit start date") or ""
+    g_venue = kv.get("requested venues") or ""
+    _, canon_venue = _match_website_venue(g_venue)
+    if subject.strip().lower() in (WEBSITE_SUBJECT.lower(), f"{WEBSITE_SUBJECT.lower()} - guestlistgo"):
+        brand = "GuestlistGo" if "guestlistgo" in subject.lower() else "Playmaker"
+        parts = [WEBSITE_SUBJECT, "-", brand]
+        if canon_venue:
+            parts.append(canon_venue)
+        if g_start:
+            parts.append(g_start)
+        if g_name or g_email:
+            parts.append(f"({g_name or g_email})")
+        if len(parts) > 3:
+            subject = " ".join(parts)
+    if g_email or g_start:
+        terms = [f"to:{to}", f'subject:"{WEBSITE_SUBJECT}"']
+        if g_email:
+            terms.append(f'"{g_email}"')
+        if g_start:
+            terms.append(f'"{g_start}"')
+        return subject, " ".join(terms)
+    return subject, f'to:{to} subject:"{subject}"'
+
+
+def normalize_website_payload(p):
+    """Normalize Airo / server-to-server guest list payloads into canonical /webhooks/website fields."""
+    if not isinstance(p, dict):
+        return {}
+    out = dict(p)
+    conv = p.get("conversation") if isinstance(p.get("conversation"), dict) else {}
+    d = conv.get("data") if isinstance(conv.get("data"), dict) else {}
+    u = p.get("user") if isinstance(p.get("user"), dict) else {}
+    msgs = conv.get("messages_attributes") if isinstance(conv.get("messages_attributes"), list) else []
+    body_text = msgs[0].get("body", "") if msgs and isinstance(msgs[0], dict) else ""
+    bf = _parse_kv_lines(body_text)
+
+    orig_page = str(p.get("originatingPage") or p.get("originating_page") or d.get("Originating Page") or bf.get("originating page") or "").strip()
+    if "source" not in p or p.get("source") is None or str(p.get("source")).strip() == "":
+        promo_hint = f"{p.get('promoter') or ''} {d.get('Promoter First Name') or ''} {orig_page}"
+        out["source"] = "guestlistgo" if re.search(r"guestlist\s*go", promo_hint, re.I) else "playmaker"
+
+    if "first_name" not in p and "last_name" not in p:
+        first = str(p.get("firstName") or d.get("First Name") or "").strip()
+        last = str(p.get("lastName") or d.get("Last Name") or "").strip()
+        if not first:
+            full = str(p.get("name") or u.get("name") or d.get("Full Name") or bf.get("full name") or "").strip()
+            parts = full.split()
+            if parts:
+                first = parts[0]
+                last = " ".join(parts[1:]) if len(parts) > 1 else "-"
+        elif not last:
+            last = "-"
+        out["first_name"] = first
+        out["last_name"] = last
+
+    if not out.get("email"):
+        out["email"] = p.get("email") or u.get("email") or d.get("Email") or d.get("email") or bf.get("email") or ""
+    if not out.get("phone"):
+        out["phone"] = p.get("phone") or d.get("Phone") or d.get("phone") or u.get("phone") or bf.get("phone") or ""
+
+    if "date" not in p or not str(p.get("date") or "").strip():
+        dates_val = p.get("dates")
+        d_start, d_end = "", ""
+        if isinstance(dates_val, list) and dates_val:
+            d_start, d_end = str(dates_val[0]).strip(), str(dates_val[-1]).strip()
+        elif isinstance(dates_val, str) and dates_val.strip():
+            iso = re.findall(r"\d{4}-\d{2}-\d{2}", dates_val)
+            if iso:
+                d_start, d_end = iso[0], iso[-1]
+            else:
+                 d_start = dates_val.strip()
+        out["date"] = str(p.get("start_date") or p.get("startDate") or p.get("visitStartDate") or d.get("Visit Start Date") or d_start or bf.get("visit start date") or "").strip()
+        if ("end_date" not in p or not str(p.get("end_date") or "").strip()) and d_end:
+            out["end_date"] = d_end
+    if "end_date" not in out or not str(out.get("end_date") or "").strip():
+        end_candidate = str(p.get("endDate") or p.get("visitEndDate") or d.get("Visit End Date") or bf.get("visit end date") or "").strip()
+        if end_candidate:
+            out["end_date"] = end_candidate
+
+    if "women" not in p:
+        for k in ("females", "girls", "femaleGuests", "female_guests"):
+            if p.get(k) is not None:
+                out["women"] = p.get(k)
+                break
+        else:
+            if d.get("Female Guests") is not None:
+                out["women"] = d.get("Female Guests")
+            elif bf.get("female guests") is not None:
+                out["women"] = bf.get("female guests")
+    if "men" not in p:
+        for k in ("males", "guys", "maleGuests", "male_guests"):
+            if p.get(k) is not None:
+                out["men"] = p.get(k)
+                break
+        else:
+            if d.get("Male Guests") is not None:
+                out["men"] = d.get("Male Guests")
+            elif bf.get("male guests") is not None:
+                out["men"] = bf.get("male guests")
+
+    if "promoter" not in p or not str(p.get("promoter") or "").strip():
+        pf = str(p.get("promoterFirstName") or p.get("promoter_first_name") or d.get("Promoter First Name") or bf.get("promoter first name") or "").strip()
+        pl = str(p.get("promoterLastName") or p.get("promoter_last_name") or d.get("Promoter Last Name") or bf.get("promoter last name") or "").strip()
+        if pf or pl:
+            out["promoter"] = f"{pf} {pl}".strip()
+
+    raw_venue = p.get("venue") if "venue" in p else (p.get("venues") if "venues" in p else (d.get("Venues") or bf.get("requested venues") or ""))
+    if isinstance(raw_venue, list):
+        raw_venue = ", ".join(str(x).strip() for x in raw_venue if str(x).strip())
+    raw_venue = str(raw_venue or "").strip()
+
+    explicit_city = str(p.get("city") or d.get("City") or "").strip()
+    if explicit_city in WEBSITE_VENUES and raw_venue in WEBSITE_VENUES[explicit_city]:
+        out["city"] = explicit_city
+        out["venue"] = raw_venue
+    elif explicit_city and explicit_city not in WEBSITE_VENUES:
+        out["city"] = explicit_city
+        out["venue"] = raw_venue
+    else:
+        matched_city, matched_venue = _match_website_venue(raw_venue)
+        is_open_pref = bool(re.search(r"open to (?:all |other )?venues|any venue|all venues", raw_venue, re.I)) or ("venue" not in p and not raw_venue)
+        city = explicit_city or ("Scottsdale" if ("scottsdale" in raw_venue.lower() or matched_city == "Scottsdale") else "Las Vegas")
+        if matched_venue and matched_venue in WEBSITE_VENUES.get(city, ()):
+            out["city"] = city
+            out["venue"] = matched_venue
+        elif is_open_pref and city in WEBSITE_VENUES:
+            out["city"] = city
+            out["venue"] = "Almost Famous" if city == "Scottsdale" else "OMNIA"
+        else:
+            out["city"] = city
+            out["venue"] = raw_venue
+
+    notes = str(p.get("notes") or p.get("comments") or d.get("Additional Comments") or bf.get("additional comments") or "").strip()
+    zip_code = str(p.get("zip") or p.get("zipCode") or p.get("zip_code") or d.get("ZIP Code") or bf.get("zip code") or "").strip()
+    extra_notes = [notes] if notes else []
+    if raw_venue and raw_venue.lower() != str(out.get("venue") or "").lower() and raw_venue.lower() not in notes.lower():
+        extra_notes.append(f"Venues: {raw_venue}")
+    if orig_page and "partyeveryday" in orig_page.lower() and "partyeveryday" not in notes.lower():
+        extra_notes.append(f"Origin: {orig_page}")
+    if zip_code and zip_code not in notes:
+        extra_notes.append(f"ZIP: {zip_code}")
+    if extra_notes:
+        out["notes"] = " | ".join(extra_notes)[:500]
+
+    if not out.get("ref"):
+        ref_val = str(d.get("Ref") or bf.get("ref") or "").strip()
+        if not ref_val:
+            m_alert = re.search(r"alert\s*#([A-Za-z0-9_-]+)", f"{out.get('notes') or ''} {body_text}", re.I)
+            if m_alert:
+                ref_val = f"ped-{m_alert.group(1)}"
+        if ref_val:
+            out["ref"] = ref_val
+
+    if "age_21_confirmed" not in p:
+        auth_val = str(d.get("Authorization Accepted") or p.get("authorizationAccepted") or bf.get("authorization accepted") or "YES").strip().upper()
+        out["age_21_confirmed"] = auth_val in ("YES", "TRUE", "1")
+
+    return out
+
+
 def validate_website(p):
     """Returns (clean_dict, None) or (None, error)."""
+    p = normalize_website_payload(p)
     g = lambda k, n=200: str(p.get(k) or "").strip()[:n]
     src = g("source", 40).lower()
     if src not in WEBSITE_SOURCES:
@@ -599,8 +845,9 @@ def validate_website(p):
     ig = re.sub(r"^@", "", g("instagram", 31))
     if ig and not re.fullmatch(r"[A-Za-z0-9._]{1,30}", ig):
         ig = ""
+    full_name = first if last == "-" else f"{first} {last}"
     return {"source": src, "promoter": WEBSITE_SOURCES[src], "first_name": first, "last_name": last,
-            "name": f"{first} {last}", "email": email, "phone": phone, "city": city, "venue": venue,
+            "name": full_name, "email": email, "phone": phone, "city": city, "venue": venue,
             "event": f"{venue} | Guest List", "night": night, "end": end, "women": women, "men": men,
             "party": women + men, "instagram": ig, "promoter_name": promo, "notes": g("notes", 500),
             "ref": re.sub(r"[^\w-]", "", g("ref", 40))}, None
@@ -879,6 +1126,29 @@ def make_handler(intake, store=None):
                     log.exception("Opt-out check failed")
                     return self._reply(502, "opt-out check failed")
             try:
+                subj = (payload.get("subject") or "").strip()
+                if subj.lower().startswith(WEBSITE_SUBJECT.lower()) and hasattr(intake, "_lock"):
+                    kv = _parse_kv_lines(payload.get("text") or "")
+                    if kv.get("full name") and kv.get("email") and kv.get("visit start date"):
+                        try:
+                            accept_website(intake, {
+                                "name": kv.get("full name"),
+                                "email": kv.get("email"),
+                                "phone": kv.get("phone") or "0000000000",
+                                "zip": kv.get("zip code") or "",
+                                "date": kv.get("visit start date"),
+                                "end_date": kv.get("visit end date") or kv.get("visit start date"),
+                                "venues": kv.get("requested venues") or "OMNIA",
+                                "females": kv.get("female guests") or 0,
+                                "males": kv.get("male guests") or 0,
+                                "promoterFirstName": kv.get("promoter first name") or "",
+                                "promoterLastName": kv.get("promoter last name") or "",
+                                "comments": kv.get("additional comments") or "",
+                                "originatingPage": kv.get("originating page") or "",
+                                "ref": kv.get("ref") or "",
+                            })
+                        except Exception:
+                            log.exception("Branded guest-list intake bridge failed")
                 code, result = send_branded(intake.service(), payload)
             except Exception:
                 log.exception("Branded send failed")
@@ -904,7 +1174,8 @@ def make_handler(intake, store=None):
         def _website(self):
             if not website_enabled():
                 return self._reply(404, "not found")
-            origin = self._cors()
+            raw_origin = (self.headers.get("Origin") or "").strip().rstrip("/")
+            origin = (raw_origin if raw_origin in website_origins() else None) if raw_origin else "https://playmakerentertainment.com"
             if not origin:
                 return self._reply(403, "origin not allowed")
             ip = (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
