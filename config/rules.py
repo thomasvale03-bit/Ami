@@ -84,7 +84,39 @@ VENUE_ALIASES = {
 
 # Scottsdale (AZ) venues. Not TAO Las Vegas venues: never route them to a
 # Vegas club or create TAO assisted sign-up jobs for them.
-SCOTTSDALE_VENUE_KEYWORDS = ("scottsdale", "almost famous", "riot house", "riothouse")
+SCOTTSDALE_VENUE_KEYWORDS = (
+    "scottsdale",
+    "almost famous",
+    "riot house",
+    "riothouse",
+    "el hefe",
+    "elhefe",
+    "cake nightclub",
+    "cake",
+    "maya dayclub",
+    "maya",
+)
+
+OPEN_VENUE_PLACEHOLDERS = {
+    "open / any (ask guest)",
+    "open / any",
+    "open/any",
+    "open to all venues",
+    "open to any venue",
+    "open venues",
+    "open",
+    "any",
+    "any venue",
+    "all venues",
+    "none",
+    "n/a",
+    "tbd",
+}
+
+
+def is_open_venue_placeholder(name):
+    key = (name or "").strip().lower()
+    return not key or key in OPEN_VENUE_PLACEHOLDERS or key.startswith("open / any")
 
 
 def is_scottsdale(name):

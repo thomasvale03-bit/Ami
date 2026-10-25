@@ -573,7 +573,11 @@ def manual_handoff(service, message_id, raw, dry_run):
 def non_vegas_venue_problem(raw):
     """'scottsdale', 'unknown', or None. Scottsdale venues (and any venue we
     don't recognize) must never be routed to a TAO Vegas club."""
-    venues = [rules.normalize_venue_name(v) for v in (raw.get("venues") or []) if v]
+    venues = [
+        rules.normalize_venue_name(v)
+        for v in (raw.get("venues") or [])
+        if v and not rules.is_open_venue_placeholder(v)
+    ]
     event = (raw.get("posh") or {}).get("event_name") or ""
     if rules.is_scottsdale(event) or any(rules.is_scottsdale(v) for v in venues):
         return "scottsdale"

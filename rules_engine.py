@@ -48,7 +48,11 @@ def normalize_guest_request(raw):
             required_action="Confirm party size with the customer before processing.",
         )
 
-    requested_venues = [rules.normalize_venue_name(v) for v in (raw.get("venues") or [])]
+    requested_venues = [
+        rules.normalize_venue_name(v)
+        for v in (raw.get("venues") or [])
+        if v and not rules.is_open_venue_placeholder(v)
+    ]
     # Scottsdale venues are not TAO Vegas venues: never route or book them.
     scottsdale = [v for v in requested_venues if rules.is_scottsdale(v)]
     if scottsdale:
