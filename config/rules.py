@@ -63,6 +63,8 @@ VENUE_ALIASES = {
     "marquee nightclub": "Marquee Nightclub",
     "marquee": "Marquee Nightclub",
     "marquee dayclub": "Marquee Dayclub",
+    "marquee dayclub dome": "Marquee Dayclub",
+    "marquee dome": "Marquee Dayclub",
     "omnia dayclub": "OMNIA Dayclub",
     "tao nightclub": "TAO Nightclub",
     "tao": "TAO Nightclub",
@@ -180,10 +182,15 @@ MAIN_DAYCLUB = "Liquid Pool Lounge"
 # ADDITION to the nightclub (different time slot — 11:30a–6p vs 10:30p–4a, so
 # this is not "doubling" a night): a requested dayclub first, then Liquid (the
 # main dayclub), then this priority. Live TAO availability decides the season.
+# Owner rule 2026-10-25: from now through March 31, 2027, push Marquee Dayclub
+# whenever it is open, so Marquee Dayclub leads DAYCLUB_PRIORITY during the
+# Dome / winter-spring push window (through 2027-03-31).
+MARQUEE_DAYCLUB_PUSH_END = "2027-03-31"
+
 DAYCLUB_PRIORITY = [
+    "Marquee Dayclub",
     "Liquid Pool Lounge",
     "TAO Beach Dayclub",
-    "Marquee Dayclub",
     "OMNIA Dayclub",
     "Palm Tree Beach Club",
 ]
@@ -236,8 +243,10 @@ VENUE_RULES = {
 # Outdoor dayclubs stop being auto-scheduled from October 1 onward unless
 # explicitly reactivated.
 DAYCLUB_SEASON_END_MONTH = 10  # October
+# Marquee Dayclub (Dome) runs through fall/winter/spring and is pushed through
+# March 31, 2027 (owner rule 2026-10-25), so it is not paused in offseason.
 DAYLIFE_AUTO_VENUES_PAUSED_IN_OFFSEASON = {
-    "TAO Beach Dayclub", "Marquee Dayclub", "Liquid Pool Lounge", "Palm Tree Beach Club"
+    "TAO Beach Dayclub", "Liquid Pool Lounge", "Palm Tree Beach Club"
 }
 
 # Exact promoter link named in the TAO authorization (section 5). Keep the

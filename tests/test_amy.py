@@ -422,7 +422,7 @@ class StartedEventTests(unittest.TestCase):
         booked = []
 
         def available(venue, day):
-            times = {"TAO Beach Dayclub": "10:00 AM", "Marquee Dayclub": "11:00 AM",
+            times = {"Marquee Dayclub": "10:00 AM", "TAO Beach Dayclub": "11:00 AM",
                      "OMNIA Nightclub": "10:30 PM", "JEWEL Nightclub": "10:30 PM"}
             if venue in times:
                 return {"event": venue, "event_time": times[venue], "listing_type": "Passes",
@@ -440,10 +440,10 @@ class StartedEventTests(unittest.TestCase):
         return booked
 
     def test_before_the_dayclub_starts_it_is_booked(self):
-        self.assertEqual(self.run_at(9, 0), ["TAO Beach Dayclub", "OMNIA Nightclub"])
+        self.assertEqual(self.run_at(9, 0), ["Marquee Dayclub", "OMNIA Nightclub"])
 
     def test_next_dayclub_is_tried_when_the_first_has_started(self):
-        self.assertEqual(self.run_at(10, 30), ["Marquee Dayclub", "OMNIA Nightclub"])
+        self.assertEqual(self.run_at(10, 30), ["TAO Beach Dayclub", "OMNIA Nightclub"])
 
     def test_after_all_dayclubs_started_only_the_nightclub(self):
         self.assertEqual(self.run_at(15, 0), ["OMNIA Nightclub"])

@@ -109,6 +109,8 @@ def date_range(start_date, end_date):
 
 
 def is_dayclub_season(date_obj):
+    if date_obj.isoformat() <= getattr(rules, "MARQUEE_DAYCLUB_PUSH_END", "2027-03-31"):
+        return True
     return date_obj.month < rules.DAYCLUB_SEASON_END_MONTH
 
 
