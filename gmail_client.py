@@ -277,6 +277,9 @@ def _parse_confirmation(body, subject="", sent=None):
         if sv not in venues and (
             re.search(re.escape(sv), combined, re.I)
             or (sv == "Riot House" and "riothouse" in combined.lower())
+            or (sv == "El Hefe" and "elhefe" in combined.lower())
+            or (sv == "Cake Nightclub" and re.search(r"\bcake\b", combined, re.I))
+            or (sv == "Maya Dayclub" and re.search(r"\bmaya\b", combined, re.I))
         ):
             venues.append(sv)
 
@@ -599,19 +602,49 @@ def _branded_sent_path():
     return os.path.join(d, "branded_sent.json") if d else ""
 
 
+# Pre-Oct-24 Zoho SMTP confirmations (sent before branded_sent.json was added)
+# so Railway's send_follow_ups() catches them 7 days after their last night.
+_SEED_BRANDED_CONFIRMATIONS = [
+    {"to": "rkickbush5@gmail.com", "subject": "Added: OMNIA Nightclub — Tue Oct 20", "kind": "confirmation",
+     "first_name": "Raina", "venues": ["OMNIA Nightclub"], "last_night": "2026-10-20", "ts": 1760980000},
+    {"to": "nagar@aucegypt.edu", "subject": "Added: OMNIA Nightclub — Tue Oct 20", "kind": "confirmation",
+     "first_name": "Ahmed", "venues": ["OMNIA Nightclub"], "last_night": "2026-10-20", "ts": 1760980001},
+    {"to": "paxishere@gmail.com", "subject": "Added: OMNIA Nightclub — Tue Oct 20", "kind": "confirmation",
+     "first_name": "Ahmed", "venues": ["OMNIA Nightclub"], "last_night": "2026-10-20", "ts": 1760980002},
+    {"to": "anthonylsilva6@gmail.com", "subject": "Added: OMNIA Nightclub — Tue Oct 20", "kind": "confirmation",
+     "first_name": "Anthony", "venues": ["OMNIA Nightclub"], "last_night": "2026-10-20", "ts": 1760980003},
+    {"to": "kleiffmanzano@outlook.com", "subject": "Added: OMNIA Nightclub — Tue Oct 20", "kind": "confirmation",
+     "first_name": "Kleiff", "venues": ["OMNIA Nightclub"], "last_night": "2026-10-20", "ts": 1760980004},
+    {"to": "edwardbroom@hotmail.co.uk", "subject": "You're on the Playmaker Entertainment guest list", "kind": "confirmation",
+     "first_name": "Ed", "venues": ["TAO Nightclub"], "last_night": "2026-10-21", "ts": 1761060000},
+    {"to": "haroldrogers2024@yahoo.com", "subject": "You're on the Playmaker Entertainment guest list", "kind": "confirmation",
+     "first_name": "Harold", "venues": ["Marquee Nightclub"], "last_night": "2026-10-21", "ts": 1761060001},
+    {"to": "croom_chelsea@yahoo.com", "subject": "Added: Marquee Dayclub — Thu Oct 22", "kind": "confirmation",
+     "first_name": "Chelsea", "venues": ["Marquee Dayclub"], "last_night": "2026-10-22", "ts": 1761150000},
+    {"to": "marnb932@gmail.com", "subject": "You're on the Playmaker Entertainment guest list", "kind": "confirmation",
+     "first_name": "Martin", "venues": ["Marquee Nightclub"], "last_night": "2026-10-24", "ts": 1761320000},
+    {"to": "affanshadab669@gmail.com", "subject": "Added: Almost Famous — Sat Oct 24", "kind": "confirmation",
+     "first_name": "Sam", "venues": ["Riot House", "Almost Famous"], "last_night": "2026-10-24", "ts": 1761320001},
+    {"to": "seesevens@gmail.com", "subject": "Added: Almost Famous — Sat Oct 24", "kind": "confirmation",
+     "first_name": "there", "venues": ["Almost Famous"], "last_night": "2026-10-24", "ts": 1761320002},
+]
+
+
 def _load_branded_sent():
     import json
     path = _branded_sent_path()
     if path:
+        data = []
         try:
             with open(path) as fh:
-                data = json.load(fh)
-            if isinstance(data, list):
-                return data
+                loaded = json.load(fh)
+            if isinstance(loaded, list):
+                data = loaded
         except FileNotFoundError:
             pass
         except Exception:  # noqa: BLE001
             log.exception("Ignoring unreadable branded_sent log %s", path)
+        return list(_SEED_BRANDED_CONFIRMATIONS) + data
     return []
 
 

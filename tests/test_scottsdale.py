@@ -71,8 +71,8 @@ class HandleMessageTests(unittest.TestCase):
             out = main.handle_message(mock.MagicMock(), "m1", dry_run=False, labels={})
         return out, sent, notes, submit, jobs
 
-    def _assert_no_tao(self, out, sent, submit, jobs):
-        self.assertEqual(out, gmail_client.EXCEPTION_LABEL)
+    def _assert_no_tao(self, out, sent, submit, jobs, expected_label=gmail_client.PROCESSED_LABEL):
+        self.assertEqual(out, expected_label)
         submit.assert_not_called()
         jobs.assert_not_called()
         for a, k in sent:
@@ -82,21 +82,37 @@ class HandleMessageTests(unittest.TestCase):
     def test_contact_form_riot_house(self):
         out, sent, notes, submit, jobs = self._handle(
             FORM.replace("Requested venues: Omnia Nightclub", "Requested venues: Riot House Scottsdale"))
-        self._assert_no_tao(out, sent, submit, jobs)
-        self.assertEqual(sent, [])
-        self.assertEqual(notes[0][0][0], "contact_form")  # existing AMYI notice kept
+        self._assert_no_tao(out, sent, submit, jobs, gmail_client.PROCESSED_LABEL)
+        self.assertEqual(len(sent), 2)  # guest confirmation + website team summary
+        self.assertIn("You're on the list: Riot House", sent[0][0][3])
+        self.assertEqual(notes, [])  # mark_job suppresses Grok Bot contact_form wake
 
     def test_posh_almost_famous(self):
         out, sent, notes, submit, jobs = self._handle(
             POSH.replace("Playmaker Tuesdays at OMNIA", "Almost Famous Guestlist"))
-        self._assert_no_tao(out, sent, submit, jobs)
-        self.assertEqual(sent, [])
+        self._assert_no_tao(out, sent, submit, jobs, gmail_client.PROCESSED_LABEL)
+        self.assertEqual(len(sent), 1)  # Posh Almost Famous sends guest confirmation only (door list covers team)
+        self.assertIn("You're on the list: Almost Famous", sent[0][0][3])
+        self.assertEqual(notes, [])
 
     def test_unknown_venue_goes_to_team_not_default(self):
         out, sent, notes, submit, jobs = self._handle(
             FORM.replace("Requested venues: Omnia Nightclub", "Requested venues: Mystery Lounge"))
-        self._assert_no_tao(out, sent, submit, jobs)
+        self._assert_no_tao(out, sent, submit, jobs, gmail_client.EXCEPTION_LABEL)
         self.assertEqual(sent, [])  # needs-attention is suppressed in concierge mode
+
+    def test_send_scottsdale_door_lists_friday_evening(self):
+        sent = []
+        svc = mock.MagicMock()
+        svc.users().messages().list().execute.return_value = {"messages": []}
+        friday_evening = __import__("datetime").datetime(2026, 10, 23, 19, 45, tzinfo=main.PHOENIX)
+        with mock.patch.object(gmail_client, "already_sent", return_value=False),              mock.patch.object(main, "_send_branded_or_gmail",
+                               side_effect=lambda s, mid, to, subj, txt, html, **kw: sent.append((to, subj, txt)) or True):
+            count = main.send_scottsdale_door_lists(svc, "live", now=friday_evening)
+        self.assertEqual(count, 2)
+        self.assertEqual(sent[0][1], "Riot House Guest List — Fri Oct 23")
+        self.assertEqual(sent[1][1], "Almost Famous Guest List — Fri Oct 23")
+        self.assertIn("No guests yet. Posh shows 0 orders for tonight.", sent[0][2])
 
 
 if __name__ == "__main__":

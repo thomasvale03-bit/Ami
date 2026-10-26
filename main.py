@@ -48,6 +48,222 @@ log = logging.getLogger("amy")
 
 VEGAS = ZoneInfo("America/Los_Angeles")
 
+PHOENIX = ZoneInfo("America/Phoenix")
+
+
+def _send_branded_or_gmail(service, message_id, to, subject, text, html, dedupe_query=None):
+    """Send from info@playmakerentertainment.com via Zoho SMTP (send_branded)
+    when Zoho is configured, falling back to gmail_client.send_once."""
+    dq = dedupe_query or f'to:{to} subject:"{subject}" newer_than:7d'
+    if posh_webhook.zoho_configured():
+        code, res = posh_webhook.send_branded(service, {
+            "to": to,
+            "subject": subject,
+            "text": text,
+            "html": html,
+            "dedupe_query": dq,
+        })
+        return code == 200 and isinstance(res, dict) and bool(res.get("sent"))
+    return gmail_client.send_once(
+        service, message_id, to, subject, text,
+        sender=posh_webhook.branded_from(), html=html, dedupe_query=dq,
+    )
+
+
+def handle_scottsdale_request(service, message_id, raw, dry_run):
+    """Automatically send the branded Scottsdale confirmation (Riot House,
+    Almost Famous, El Hefe, Cake Nightclub, Maya Dayclub) without routing to
+    TAO Vegas or waking Grok Bot."""
+    amyi.mark_job()
+    email = (raw.get("email") or "").strip()
+    full_name = (raw.get("name") or "").strip()
+    first_name = (full_name.split()[0] if full_name else "there")
+    try:
+        f_cnt = int(raw.get("female_count") or 0)
+    except (TypeError, ValueError):
+        f_cnt = 0
+    try:
+        m_cnt = int(raw.get("male_count") or 0)
+    except (TypeError, ValueError):
+        m_cnt = 0
+    party_str = html_emails.party_size(f_cnt, m_cnt)
+
+    event_name = ((raw.get("posh") or {}).get("event_name") or "").strip()
+    candidates = [v for v in ([event_name] + list(raw.get("venues") or [])) if v]
+    canonical = rules.scottsdale_venue(candidates) or "Almost Famous"
+
+    start_s = (raw.get("start_date") or "").strip()
+    end_s = (raw.get("end_date") or start_s).strip()
+    try:
+        nights = [d.isoformat() for d in date_range(start_s, end_s)] if start_s else []
+    except Exception:
+        nights = [start_s] if start_s else []
+    if not nights:
+        nights = [datetime.now(PHOENIX).date().isoformat()]
+
+    subject, text, html = html_emails.scottsdale_confirmation_email(
+        first_name, canonical, nights
+    )
+    if dry_run:
+        log.info("[dry run] would send Scottsdale confirmation to %s: %s", email, subject)
+        return None
+    if is_guestlistgo(raw):
+        log.info("%s: GuestlistGo Scottsdale sign-up; Playmaker confirmation skipped", message_id)
+        return gmail_client.PROCESSED_LABEL
+
+    if email:
+        _send_branded_or_gmail(
+            service,
+            f"amy-scottsdale-{message_id}@playmakerentertainment.com",
+            email,
+            subject,
+            text,
+            html,
+            dedupe_query=f'to:{email} subject:"{subject}" newer_than:7d',
+        )
+
+    if canonical not in ("Riot House", "Almost Famous") or raw.get("source") != "Posh":
+        date_lbl = nights[0] if len(nights) == 1 else f"{nights[0]} to {nights[-1]}"
+        tsub = f"Signed up: {full_name or email} — {canonical} ({date_lbl})"
+        tbody = (
+            f"Scottsdale guest list confirmation sent automatically by AMY.\n\n"
+            f"Name: {full_name or '(none)'}\n"
+            f"Email: {email}\n"
+            f"Phone: {raw.get('phone') or (raw.get('posh') or {}).get('phone') or '(none)'}\n"
+            f"Venue: {canonical}\n"
+            f"Dates: {', '.join(nights)}\n"
+            f"Party: {f_cnt}F / {m_cnt}M\n\n"
+            f"Ref: {message_id}"
+        )
+        thtml = f'<html><body><pre style="font-family:inherit;white-space:pre-wrap">{tbody}</pre></body></html>'
+        _send_branded_or_gmail(
+            service,
+            f"amy-scottsdale-team-{message_id}@playmakerentertainment.com",
+            rules.PLAYMAKER_EMAIL,
+            tsub,
+            tbody,
+            thtml,
+            dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Ref: {message_id}"',
+        )
+    return gmail_client.PROCESSED_LABEL
+
+
+def send_scottsdale_door_lists(service, mode, now=None):
+    """On Friday and Saturday evenings at/after 7:43 PM America/Phoenix, send
+    tonight's Riot House and Almost Famous guest-list rundown emails to
+    team@playmakerentertainment.com (even when 0 orders)."""
+    now = now or datetime.now(PHOENIX)
+    if now.weekday() not in (4, 5):  # 4 = Friday, 5 = Saturday
+        return 0
+    if (now.hour, now.minute) < (19, 43):
+        return 0
+    tonight = now.date()
+    day_short = f"{tonight.strftime('%a %b')} {tonight.day}"
+    day_long = f"{tonight.strftime('%a, %b')} {tonight.day}, {tonight.year}"
+
+    sent_count = 0
+    for venue, header_title in (
+        ("Riot House", f"Riot House | Guest List — {day_long} (10:00 PM - 2:00 AM)"),
+        ("Almost Famous", f"Almost Famous — {day_long} (10:00 PM - 2:00 AM)"),
+    ):
+        subject = f"{venue} Guest List — {day_short}"
+        dedupe_q = f'to:{rules.PLAYMAKER_EMAIL} subject:"{subject}" newer_than:2d'
+        if mode != "dry-run" and gmail_client.already_sent(service, dedupe_q):
+            continue
+
+        q_term = '"Riot House" OR "riothouse"' if venue == "Riot House" else '"Almost Famous"'
+        resp = service.users().messages().list(
+            userId="me", q=f"({q_term}) newer_than:14d -in:sent", maxResults=100
+        ).execute()
+        orders = []
+        seen_keys = set()
+        for ref in reversed(resp.get("messages", [])):
+            mid = ref["id"]
+            msg, body = gmail_client.get_plain_text_body(service, mid)
+            subj = gmail_client.get_subject(msg or {})
+            if posh.is_posh_signup(subj, body):
+                raw = posh.parse_signup(mid, body)
+            elif any(m.lower() in (subj or "").lower() for m in rules.SUBJECT_MARKERS):
+                raw = gmail_client.parse_request(mid, body)
+            else:
+                continue
+            ev = ((raw.get("posh") or {}).get("event_name") or "").strip()
+            if rules.scottsdale_venue([ev] + list(raw.get("venues") or [])) != venue:
+                continue
+            sd = (raw.get("start_date") or "").strip()
+            ed = (raw.get("end_date") or sd).strip()
+            if sd and not (sd <= tonight.isoformat() <= ed):
+                continue
+            order_no = ((raw.get("posh") or {}).get("order_number") or "").strip()
+            guest_email = (raw.get("email") or "").strip().lower()
+            guest_name = (raw.get("name") or "").strip() or guest_email
+            dedupe_key = order_no or f"{guest_email}:{sd}"
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            try:
+                w = int(raw.get("female_count") or 0)
+            except (TypeError, ValueError):
+                w = 0
+            try:
+                m = int(raw.get("male_count") or 0)
+            except (TypeError, ValueError):
+                m = 0
+            ticket = ((raw.get("posh") or {}).get("ticket") or "").strip()
+            orders.append({
+                "name": guest_name,
+                "email": guest_email,
+                "women": w,
+                "men": m,
+                "ticket": ticket,
+                "order_number": order_no,
+            })
+
+        if orders:
+            lines = []
+            tot_w = sum(o["women"] for o in orders)
+            tot_m = sum(o["men"] for o in orders)
+            tot_g = tot_w + tot_m
+            for o in orders:
+                w_lbl = "1 woman" if o["women"] == 1 else f"{o['women']} women"
+                m_lbl = "1 man" if o["men"] == 1 else f"{o['men']} men"
+                t_part = f" ({o['ticket']})" if o["ticket"] else ""
+                ord_part = f" #{o['order_number']}" if o["order_number"] else ""
+                email_part = f" ({o['email']})" if o["email"] and o["email"] not in o["name"].lower() else ""
+                lines.append(f"{o['name']}{email_part} — {w_lbl}, {m_lbl}{t_part}{ord_part}")
+            ord_word = "1 order" if len(orders) == 1 else f"{len(orders)} orders"
+            g_word = "1 guest" if tot_g == 1 else f"{tot_g} guests"
+            w_word = "1 woman" if tot_w == 1 else f"{tot_w} women"
+            m_word = "1 man" if tot_m == 1 else f"{tot_m} men"
+            text = (
+                f"{header_title}\n\n"
+                + "\n".join(lines)
+                + f"\n\nTotals: {g_word} ({w_word}, {m_word}) across {ord_word}.\n\nPlaymaker Entertainment"
+            )
+        else:
+            text = (
+                f"{header_title}\n\n"
+                "No guests yet. Posh shows 0 orders for tonight.\n\n"
+                "Totals: 0 guests (0 women, 0 men).\n\nPlaymaker Entertainment"
+            )
+        html = f'<html><body><pre style="font-family:inherit;white-space:pre-wrap">{text}</pre></body></html>'
+        if mode == "dry-run":
+            log.info("[dry run] would send %s:\n%s", subject, text)
+            continue
+        if _send_branded_or_gmail(
+            service,
+            f"amy-doorlist-{venue.lower().replace(' ', '-')}-{tonight.isoformat()}@playmakerentertainment.com",
+            rules.PLAYMAKER_EMAIL,
+            subject,
+            text,
+            html,
+            dedupe_query=dedupe_q,
+        ):
+            log.info("Sent Scottsdale door list: %s", subject)
+            sent_count += 1
+    return sent_count
+
+
 
 def event_has_started(listing, date_obj, now):
     """True when the listing is for today and its start time (e.g. "11:00 AM")
@@ -685,10 +901,8 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
 
     venue_problem = non_vegas_venue_problem(raw)
     if venue_problem == "scottsdale":
-        # Scottsdale request: the AMYI notice above covers it; no TAO routing,
-        # no assisted sign-up job, no Vegas default.
-        log.info("%s: Scottsdale venue %s; not routed to TAO Vegas", message_id, raw.get("venues"))
-        return gmail_client.EXCEPTION_LABEL
+        log.info("%s: Scottsdale venue %s; sending Scottsdale confirmation (no TAO Vegas)", message_id, raw.get("venues"))
+        return handle_scottsdale_request(service, message_id, raw, dry_run)
     if venue_problem == "unknown":
         team_alert(service, message_id, raw, [internal_action_needed(
             raw.get("name", "(unknown)"), raw.get("email", "(unknown)"),
@@ -1281,6 +1495,14 @@ def main():
                 raise
             else:
                 log.exception("Follow-up pass failed; will retry next cycle")
+        try:
+            door_lists_on = os.environ.get("SCOTTSDALE_DOOR_LISTS_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+            if door_lists_on:
+                send_scottsdale_door_lists(service, mode)
+        except Exception:
+            if not args.loop:
+                raise
+            log.exception("Scottsdale door-list pass failed; will retry next cycle")
         if not args.loop:
             break
         tao_portal.reset_catalog()  # fresh promoter-page listings every cycle

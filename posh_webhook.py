@@ -349,7 +349,12 @@ class Intake:
                 userId="me", body={"raw": raw, "labelIds": ["INBOX", "UNREAD"]}).execute()
             self._seen.add(key)
         log.info("Posh order %s for %s -> night %s (%s)", key[0], key[2], night, how)
-        _ping_amyi(payload, key, night)
+        event_name = payload.get("event_name") or ""
+        from config import rules as _rules
+        import speakeasy as _speakeasy
+        if (os.environ.get("AMYI_RAW_POSH_PING", "").strip().lower() in ("1", "true", "yes")
+                or (_rules.is_drais(event_name) and not _speakeasy.auto_on())):
+            _ping_amyi(payload, key, night)
         return 200, "queued"
 
 

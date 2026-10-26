@@ -298,6 +298,12 @@ def scottsdale_venue(venues):
     for v in venues or ():
         vl = (v or "").lower()
         for sv in SCOTTSDALE_VENUES:
-            if sv.lower() in vl or (sv == "Riot House" and "riothouse" in vl):
+            if (sv.lower() in vl
+                    or (sv == "Riot House" and "riothouse" in vl)
+                    or (sv == "El Hefe" and "elhefe" in vl)
+                    or (sv == "Cake Nightclub" and "cake" in vl)
+                    or (sv == "Maya Dayclub" and "maya" in vl)):
                 return sv
+        if "scottsdale" in vl:
+            return "Almost Famous"
     return None
