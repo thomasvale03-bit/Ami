@@ -168,7 +168,7 @@ def download_week_images(out_dir, target=None, start=None, end=None):
     os.makedirs(out_dir, exist_ok=True)
     saved, lineups = [], {}
     with sync_playwright() as p:
-        b = p.chromium.launch(headless=True, executable_path=os.environ["CHROMIUM_PATH"])
+        b = p.chromium.launch(headless=True, executable_path=os.environ.get("CHROMIUM_PATH") or None)
         pg = b.new_context(locale="en-US").new_page(); pg.set_default_timeout(20000)
         _dismiss_cookie_banner(pg)  # once per context, before any screenshot
         for month_folder in _month_folders(start, end):
@@ -225,7 +225,7 @@ def download_week_images(out_dir, target=None, start=None, end=None):
 def run(month_folder, out):
     data={}
     with sync_playwright() as p:
-        b=p.chromium.launch(headless=True, executable_path=os.environ["CHROMIUM_PATH"])
+        b=p.chromium.launch(headless=True, executable_path=os.environ.get("CHROMIUM_PATH") or None)
         pg=b.new_context(locale="en-US").new_page(); pg.set_default_timeout(20000)
         weeks=[w for w in names(pg, url(month_folder)) if re.search(r"\d", w) and "archive" not in w.lower()]
         print("weeks:", weeks, file=sys.stderr)
@@ -250,6 +250,56 @@ def run(month_folder, out):
     json.dump(data, open(out,"w"), indent=2, sort_keys=True)
     print("dates:", len(data), file=sys.stderr)
     return data
+
+
+
+def refresh_week(data_dir, flyers_dir, start, end):
+    """Refresh headliners.json, weekly flyer images, top_picks.json, and also_this_week.json
+    for the Tue-Mon window [start, end] directly from TAO's Dropbox."""
+    import datetime
+    os.makedirs(data_dir, exist_ok=True)
+    os.makedirs(flyers_dir, exist_ok=True)
+    headliners_path = os.path.join(data_dir, "headliners.json")
+    try:
+        with open(headliners_path) as fh:
+            hmap = json.load(fh)
+    except Exception:
+        hmap = {}
+    for mf in _month_folders(start, end):
+        tmp_out = headliners_path + ".tmp"
+        try:
+            month_data = run(mf, tmp_out)
+            for d, venues in (month_data or {}).items():
+                hmap.setdefault(d, {}).update(venues)
+        except Exception as exc:
+            print("refresh_week month scan failed:", mf, exc, file=sys.stderr)
+        finally:
+            try:
+                os.remove(tmp_out)
+            except OSError:
+                pass
+    with open(headliners_path, "w") as fh:
+        json.dump(hmap, fh, indent=2, sort_keys=True)
+    saved = download_week_images(flyers_dir, target=start, start=start, end=end)
+    from templates import weekly_newsletter
+    picks = weekly_newsletter.default_picks(start, end, hmap)
+    if picks:
+        with open(os.path.join(data_dir, "top_picks.json"), "w") as fh:
+            json.dump({"week_start": start.isoformat(), "picks": picks}, fh, indent=2)
+        also = weekly_newsletter.load_also(data_dir, start, end, hmap, picks)
+        with open(os.path.join(data_dir, "also_this_week.json"), "w") as fh:
+            json.dump({
+                "week_start": start.isoformat(),
+                "nights": [{"date": iso, "events": [list(ev) for ev in evs]} for iso, evs in also],
+            }, fh, indent=2)
+    both_lineups = all(
+        os.path.isfile(os.path.join(flyers_dir, fn))
+        for fn in ("weekly_nightclub.jpg", "weekly_dayclub.jpg")
+    )
+    if both_lineups:
+        with open(os.path.join(flyers_dir, ".week_start"), "w") as fh:
+            fh.write(start.isoformat())
+    return {"week_start": start.isoformat(), "saved": len(saved), "picks": picks, "both_lineups": both_lineups}
 
 if __name__=="__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "images":

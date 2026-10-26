@@ -898,6 +898,47 @@ WEEKLY_LINEUP_WEEKDAY = 2  # Sent Wednesday (Mon=0). Covers the official Tue-Mon
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 
+_last_flyer_scan_at = 0.0
+
+
+def prep_weekly_lineup(today=None, data_dir=DATA_DIR, flyers_dir=FLYERS_DIR):
+    """On Tuesday (>=10 AM Vegas) or Wednesday before send, pull this week's TAO
+    Dropbox flyers and refresh headliners.json / top_picks.json / also_this_week.json
+    if not already captured for the current Tue-Mon week."""
+    global _last_flyer_scan_at
+    from templates import weekly_newsletter
+    now = datetime.now(VEGAS)
+    today = today or now.date()
+    if today.weekday() not in (1, WEEKLY_LINEUP_WEEKDAY):
+        return None
+    if today.weekday() == 1 and now.hour < int(os.environ.get("WEEKLY_PREP_HOUR", "10")):
+        return None
+    start, end = weekly_newsletter.week_window(today)
+    marker = os.path.join(flyers_dir, ".week_start")
+    both_lineups = all(
+        os.path.isfile(os.path.join(flyers_dir, fn))
+        for fn in ("weekly_nightclub.jpg", "weekly_dayclub.jpg")
+    )
+    try:
+        with open(marker) as fh:
+            if fh.read().strip() == start.isoformat() and both_lineups:
+                return None
+    except OSError:
+        pass
+    if time.time() - _last_flyer_scan_at < 3600 * 2:
+        return None
+    _last_flyer_scan_at = time.time()
+    try:
+        from tools import scan_flyers
+        res = scan_flyers.refresh_week(data_dir, flyers_dir, start, end)
+        headliners.reload_headliners()
+        log.info("Weekly newsletter Dropbox prep finished for %s: %s", start.isoformat(), res)
+        return res
+    except Exception:
+        log.exception("Weekly newsletter Dropbox prep failed for %s", start.isoformat())
+        return None
+
+
 def _build_weekly(today, flyers_dir):
     from templates import weekly_newsletter
     try:
@@ -1218,6 +1259,7 @@ def main():
             # check safe — it sends once per week). On by default.
             lineup_on = os.environ.get("WEEKLY_LINEUP_ENABLED", "true").strip().lower() in ("1", "true", "yes")
             if lineup_on and time.time() - last_lineup_check >= 3600:
+                prep_weekly_lineup()
                 send_weekly_lineup(service, mode)
                 last_lineup_check = time.time()
         except Exception:
