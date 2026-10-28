@@ -254,3 +254,47 @@ class RenamedChildTests(unittest.TestCase):
                                   datetime(2026, 10, 10, 13, tzinfo=timezone.utc), fetch=fetch, sleep=lambda s: None,
                                   event_start="2026-07-29T22:30:00Z")
         self.assertEqual(pl.night_from_start(start), date(2026, 10, 21))
+
+
+class OmniaAndCarouselExtrapolationTests(unittest.TestCase):
+    def setUp(self):
+        pl.reset_cache()
+
+    def test_omnia_series_seed_and_8_0_end_time(self):
+        self.assertEqual(pl.series_bases("6acab072b53cd5b9c2c7882f"), ["guestlist-omnia"])
+        self.assertIn("8-0", pl.DEFAULT_END_TIMES[:4])
+        self.assertIn("9-0", pl.DEFAULT_END_TIMES[:4])
+
+    def test_single_page_without_carousel_uses_event_id(self):
+        lavo_html = (
+            '<html><meta property="og:url" content="https://posh.vip/e/lavo-brunch-party-guest-list-2026-11-1-1-0"/>'
+            '<script>{"eventId":"69733fedd067ffc440dc9359","startDate":"2026-10-31T12:00:00-07:00"}</script></html>'
+        )
+        sib = pl.siblings(lavo_html)
+        self.assertEqual(sib.get("69733fedd067ffc440dc9359"), "lavo-brunch-party-guest-list-2026-11-1-1-0")
+
+    def test_extrapolates_beyond_carousel(self):
+        found = {
+            "6acab072b53cd5b9c2c78832": "guestlist-omnia-2026-10-30-8-0",
+            "6acab072b53cd5b9c2c78835": "guestlist-omnia-2026-10-31-8-0",
+            "6acab072b53cd5b9c2c78838": "guestlist-omnia-2026-11-1-8-0",
+            "6acab072b53cd5b9c2c7883b": "guestlist-omnia-2026-11-4-9-0",
+            "6acab072b53cd5b9c2c78859": "guestlist-omnia-2026-11-21-9-0",
+            "6acab072b53cd5b9c2c7885c": "guestlist-omnia-2026-11-22-9-0",
+        }
+        pl._learn(found)
+        ext = pl._extrapolate_beyond_carousel(found, "6acab072b53cd5b9c2c78868", "6acab072b53cd5b9c2")
+        self.assertIn("guestlist-omnia-2026-11-29-9-0", ext)
+
+    def test_review_order_notifies_amyi_when_not_dry_run(self):
+        import amyi
+        night, how, _ = pw.resolve_night(series_payload(), lookup=lambda *a: None)
+        body = pw.to_signup_text(series_payload(), night, how)
+        with mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, body)), \
+                mock.patch.object(gmail_client, "get_subject", return_value=pw.SUBJECT), \
+                mock.patch.object(gmail_client, "posh_order_already_handled", return_value=False), \
+                mock.patch.dict(os.environ, {"POSH_CONSENT_ON_FILE": "true", "AMY_CONCIERGE": "true"}), \
+                mock.patch.object(amyi, "notify") as notify_mock:
+            self.assertEqual(main.handle_message(None, "m1", False, {}), gmail_client.EXCEPTION_LABEL)
+            notify_mock.assert_called_once()
+            self.assertEqual(notify_mock.call_args[0][0], "posh_exception")

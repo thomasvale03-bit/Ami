@@ -21,20 +21,21 @@ import re
 import threading
 import time
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 log = logging.getLogger("amy.posh_lookup")
 VEGAS = ZoneInfo("America/Los_Angeles")
 BASE = "https://posh.vip/e/"
 MAX_FETCHES = int(os.environ.get("POSH_LOOKUP_MAX_FETCHES", "40"))
-# Seen on Playmaker series (UTC end): TAO NC 8-30/9-30, Hakkasan 11-30/12-30.
-DEFAULT_END_TIMES = ("8-30", "9-30", "11-30", "12-30", "8-0", "9-0", "10-0", "10-30", "11-0", "12-0")
+# Seen on Playmaker series (UTC end): TAO NC 8-30/9-30, OMNIA/JEWEL 8-0/9-0, Hakkasan 11-30/12-30, LAVO 1-0/2-0.
+DEFAULT_END_TIMES = ("8-30", "9-30", "8-0", "9-0", "11-30", "12-30", "1-0", "2-0", "6-0", "10-0", "10-30", "11-0", "12-0", "11-0-1", "12-0-1")
 
 SIBLING_RE = re.compile(r'"([0-9a-f]{24})",\{"href":"/e/([a-z0-9-]+)"')
+EVENT_ID_RE = re.compile(r'"eventId"\s*:\s*"([0-9a-f]{24})"')
 START_RE = re.compile(r'"startDate"\s*:\s*"([^"]+)"')
 OG_URL_RE = re.compile(r'og:url" content="https://posh\.vip/e/([a-z0-9-]+)"')
-SLUG_TAIL_RE = re.compile(r"-(\d{4})-(\d{1,2})-(\d{1,2})-(\d{1,2})-(\d{1,2})$")
+SLUG_TAIL_RE = re.compile(r"-(\d{4})-(\d{1,2})-(\d{1,2})-(\d{1,2})-(\d{1,2}(?:-\d+)?)$")
 
 _lock = threading.Lock()
 _starts = {}    # event_id -> aware datetime
@@ -50,8 +51,17 @@ def _unescape(html):
     return (html or "").replace('\\"', '"')
 
 
+def page_event_id(html):
+    m = EVENT_ID_RE.search(_unescape(html))
+    return m.group(1) if m else None
+
+
 def siblings(html):
-    return dict(SIBLING_RE.findall(_unescape(html)))
+    out = dict(SIBLING_RE.findall(_unescape(html)))
+    eid, slug = page_event_id(html), page_slug(html)
+    if eid and slug and eid not in out:
+        out[eid] = slug
+    return out
 
 
 def page_start(html):
@@ -188,7 +198,7 @@ def candidate_slugs(event_name, purchased_utc, days_before=1, days_after=13, eve
     learned = sorted({t for b in bases for t in _end_times.get(b, ())})
     derived = derived_end_times(event_start, event_end)
     defaults = fallback_end_times()
-    common, rest = defaults[:4], defaults[4:]
+    common, rest = defaults[:6], defaults[6:]
     wide = derived_end_times(event_start, event_end, wide=True)
     out = []
 
@@ -272,6 +282,65 @@ def _all_candidates(event_id, event_name, purchased_utc, event_start, event_end)
     return list(dict.fromkeys(out))
 
 
+def _extrapolate_beyond_carousel(found, target_id, key):
+    """When target_id is beyond a series page's sibling carousel, project its
+    slug from the series' hex-ID stride and active weekdays."""
+    if not key or series_key(target_id) != key:
+        return []
+    series_items = sorted((i, s) for i, s in found.items() if series_key(i) == key and i < target_id)
+    if len(series_items) < 2:
+        return []
+    max_id, max_slug = series_items[-1]
+    m = SLUG_TAIL_RE.search(max_slug)
+    if not m:
+        return []
+    base = max_slug[:m.start()]
+    try:
+        d_max = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        target_diff = int(target_id, 16) - int(max_id, 16)
+    except ValueError:
+        return []
+    if target_diff <= 0:
+        return []
+    t_max = f"{int(m.group(4))}-{m.group(5)}"
+    times = list(dict.fromkeys([t_max] + sorted(_end_times.get(base, ()))))
+    id_steps, weekdays = [], []
+    for idx, (eid, s) in enumerate(series_items):
+        ms = SLUG_TAIL_RE.search(s)
+        if not ms:
+            continue
+        try:
+            dt = date(int(ms.group(1)), int(ms.group(2)), int(ms.group(3)))
+            weekdays.append(dt.weekday())
+            if idx > 0:
+                diff = int(eid, 16) - int(series_items[idx - 1][0], 16)
+                if diff > 0:
+                    id_steps.append(diff)
+        except ValueError:
+            continue
+    if not id_steps or not weekdays:
+        return []
+    step = min(id_steps)
+    if target_diff % step != 0:
+        return []
+    n_events = target_diff // step
+    if n_events <= 0 or n_events > 60:
+        return []
+    active_wds = set(weekdays)
+    cur, count = d_max, 0
+    while count < n_events and (cur - d_max).days < 180:
+        cur += timedelta(days=1)
+        if cur.weekday() in active_wds:
+            count += 1
+    if count != n_events:
+        return []
+    out = []
+    for delta in (0, -1, 1):
+        d = cur + timedelta(days=delta)
+        out += [f"{base}-{d.year}-{d.month}-{d.day}-{t}" for t in times]
+    return out
+
+
 def _resolve(event_id, event_name, purchased_utc, get, event_start=None, event_end=None):
     tried = set()
     key = series_key(event_id)
@@ -295,15 +364,29 @@ def _resolve(event_id, event_name, purchased_utc, get, event_start=None, event_e
         tried.add(slug)
         if not html:
             continue
-        for _hop in range(3):
+        for _hop in range(4):
             found = siblings(html)
             _learn(found)
             if event_id in found:
                 if found[event_id] == page_slug(html):
                     return page_start(html)
                 return open_target(found[event_id])
-            same_series = key and any(series_key(i) == key for i in found)
-            later = [s for s in found.values() if s not in tried] if same_series else []
+            for ext_slug in _extrapolate_beyond_carousel(found, event_id, key):
+                if ext_slug in tried:
+                    continue
+                ext_html = get(ext_slug)
+                tried.add(ext_slug)
+                if not ext_html:
+                    continue
+                ext_found = siblings(ext_html)
+                _learn(ext_found)
+                if event_id in ext_found:
+                    if ext_found[event_id] == page_slug(ext_html):
+                        return page_start(ext_html)
+                    return open_target(ext_found[event_id])
+            series_ids = [i for i in found if series_key(i) == key] if key else []
+            can_hop = bool(series_ids) and max(series_ids) < event_id
+            later = [found[i] for i in series_ids if found[i] not in tried] if can_hop else []
             if not later:
                 break  # another series, or nothing further: keep guessing
             nxt = later[-1]

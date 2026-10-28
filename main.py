@@ -897,6 +897,17 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
             venue=", ".join(raw.get("venues") or []) or "(none specified)",
             date=raw.get("start_date", "(unknown)"), issue=issue, required_action=action,
         ) + details], dry_run)
+        if not dry_run:
+            p = raw.get("posh") or {}
+            amyi.notify("posh_exception" if raw.get("source") == "Posh" else "exception",
+                        name=raw.get("name", ""), email=raw.get("email", ""),
+                        phone=raw.get("phone", "") or p.get("phone", ""),
+                        event=p.get("event_name", "") or issue,
+                        venue=raw.get("venues") or [],
+                        dates=[d for d in (raw.get("start_date"), raw.get("end_date")) if d],
+                        party=_party(raw),
+                        source=(raw.get("source") or "posh").lower(),
+                        ref=message_id)
         return gmail_client.EXCEPTION_LABEL
 
     venue_problem = non_vegas_venue_problem(raw)
