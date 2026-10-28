@@ -298,3 +298,109 @@ class OmniaAndCarouselExtrapolationTests(unittest.TestCase):
             self.assertEqual(main.handle_message(None, "m1", False, {}), gmail_client.EXCEPTION_LABEL)
             notify_mock.assert_called_once()
             self.assertEqual(notify_mock.call_args[0][0], "posh_exception")
+
+    def test_on_accept_callback_fires_on_posh_and_website_intake(self):
+        import tempfile
+        from datetime import datetime, timedelta
+        called = []
+        svc = mock.MagicMock()
+        svc.users().messages().list.return_value = mock.Mock(execute=lambda: {})
+        svc.users().messages().insert.return_value = mock.Mock(execute=lambda: {"id": "m1"})
+        intake = pw.Intake(lambda: svc, "intake@example.com", lookup=lambda *a: None, on_accept=lambda: called.append("woke"))
+        p = dict(series_payload(), event_start="2026-10-31T22:30:00.000Z", order_number="999999")
+        self.assertEqual(intake.accept(p), (200, "queued"))
+        self.assertEqual(called, ["woke"])
+        # Duplicate does not re-trigger on_accept
+        self.assertEqual(intake.accept(p), (200, "duplicate (this run)"))
+        self.assertEqual(called, ["woke"])
+        # Website accept also triggers on_accept
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AMY_PENDING_DIR": tmp}), \
+                mock.patch.object(gmail_client, "send_once", return_value=True):
+            night = (datetime.now(pw.VEGAS).date() + timedelta(days=5)).isoformat()
+            web_p = {"source": "guestlistgo", "first_name": "Real", "last_name": "Guest",
+                     "email": "real@gmail.com", "phone": "(602) 555-0100", "city": "Las Vegas",
+                     "venue": "OMNIA", "date": night, "women": 2, "men": 1,
+                     "age_21_confirmed": True, "ref": "gg-wake-1"}
+            self.assertEqual(pw.accept_website(intake, web_p), (200, "queued"))
+        self.assertEqual(called, ["woke", "woke"])
+
+    def test_all_exception_branches_notify_amyi(self):
+        import amyi
+        svc = mock.MagicMock()
+        # 1) _missing_required
+        with mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, "Empty body")), \
+                mock.patch.object(gmail_client, "get_subject", return_value="New guest list request submission"), \
+                mock.patch.object(gmail_client, "is_own_team_copy", return_value=False), \
+                mock.patch.object(main, "team_alert"), \
+                mock.patch.object(amyi, "notify") as notify_mock:
+            self.assertEqual(main.handle_message(svc, "m_missing", False, {}), gmail_client.EXCEPTION_LABEL)
+            notify_mock.assert_called_once()
+            self.assertEqual(notify_mock.call_args[0][0], "exception")
+
+        # 2) venue_problem == "unknown"
+        unknown_venue_raw = {
+            "name": "Real Guest", "email": "real@gmail.com", "phone": "7025550199",
+            "venues": ["Space Station Club"], "start_date": "2026-11-10", "end_date": "2026-11-10",
+            "female_count": "2", "male_count": "0", "authorized": True,
+        }
+        with mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, "body")), \
+                mock.patch.object(gmail_client, "get_subject", return_value="Subj"), \
+                mock.patch.object(gmail_client, "is_own_team_copy", return_value=False), \
+                mock.patch.object(gmail_client, "parse_request", return_value=unknown_venue_raw), \
+                mock.patch.object(main, "team_alert"), \
+                mock.patch.object(amyi, "notify") as notify_mock:
+            self.assertEqual(main.handle_message(svc, "m_unknown", False, {}), gmail_client.EXCEPTION_LABEL)
+            notify_mock.assert_called_once()
+            self.assertEqual(notify_mock.call_args[0][0], "exception")
+
+        # 3) process_one_request returns status == "action_needed"
+        valid_raw = {
+            "name": "Real Guest", "email": "real@gmail.com", "phone": "7025550199",
+            "venues": ["OMNIA Nightclub"], "start_date": "2026-11-10", "end_date": "2026-11-10",
+            "female_count": "2", "male_count": "0", "authorized": True,
+        }
+        with mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, "body")), \
+                mock.patch.object(gmail_client, "get_subject", return_value="Subj"), \
+                mock.patch.object(gmail_client, "is_own_team_copy", return_value=False), \
+                mock.patch.object(gmail_client, "parse_request", return_value=valid_raw), \
+                mock.patch.object(gmail_client, "set_labels"), \
+                mock.patch.object(main, "concierge_on", return_value=False), \
+                mock.patch.object(main, "send_links_on", return_value=False), \
+                mock.patch.object(main, "manual_booking_on", return_value=False), \
+                mock.patch.object(main, "process_one_request", return_value={"status": "action_needed", "issue": "Bad date", "required_action": "Fix"}), \
+                mock.patch.object(main, "team_alert"), \
+                mock.patch.object(amyi, "notify") as notify_mock:
+            self.assertEqual(main.handle_message(svc, "m_act", False, {}), gmail_client.EXCEPTION_LABEL)
+            notify_mock.assert_called_once()
+            self.assertEqual(notify_mock.call_args[0][0], "exception")
+
+        # 4) process_one_request returns action_needed_records
+        with mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, "body")), \
+                mock.patch.object(gmail_client, "get_subject", return_value="Subj"), \
+                mock.patch.object(gmail_client, "is_own_team_copy", return_value=False), \
+                mock.patch.object(gmail_client, "parse_request", return_value=valid_raw), \
+                mock.patch.object(gmail_client, "set_labels"), \
+                mock.patch.object(main, "concierge_on", return_value=False), \
+                mock.patch.object(main, "send_links_on", return_value=False), \
+                mock.patch.object(main, "manual_booking_on", return_value=False), \
+                mock.patch.object(main, "process_one_request", return_value={
+                    "status": "ok",
+                    "request": {"first_name": "Real", "last_name": "Guest", "email": "real@gmail.com"},
+                    "action_needed_records": ["TAO error"],
+                }), \
+                mock.patch.object(main, "team_alert"), \
+                mock.patch.object(amyi, "notify") as notify_mock:
+            self.assertEqual(main.handle_message(svc, "m_rec", False, {}), gmail_client.EXCEPTION_LABEL)
+            notify_mock.assert_called_once()
+            self.assertEqual(notify_mock.call_args[0][0], "exception")
+
+        # 5) run_once uncaught exception branch
+        with mock.patch.object(gmail_client, "list_pending_requests", return_value=[{"id": "m_crash"}]), \
+                mock.patch.object(main, "handle_message", side_effect=RuntimeError("boom")), \
+                mock.patch.object(gmail_client, "set_labels"), \
+                mock.patch.object(main, "team_alert"), \
+                mock.patch.object(amyi, "notify") as notify_mock:
+            main.run_once(svc, "live", {})
+            notify_mock.assert_called_once()
+            self.assertEqual(notify_mock.call_args[0][0], "exception")

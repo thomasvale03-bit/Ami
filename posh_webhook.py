@@ -297,8 +297,9 @@ class Intake:
     """Puts orders into the intake inbox. One Gmail client per instance
     (kept off the main loop's client: googleapiclient isn't thread-safe)."""
 
-    def __init__(self, service_factory, intake_email, dry_run=False, lookup=None):
+    def __init__(self, service_factory, intake_email, dry_run=False, lookup=None, on_accept=None):
         self.lookup = lookup
+        self.on_accept = on_accept
         self._factory, self._service, self.intake_email, self.dry_run = service_factory, None, intake_email, dry_run
         self._seen = set()
         self._lock = threading.Lock()
@@ -355,6 +356,11 @@ class Intake:
         if (os.environ.get("AMYI_RAW_POSH_PING", "").strip().lower() in ("1", "true", "yes")
                 or (_rules.is_drais(event_name) and not _speakeasy.auto_on())):
             _ping_amyi(payload, key, night)
+        if callable(getattr(self, "on_accept", None)):
+            try:
+                self.on_accept()
+            except Exception:
+                log.exception("on_accept callback failed")
         return 200, "queued"
 
 
@@ -949,6 +955,11 @@ def _deliver_website(intake, clean):
     except OSError:
         log.exception("Website form: could not record delivered %s", key)
     notify_team_website(intake.service(), clean, msg["Subject"])
+    if callable(getattr(intake, "on_accept", None)):
+        try:
+            intake.on_accept()
+        except Exception:
+            log.exception("on_accept callback failed")
 
 
 def accept_website(intake, payload, _sleep=None):

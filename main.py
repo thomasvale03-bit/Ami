@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -515,12 +516,15 @@ def concierge_handoff(service, message_id, raw, dry_run):
     """Guest confirmation + Jose sign-up order. No TAO, no needs-attention.
     Unprocessable or all-past requests are labeled and dropped quietly."""
     if raw.get("_missing_required"):
+        issue = f"Request is missing required fields: {', '.join(raw['_missing_required'])}."
         log.info("%s: missing %s; concierge skip (no team alert)", message_id, raw["_missing_required"])
+        _notify_exception(message_id, raw, issue, dry_run)
         return gmail_client.EXCEPTION_LABEL
     try:
         request = normalize_guest_request(raw)
     except ActionNeeded as e:
         log.info("%s: %s; concierge skip (no team alert)", message_id, e.issue)
+        _notify_exception(message_id, raw, e.issue, dry_run)
         return gmail_client.EXCEPTION_LABEL
 
     today = datetime.now(VEGAS).date()
@@ -567,6 +571,7 @@ def concierge_handoff(service, message_id, raw, dry_run):
     drais_nights = [n["date"] for n in nights] if request.get("drais") else []
     if not nights and not drais_nights:
         log.info("%s: every requested night has passed; concierge skip", message_id)
+        _notify_exception(message_id, raw, "Every requested night has already passed.", dry_run)
         return gmail_client.EXCEPTION_LABEL
 
     drais = {"name": f"{request['first_name']} {request['last_name']}".strip(),
@@ -673,6 +678,7 @@ def send_signup_links(service, message_id, raw, dry_run):
             venue=", ".join(raw.get("venues") or []) or "(none specified)",
             date=f"{raw.get('start_date')} to {raw.get('end_date')}",
             issue=e.issue, required_action=e.required_action)], dry_run)
+        _notify_exception(message_id, raw, e.issue, dry_run)
         return gmail_client.EXCEPTION_LABEL
 
     today = datetime.now(VEGAS).date()
@@ -682,6 +688,7 @@ def send_signup_links(service, message_id, raw, dry_run):
             date=f"{request['start_date']} to {request['end_date']}",
             issue="Every requested night has already passed.",
             required_action="Confirm the night with the guest and send the link manually.")], dry_run)
+        _notify_exception(message_id, raw, "Every requested night has already passed.", dry_run)
         return gmail_client.EXCEPTION_LABEL
 
     catalog = tao_portal.catalog_snapshot()  # {} if TAO's check is up
@@ -741,6 +748,7 @@ def manual_handoff(service, message_id, raw, dry_run):
             venue=", ".join(raw.get("venues") or []) or "(none specified)",
             date=f"{raw.get('start_date')} to {raw.get('end_date')}",
             issue=e.issue, required_action=e.required_action)], dry_run)
+        _notify_exception(message_id, raw, e.issue, dry_run)
         return gmail_client.EXCEPTION_LABEL
 
     today = datetime.now(VEGAS).date()
@@ -750,6 +758,7 @@ def manual_handoff(service, message_id, raw, dry_run):
             date=f"{request['start_date']} to {request['end_date']}",
             issue="Every requested night has already passed.",
             required_action="Confirm the night with the guest and book manually.")], dry_run)
+        _notify_exception(message_id, raw, "Every requested night has already passed.", dry_run)
         return gmail_client.EXCEPTION_LABEL
 
     nights, prev = [], None
@@ -807,6 +816,26 @@ def _party(raw):
         return (int(raw.get("female_count") or 0) + int(raw.get("male_count") or 0)) or ""
     except (TypeError, ValueError):
         return ""
+
+
+def _notify_exception(message_id, raw, issue, dry_run=False):
+    if dry_run:
+        return
+    raw = raw or {}
+    p = raw.get("posh") or {}
+    amyi.mark_job()
+    amyi.notify(
+        "posh_exception" if raw.get("source") == "Posh" else "exception",
+        name=raw.get("name", ""),
+        email=raw.get("email", ""),
+        phone=raw.get("phone", "") or p.get("phone", ""),
+        event=p.get("event_name", "") or issue,
+        venue=raw.get("venues") or [],
+        dates=[d for d in (raw.get("start_date"), raw.get("end_date")) if d],
+        party=_party(raw),
+        source=(raw.get("source") or "posh").lower(),
+        ref=message_id,
+    )
 
 
 def handle_message(service, message_id, dry_run, labels, allowlist=None):
@@ -878,11 +907,13 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
             return gmail_client.PROCESSED_LABEL
 
     if raw.get("_missing_required"):
+        issue = f"Request is missing required fields: {', '.join(raw['_missing_required'])}."
         team_alert(service, message_id, raw, [internal_action_needed(
             raw.get("name", "(unknown)"), raw.get("email", "(unknown)"), venue="(n/a)", date="(n/a)",
-            issue=f"Request is missing required fields: {', '.join(raw['_missing_required'])}.",
+            issue=issue,
             required_action="Read the original email and process manually.",
         )], dry_run)
+        _notify_exception(message_id, raw, issue, dry_run)
         return gmail_client.EXCEPTION_LABEL
 
     if raw.get("_action_needed") or (raw.get("source") == "Posh" and not posh.consent_on_file()):
@@ -897,17 +928,7 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
             venue=", ".join(raw.get("venues") or []) or "(none specified)",
             date=raw.get("start_date", "(unknown)"), issue=issue, required_action=action,
         ) + details], dry_run)
-        if not dry_run:
-            p = raw.get("posh") or {}
-            amyi.notify("posh_exception" if raw.get("source") == "Posh" else "exception",
-                        name=raw.get("name", ""), email=raw.get("email", ""),
-                        phone=raw.get("phone", "") or p.get("phone", ""),
-                        event=p.get("event_name", "") or issue,
-                        venue=raw.get("venues") or [],
-                        dates=[d for d in (raw.get("start_date"), raw.get("end_date")) if d],
-                        party=_party(raw),
-                        source=(raw.get("source") or "posh").lower(),
-                        ref=message_id)
+        _notify_exception(message_id, raw, issue, dry_run)
         return gmail_client.EXCEPTION_LABEL
 
     venue_problem = non_vegas_venue_problem(raw)
@@ -915,12 +936,14 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
         log.info("%s: Scottsdale venue %s; sending Scottsdale confirmation (no TAO Vegas)", message_id, raw.get("venues"))
         return handle_scottsdale_request(service, message_id, raw, dry_run)
     if venue_problem == "unknown":
+        issue = "Unrecognized venue; not routed to a default Vegas club."
         team_alert(service, message_id, raw, [internal_action_needed(
             raw.get("name", "(unknown)"), raw.get("email", "(unknown)"),
             venue=", ".join(raw.get("venues") or []), date=raw.get("start_date", "(unknown)"),
-            issue="Unrecognized venue; not routed to a default Vegas club.",
+            issue=issue,
             required_action="Check the request and register the guest manually.",
         )], dry_run)
+        _notify_exception(message_id, raw, issue, dry_run)
         return gmail_client.EXCEPTION_LABEL
 
     if concierge_on():
@@ -944,6 +967,7 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
             date=f"{raw.get('start_date')} to {raw.get('end_date')}",
             issue=result["issue"], required_action=result["required_action"],
         )], dry_run)
+        _notify_exception(message_id, raw, result["issue"], dry_run)
         return gmail_client.EXCEPTION_LABEL
 
     request = result["request"]
@@ -975,6 +999,7 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
 
     if result.get("action_needed_records"):
         team_alert(service, message_id, raw, result["action_needed_records"], dry_run)
+        _notify_exception(message_id, raw, "; ".join(str(r) for r in result["action_needed_records"]), dry_run)
         return gmail_client.EXCEPTION_LABEL
     return gmail_client.PROCESSED_LABEL
 
@@ -1369,10 +1394,12 @@ def run_once(service, mode, labels, allowlist=None, start_after=None):
             # A TAO submission may already have gone through, so never let
             # this message be picked up and resubmitted automatically.
             outcome = gmail_client.EXCEPTION_LABEL
-            team_alert(service, message_id, {}, [
+            issue = (
                 "Amy hit an error partway through this request. A TAO registration may or may "
                 "not have gone through — check TAO before re-submitting."
-            ], dry_run)
+            )
+            team_alert(service, message_id, {}, [issue], dry_run)
+            _notify_exception(message_id, {}, issue, dry_run)
         if outcome is None:
             continue
         log.info("%s -> %s", message_id, outcome)
@@ -1452,10 +1479,14 @@ def main():
         except Exception:
             log.exception("SpeakeasyGo test run failed")
 
+    wake = threading.Event()
     intake = None
     if args.loop or os.environ.get("PORT"):
         try:
-            intake = posh_webhook.Intake(gmail_client.get_service, rules.INTAKE_EMAIL, dry_run=mode == "dry-run")
+            intake = posh_webhook.Intake(
+                gmail_client.get_service, rules.INTAKE_EMAIL,
+                dry_run=mode == "dry-run", on_accept=wake.set,
+            )
             posh_webhook.serve(intake, store=newsletter_store())
         except Exception:
             log.exception("Posh webhook server failed to start; inbox loop continues")
@@ -1517,7 +1548,8 @@ def main():
         if not args.loop:
             break
         tao_portal.reset_catalog()  # fresh promoter-page listings every cycle
-        time.sleep(poll_seconds)
+        wake.wait(poll_seconds)
+        wake.clear()
 
 
 if __name__ == "__main__":
