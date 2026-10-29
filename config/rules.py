@@ -139,7 +139,7 @@ def normalize_venue_name(name):
 # form, Posh webhook, assisted sign-up jobs). Override in Railway with
 # DEFAULT_GUEST_PHONE / DEFAULT_BILLING_ZIP.
 FALLBACK_PHONE = "4802649387"
-FALLBACK_BILLING_ZIP = "85311"
+FALLBACK_BILLING_ZIP = "85281"
 
 
 def fallback_phone():
