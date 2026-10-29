@@ -11,7 +11,9 @@ Guards (each ping wakes a costly routine):
   on email+dates (not type/venue), so signup_job/contact_form/posh_guest for the
   same submission never all fire
   (persisted to AMYI_DEDUPE_FILE, default data/amyi_sent.json);
-- a single attempt, no retries."""
+- up to 3 retries (~5s, 30s, 2min); the dedupe claim is written only after
+  a 2xx, and every outcome (real HTTP status + body) is logged and written to
+  the job ledger (job_tracker)."""
 import json
 import logging
 import os
@@ -19,6 +21,7 @@ import re
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 
 log = logging.getLogger("amy.amyi")
@@ -94,46 +97,125 @@ def _party_keys(payload):
     return [f"{k}|p{party}" for k in _keys(payload)] if party else []
 
 
-def claim(payload, now=None):
-    """True (and record it) if this ping wasn't sent in the last 24h."""
+def is_duplicate(payload, now=None):
+    """True if this ping already went out (2xx) in the last 24h, or one for the
+    same keys is in flight. Writes nothing."""
     now = now or time.time()
     with _lock:
         sent = _load()
         for k in [k for k, ts in sent.items() if now - ts > DEDUPE_SECONDS]:
             del sent[k]
-        keys, pkeys = _keys(payload), _party_keys(payload)
-        if pkeys:
-            # Known party size: skip only if this exact guest+party was sent.
-            # (A ping for the same guest with another party size = a change.)
-            if any(k in sent for k in pkeys):
-                return False
-        elif any(k in sent for k in keys):
-            return False
-        keys = keys + pkeys
-        for k in keys:
+        pkeys = _party_keys(payload)
+        keys = pkeys or _keys(payload)
+        return any(k in sent or k in _inflight for k in keys)
+
+
+def record_sent(payload, now=None):
+    """Write the dedupe claim (call only after a 2xx)."""
+    now = now or time.time()
+    with _lock:
+        sent = _load()
+        for k in _keys(payload) + _party_keys(payload):
             sent[k] = now
         _save(sent)
-        return True
+
+
+def release(payload):
+    """Drop any claim for this payload (after a failed delivery)."""
+    with _lock:
+        sent = _load()
+        for k in _keys(payload) + _party_keys(payload):
+            sent.pop(k, None)
+        _save(sent)
+
+
+def claim(payload, now=None):
+    """Back-compat: True (and record it) if not sent in the last 24h."""
+    if is_duplicate(payload, now):
+        return False
+    record_sent(payload, now)
+    return True
+
+
+RETRY_DELAYS = (5, 30, 120)
+_inflight = set()
+
+
+def _post_once(payload, opener=None):
+    """One HTTP attempt. Returns (status or None, body text)."""
+    url = os.environ.get("AMYI_WEBHOOK_URL")
+    if not url:
+        return None, "AMYI_WEBHOOK_URL unset"
+    headers = {"Content-Type": "application/json"}
+    auth = (os.environ.get("AMYI_WEBHOOK_AUTH") or "").strip()
+    if auth.lower().startswith("authorization:"):  # tolerate a full "Authorization: ..." line
+        auth = auth.split(":", 1)[1].strip()
+    if auth:
+        headers["Authorization"] = auth
+    req = urllib.request.Request(url, data=json.dumps(payload, default=str).encode(),
+                                 headers=headers, method="POST")
+    try:
+        with (opener or urllib.request.urlopen)(req, timeout=15) as resp:
+            return resp.status, resp.read(2000).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read(2000).decode("utf-8", "replace")
+        except Exception:
+            body = ""
+        return e.code, body
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def deliver(payload, _sleep=time.sleep, opener=None, delays=RETRY_DELAYS):
+    """POST with retries. Claim written only on 2xx; released on failure.
+    Outcome logged and written to the job ledger. Returns True on 2xx."""
+    import job_tracker
+    keys = _keys(payload) + _party_keys(payload)
+    with _lock:
+        _inflight.update(keys)
+    status, body, attempts = None, "", 0
+    try:
+        for i in range(len(delays) + 1):
+            if i:
+                _sleep(delays[i - 1])
+            attempts += 1
+            status, body = _post_once(payload, opener)
+            log.info("AMYI ping %s ref=%s attempt %d -> HTTP %s body=%r",
+                     payload.get("type"), payload.get("ref"), attempts, status, (body or "")[:500])
+            if status is not None and 200 <= status < 300:
+                break
+        ok = status is not None and 200 <= status < 300
+        try:
+            if ok:
+                record_sent(payload)
+            else:
+                release(payload)
+                log.warning("AMYI ping %s ref=%s FAILED after %d attempts (last HTTP %s)",
+                            payload.get("type"), payload.get("ref"), attempts, status)
+        except Exception as e:
+            log.warning("AMYI dedupe write failed: %s", e)
+    finally:
+        with _lock:
+            _inflight.difference_update(keys)
+    job_tracker.webhook_result(payload.get("ref") or "", status, attempts, ok, payload=payload)
+    return ok
 
 
 def _post(payload):
-    """One attempt only; no retries."""
     try:
-        url = os.environ.get("AMYI_WEBHOOK_URL")
-        if not url:
-            return
-        headers = {"Content-Type": "application/json"}
-        auth = (os.environ.get("AMYI_WEBHOOK_AUTH") or "").strip()
-        if auth.lower().startswith("authorization:"):  # tolerate a full "Authorization: ..." line
-            auth = auth.split(":", 1)[1].strip()
-        if auth:
-            headers["Authorization"] = auth
-        req = urllib.request.Request(url, data=json.dumps(payload, default=str).encode(),
-                                     headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            log.info("AMYI ping %s -> %s", payload.get("type"), resp.status)
+        return deliver(payload)
     except Exception as e:  # never break the caller
         log.warning("AMYI ping %s failed: %s", payload.get("type"), type(e).__name__)
+        return False
+
+
+def refire(payload):
+    """Watchdog re-fire: one more delivery (with retries) on a daemon thread."""
+    if disabled() or not payload:
+        return False
+    threading.Thread(target=_post, args=(payload,), daemon=True).start()
+    return True
 
 
 def _norm_dates(dates):
@@ -163,7 +245,7 @@ def notify(type, name="", email="", venue="", dates="", ref="", test=False, wait
             log.info("AMYI ping %s skipped (test traffic)", type)
             return False
         payload = build_payload(type, name, email, venue, dates, ref, phone, event, party, source)
-        if not claim(payload):
+        if is_duplicate(payload):
             log.info("AMYI ping %s skipped (duplicate within 24h)", type)
             return False
         t = threading.Thread(target=_post, args=(payload,), daemon=True)

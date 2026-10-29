@@ -27,7 +27,7 @@ class GuardTests(unittest.TestCase):
 
     def _live(self, **kw):
         with mock.patch.object(amyi, "disabled", return_value=False), \
-             mock.patch.object(amyi, "_post") as post:
+             mock.patch.object(amyi, "_post", side_effect=amyi.record_sent) as post:
             out = amyi.notify(**kw, wait=True)
         return out, post
 
@@ -55,10 +55,45 @@ class GuardTests(unittest.TestCase):
         self.assertFalse(amyi.claim(p, now=1000 + 3600))
         self.assertTrue(amyi.claim(p, now=1000 + amyi.DEDUPE_SECONDS + 1))
 
-    def test_single_attempt(self):
-        with mock.patch("urllib.request.urlopen", side_effect=OSError) as uo:
-            amyi._post({"type": "x"})
-        self.assertEqual(uo.call_count, 1)
+    def _jobs(self):
+        import job_tracker
+        os.environ["AMY_JOBS_FILE"] = os.path.join(self.tmp.name, "jobs.json")
+        return job_tracker
+
+    def test_retries_with_backoff_then_releases_claim(self):
+        jt = self._jobs()
+        jt.record("r9", guest="Bob", email="bob@gmail.com", dates=["2027-01-01"])
+        p = amyi.build_payload("signup_job", "Bob", "bob@gmail.com", dates="2027-01-01", ref="r9")
+        sleeps = []
+        with mock.patch.object(amyi, "_post_once", return_value=(503, "busy")) as po:
+            self.assertFalse(amyi.deliver(p, _sleep=sleeps.append))
+        self.assertEqual(po.call_count, 4)
+        self.assertEqual(sleeps, [5, 30, 120])
+        self.assertFalse(amyi.is_duplicate(p))  # no claim after failure
+        row = jt.get("r9")
+        self.assertEqual((row["webhook_status"], row["attempts"], row["failures"]), (503, 4, 1))
+
+    def test_claim_written_only_after_2xx(self):
+        jt = self._jobs()
+        jt.record("r10", guest="Bob", email="bob@gmail.com")
+        p = amyi.build_payload("signup_job", "Bob", "bob@gmail.com", dates="2027-01-01", ref="r10")
+        with mock.patch.object(amyi, "_post_once", side_effect=[(None, "URLError"), (200, "ok")]):
+            self.assertTrue(amyi.deliver(p, _sleep=lambda s: None))
+        self.assertTrue(amyi.is_duplicate(p))
+        self.assertEqual(jt.get("r10")["webhook_status"], 200)
+
+    def test_logs_real_status_and_body(self):
+        p = amyi.build_payload("x", "Bob", "b@gmail.com", ref="r11")
+        with mock.patch.object(amyi, "_post_once", return_value=(201, "queued-abc")), \
+             self.assertLogs("amy.amyi", "INFO") as cm:
+            amyi.deliver(p, _sleep=lambda s: None)
+        self.assertTrue(any("HTTP 201" in m and "queued-abc" in m for m in cm.output))
+
+    def test_http_error_status_captured(self):
+        import io, urllib.error
+        err = urllib.error.HTTPError("u", 401, "no", {}, io.BytesIO(b"bad auth"))
+        with mock.patch("urllib.request.urlopen", side_effect=err):
+            self.assertEqual(amyi._post_once({"type": "x"}), (401, "bad auth"))
 
 
 if __name__ == "__main__":

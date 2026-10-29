@@ -1223,7 +1223,22 @@ def make_handler(intake, store=None):
             self.end_headers()
             self.wfile.write(data)
 
+        def _job_done(self, ref):
+            headers = {k.lower(): v for k, v in self.headers.items()}
+            if not branded_token_ok(headers):
+                return self._reply(401, "unauthorized")
+            import job_tracker
+            from urllib.parse import unquote
+            ref = unquote(ref)
+            if not ref or job_tracker.get(ref) is None:
+                return self._reply(404, {"done": False, "error": "unknown ref"})
+            row = job_tracker.mark_done(ref)
+            return self._reply(200, {"done": True, "ref": ref, "done_at": (row or {}).get("done_at")})
+
         def do_POST(self):
+            _p = urlparse(self.path).path.rstrip("/")
+            if _p.startswith("/jobs/") and _p.endswith("/done") and _p.count("/") == 3:
+                return self._job_done(_p[len("/jobs/"):-len("/done")])
             if urlparse(self.path).path.rstrip("/") == "/webhooks/website":
                 return self._website()
             if urlparse(self.path).path.rstrip("/") == "/send-branded":

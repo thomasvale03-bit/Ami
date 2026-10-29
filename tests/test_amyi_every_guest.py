@@ -11,7 +11,7 @@ class EveryGuestPings(unittest.TestCase):
         mock.patch.dict(os.environ, {"AMYI_DEDUPE_FILE": f}).start()
         self.posts = []
         mock.patch.object(amyi, "disabled", return_value=False).start()
-        mock.patch.object(amyi, "_post", side_effect=self.posts.append).start()
+        mock.patch.object(amyi, "_post", side_effect=lambda pl: (self.posts.append(pl), amyi.record_sent(pl))).start()
         mock.patch.object(amyi.threading, "Thread", side_effect=lambda target, args, daemon: mock.Mock(
             start=lambda: target(*args), join=lambda t=None: None)).start()
 

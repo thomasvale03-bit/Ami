@@ -91,8 +91,9 @@ class HandleMessageTests(unittest.TestCase):
         out, sent, notes, submit, jobs = self._handle(
             POSH.replace("Playmaker Tuesdays at OMNIA", "Almost Famous Guestlist"))
         self._assert_no_tao(out, sent, submit, jobs, gmail_client.PROCESSED_LABEL)
-        self.assertEqual(len(sent), 1)  # Posh Almost Famous sends guest confirmation only (door list covers team)
+        self.assertEqual(len(sent), 2)  # guest confirmation + team summary (always, incl. Posh AF/Riot House)
         self.assertIn("You're on the list: Almost Famous", sent[0][0][3])
+        self.assertTrue(sent[1][0][3].startswith("Signed up: "))
         self.assertEqual(notes, [])
 
     def test_unknown_venue_goes_to_team_not_default(self):

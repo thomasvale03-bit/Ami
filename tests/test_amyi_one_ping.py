@@ -12,7 +12,7 @@ class OnePingPerJob(unittest.TestCase):
         self.env.start()
         self.posts = []
         self.p1 = mock.patch.object(amyi, "disabled", return_value=False)
-        self.p2 = mock.patch.object(amyi, "_post", side_effect=self.posts.append)
+        self.p2 = mock.patch.object(amyi, "_post", side_effect=lambda pl: (self.posts.append(pl), amyi.record_sent(pl)))
         self.p1.start(); self.p2.start()
 
     def tearDown(self):

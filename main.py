@@ -30,7 +30,7 @@ from templates import html_emails
 from templates.emails import (
     FOLLOW_UP_DELAY_DAYS, consolidated_confirmation, follow_up_email, internal_action_needed,
     internal_processed_record, manual_work_order, manual_confirmation_draft,
-    guest_signup_links_email, guest_confirmation, jose_signup_order, weekly_lineup_email,
+    guest_signup_links_email, guest_confirmation, pending_signup_email, weekly_lineup_email,
 )
 import gmail_client
 import newsletter
@@ -42,6 +42,7 @@ import assisted_jobs
 import amyi
 import headliners
 import speakeasy
+import job_tracker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("amy")
@@ -75,7 +76,6 @@ def handle_scottsdale_request(service, message_id, raw, dry_run):
     """Automatically send the branded Scottsdale confirmation (Riot House,
     Almost Famous, El Hefe, Cake Nightclub, Maya Dayclub) without routing to
     TAO Vegas or waking Grok Bot."""
-    amyi.mark_job()
     email = (raw.get("email") or "").strip()
     full_name = (raw.get("name") or "").strip()
     first_name = (full_name.split()[0] if full_name else "there")
@@ -112,31 +112,48 @@ def handle_scottsdale_request(service, message_id, raw, dry_run):
         log.info("%s: GuestlistGo Scottsdale sign-up; Playmaker confirmation skipped", message_id)
         return gmail_client.PROCESSED_LABEL
 
-    if email:
-        _send_branded_or_gmail(
-            service,
-            f"amy-scottsdale-{message_id}@playmakerentertainment.com",
-            email,
-            subject,
-            text,
-            html,
-            dedupe_query=f'to:{email} subject:"{subject}" newer_than:7d',
-        )
+    order_id = (raw.get("posh") or {}).get("order_number") or ""
+    _track(message_id, name=full_name, email=email, venue=canonical, dates=nights, order_id=order_id)
 
-    if canonical not in ("Riot House", "Almost Famous") or raw.get("source") != "Posh":
-        date_lbl = nights[0] if len(nights) == 1 else f"{nights[0]} to {nights[-1]}"
-        tsub = f"Signed up: {full_name or email} — {canonical} ({date_lbl})"
-        tbody = (
-            f"Scottsdale guest list confirmation sent automatically by AMY.\n\n"
-            f"Name: {full_name or '(none)'}\n"
-            f"Email: {email}\n"
-            f"Phone: {raw.get('phone') or (raw.get('posh') or {}).get('phone') or '(none)'}\n"
-            f"Venue: {canonical}\n"
-            f"Dates: {', '.join(nights)}\n"
-            f"Party: {f_cnt}F / {m_cnt}M\n\n"
-            f"Ref: {message_id}"
-        )
-        thtml = f'<html><body><pre style="font-family:inherit;white-space:pre-wrap">{tbody}</pre></body></html>'
+    sent_ok = False
+    if email:
+        try:
+            sent_ok = bool(_send_branded_or_gmail(
+                service,
+                f"amy-scottsdale-{message_id}@playmakerentertainment.com",
+                email,
+                subject,
+                text,
+                html,
+                dedupe_query=f'to:{email} subject:"{subject}" newer_than:7d',
+            ))
+        except Exception:
+            log.exception("%s: Scottsdale confirmation send raised", message_id)
+            sent_ok = False
+    if not sent_ok:
+        issue = (f"Scottsdale confirmation to {email or '(no email)'} for {canonical} "
+                 f"({', '.join(nights)}) did not send.")
+        log.warning("%s: %s", message_id, issue)
+        _notify_exception(f"{message_id}:send-failed", raw, issue, track=False)
+
+    # Team summary always goes out (Riot House / Almost Famous Posh orders included).
+    date_lbl = nights[0] if len(nights) == 1 else f"{nights[0]} to {nights[-1]}"
+    status = "Signed up" if sent_ok else "SEND FAILED"
+    tsub = f"{status}: {full_name or email} — {canonical} ({date_lbl})"
+    tbody = (
+        (f"Scottsdale guest list confirmation sent automatically by AMY.\n\n" if sent_ok else
+         f"AMY could NOT send this guest's Scottsdale confirmation. AMYI has been alerted.\n\n")
+        + f"Name: {full_name or '(none)'}\n"
+        f"Email: {email}\n"
+        f"Phone: {raw.get('phone') or (raw.get('posh') or {}).get('phone') or '(none)'}\n"
+        f"Venue: {canonical}\n"
+        f"Dates: {', '.join(nights)}\n"
+        f"Party: {f_cnt}F / {m_cnt}M\n"
+        + (f"Posh order: {order_id}\n" if order_id else "")
+        + f"\nRef: {message_id}"
+    )
+    thtml = f'<html><body><pre style="font-family:inherit;white-space:pre-wrap">{tbody}</pre></body></html>'
+    try:
         _send_branded_or_gmail(
             service,
             f"amy-scottsdale-team-{message_id}@playmakerentertainment.com",
@@ -146,6 +163,11 @@ def handle_scottsdale_request(service, message_id, raw, dry_run):
             thtml,
             dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Ref: {message_id}"',
         )
+    except Exception:
+        log.exception("%s: Scottsdale team summary send failed", message_id)
+    if not sent_ok:
+        return gmail_client.EXCEPTION_LABEL
+    job_tracker.mark_done(message_id)
     return gmail_client.PROCESSED_LABEL
 
 
@@ -492,8 +514,8 @@ def posh_summary(raw):
 def concierge_on():
     """AMY_CONCIERGE=true: Amy emails the guest a plain confirmation (no link,
     just the clubs they're set for) and a separate sign-up to-do to the team
-    (Jose) to register them on TAO. Also turns off the old "needs attention"
-    emails. The owner clicks nothing; the admin does the TAO signup."""
+    (AMYI books on TAO; nights not posted yet are recorded as pending jobs).
+    Also turns off the old "needs attention" emails."""
     return os.environ.get("AMY_CONCIERGE", "").strip().lower() in ("1", "true", "yes")
 
 
@@ -513,7 +535,9 @@ def guest_confirmation_on():
 
 
 def concierge_handoff(service, message_id, raw, dry_run):
-    """Guest confirmation + Jose sign-up order. No TAO, no needs-attention.
+    """Guest confirmation + AMYI jobs. Nights with a live TAO link become
+    sign-up jobs; nights not posted yet become pending jobs (AMYI alerted).
+    No manual team sign-up email, no needs-attention.
     Unprocessable or all-past requests are labeled and dropped quietly."""
     if raw.get("_missing_required"):
         issue = f"Request is missing required fields: {', '.join(raw['_missing_required'])}."
@@ -551,8 +575,8 @@ def concierge_handoff(service, message_id, raw, dry_run):
             chosen = opts[0]
         # Dayclub: only when its free pass is actually live that day.
         dayclub = next((dv for dv in dayclub_candidates(request) if (dv, d) in catalog), None) if live else None
-        # Direct sign-up links for the chosen venue(s), so Jose just taps, clears
-        # the check himself, and submits. Only present when live on the feed.
+        # Direct sign-up links for the chosen venue(s), for AMYI's job. Only
+        # present when live on the feed.
         signup_url = ticketsauce.promoter_link((catalog.get((chosen, d)) or {}).get("url"))
         dayclub_url = ticketsauce.promoter_link((catalog.get((dayclub, d)) or {}).get("url")) if dayclub else None
         nights.append({"date": d.isoformat(), "venue": chosen,
@@ -599,14 +623,20 @@ def concierge_handoff(service, message_id, raw, dry_run):
     ghtml = html_emails.concierge_confirmation_html(
         request["first_name"], nights,
         html_emails.party_size(request.get("female_count"), request.get("male_count")), drais=drais)
-    tsub, tbody = jose_signup_order(request, nights, drais_nights)
-    if drais_status:
-        tbody += f"\n\n{drais_status}"
-    tbody += f"\n\nRef: {message_id}"
+    jobs = concierge_jobs(request, nights, message_id)
+    job_dates = {j.get("date") for j in jobs}
+    pending = [n for n in nights if n["date"] not in job_dates]
+    tsub = tbody = None
+    if pending or drais_status:
+        tsub, tbody = pending_signup_email(request, pending, drais_nights)
+        if drais_status:
+            tbody += f"\n\n{drais_status}"
+        tbody += f"\n\nRef: {message_id}"
 
     if dry_run:
         print(f"[dry run] guest confirmation to {request['email']}:\n{gsub}\n{gbody}")
-        print(f"[dry run] Jose sign-up to {rules.PLAYMAKER_EMAIL}:\n{tsub}\n{tbody}")
+        if tsub:
+            print(f"[dry run] team notice to {rules.PLAYMAKER_EMAIL}:\n{tsub}\n{tbody}")
         return None
 
     if is_guestlistgo(raw):
@@ -620,15 +650,27 @@ def concierge_handoff(service, message_id, raw, dry_run):
     else:
         log.info("%s: immediate guest confirmation off (AMY_GUEST_CONFIRMATION); "
                  "guest hears from AMYI after sign-up", message_id)
-    if assisted_jobs.assisted_on():
-        jobs = concierge_jobs(request, nights, message_id)
-        if jobs:
-            send_assisted_jobs(service, message_id, request, jobs, dry_run=False)
-            return gmail_client.PROCESSED_LABEL
-    gmail_client.send_once(
-        service, f"amy-signup-{message_id}@playmakerentertainment.com",
-        rules.PLAYMAKER_EMAIL, tsub, tbody, sender=rules.SENDER_EMAIL,
-        dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Ref: {message_id}"')
+    if jobs:
+        send_assisted_jobs(service, message_id, request, jobs, dry_run=False)
+    if pending:
+        name = f"{request['first_name']} {request['last_name']}".strip()
+        for n in pending:
+            log.info("%s: %s %s has no live TAO link; pending job for AMYI (event not posted yet)",
+                     message_id, n["venue"], n["date"])
+        _notify_exception(
+            f"{message_id}:pending",
+            {**raw, "name": name, "email": request["email"], "phone": request.get("phone") or "",
+             "venues": [n["venue"] for n in pending],
+             "start_date": pending[0]["date"], "end_date": pending[-1]["date"]},
+            "event not posted yet — " + "; ".join(
+                f"{n['venue']} {n['date']}" + (f" (backups: {', '.join(n['backups'])})" if n.get("backups") else "")
+                for n in pending) + ". AMYI: book when it's live on TAO.")
+        job_tracker.update(f"{message_id}:pending", status="pending_event")
+    if tsub:
+        gmail_client.send_once(
+            service, f"amy-pending-{message_id}@playmakerentertainment.com",
+            rules.PLAYMAKER_EMAIL, tsub, tbody, sender=rules.SENDER_EMAIL,
+            dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Ref: {message_id}"')
     return gmail_client.PROCESSED_LABEL
 
 
@@ -655,7 +697,10 @@ def send_assisted_jobs(service, message_id, request, jobs, dry_run):
     sent = gmail_client.send_once(
         service, f"amy-assisted-{message_id}@playmakerentertainment.com", to, subject, body,
         sender=rules.SENDER_EMAIL, dedupe_query=f'to:{to} "Ref: {message_id}" subject:"Amy sign-up"')
-    amyi.mark_job()
+    _track(message_id, name=name, email=request.get("email", ""),
+           venue=sorted({j.get("venue", "") for j in jobs}),
+           dates=sorted({j.get("date", "") for j in jobs}),
+           order_id=((request.get("posh") or {}).get("order_number") or ""))
     amyi.notify("signup_job", name=name, email=request.get("email", ""),
                 venue=sorted({j.get("venue", "") for j in jobs}),
                 dates=sorted({j.get("date", "") for j in jobs}), ref=message_id)
@@ -818,12 +863,25 @@ def _party(raw):
         return ""
 
 
-def _notify_exception(message_id, raw, issue, dry_run=False):
+def _track(ref, name="", email="", venue="", dates=(), order_id=""):
+    """Mark this message as having a job and record it in the job ledger."""
+    amyi.mark_job()
+    return job_tracker.record(ref, order_id=order_id, guest=name, email=email,
+                              venue=venue, dates=dates)
+
+
+def _notify_exception(message_id, raw, issue, dry_run=False, track=True):
     if dry_run:
         return
     raw = raw or {}
     p = raw.get("posh") or {}
-    amyi.mark_job()
+    if track:
+        _track(message_id, name=raw.get("name", ""), email=raw.get("email", ""),
+               venue=raw.get("venues") or [],
+               dates=[d for d in (raw.get("start_date"), raw.get("end_date")) if d],
+               order_id=p.get("order_number") or "")
+    else:
+        amyi.mark_job()
     amyi.notify(
         "posh_exception" if raw.get("source") == "Posh" else "exception",
         name=raw.get("name", ""),
@@ -836,6 +894,54 @@ def _notify_exception(message_id, raw, issue, dry_run=False):
         source=(raw.get("source") or "posh").lower(),
         ref=message_id,
     )
+
+
+def _job_raw(row):
+    dates = row.get("dates") or []
+    return {"name": row.get("guest", ""), "email": row.get("email", ""),
+            "venues": [v.strip() for v in (row.get("venue") or "").split(",") if v.strip()],
+            "start_date": dates[0] if dates else "", "end_date": dates[-1] if dates else "",
+            "source": "watchdog"}
+
+
+def _job_team_email(service, row, subject_prefix, note):
+    body = (f"{note}\n\nGuest: {row.get('guest') or '(none)'}\nEmail: {row.get('email') or '(none)'}\n"
+            f"Venue: {row.get('venue') or '(none)'}\nDates: {', '.join(row.get('dates') or [])}\n"
+            f"Webhook status: {row.get('webhook_status')} (attempts {row.get('attempts')}, "
+            f"failures {row.get('failures')})\n\nRef: {row['ref']}")
+    html = f'<html><body><pre style="font-family:inherit;white-space:pre-wrap">{body}</pre></body></html>'
+    code, res = posh_webhook.send_branded(service, {
+        "to": rules.PLAYMAKER_EMAIL,
+        "subject": f"{subject_prefix}: {row.get('guest') or row.get('email')} — {', '.join(row.get('dates') or [])}",
+        "text": body, "html": html,
+        "dedupe_query": f'to:{rules.PLAYMAKER_EMAIL} subject:"{subject_prefix}" "Ref: {row["ref"]}"'})
+    return code == 200
+
+
+def run_job_watchdog(service, now=None):
+    """Re-fire at ~3 min, alert AMYI + team at 5 min, escalate/manual at 15 min
+    or after 3 failed deliveries, for every job not marked done."""
+    def refire(row):
+        log.info("Job %s not done after 3 min; re-firing AMYI webhook", row["ref"])
+        amyi.refire(row.get("payload"))
+
+    def alert(row):
+        log.warning("Job %s not done after 5 min; alerting AMYI + team", row["ref"])
+        _notify_exception(f"{row['ref']}:watchdog", _job_raw(row),
+                          "AMYI job not marked done after 5 minutes", track=False)
+        _job_team_email(service, row, "AMYI job not done",
+                        "AMY queued this job for AMYI 5+ minutes ago and it hasn't been marked done.")
+
+    def escalate(row):
+        log.error("Job %s escalated to manual (age/failures)", row["ref"])
+        _notify_exception(f"{row['ref']}:manual", _job_raw(row),
+                          "ESCALATED: AMYI job not done after 15 minutes or 3 failed deliveries; "
+                          "marked manual", track=False)
+        _job_team_email(service, row, "ESCALATED — manual",
+                        "AMYI has not completed this job (15+ minutes or 3 failed webhook deliveries). "
+                        "It is now marked manual.")
+
+    return job_tracker.watchdog(refire, alert, escalate, now=now)
 
 
 def handle_message(service, message_id, dry_run, labels, allowlist=None):
@@ -1545,10 +1651,17 @@ def main():
             if not args.loop:
                 raise
             log.exception("Scottsdale door-list pass failed; will retry next cycle")
+        if mode != "dry-run":
+            try:
+                run_job_watchdog(service)
+            except Exception:
+                if not args.loop:
+                    raise
+                log.exception("Job watchdog pass failed; will retry next cycle")
         if not args.loop:
             break
         tao_portal.reset_catalog()  # fresh promoter-page listings every cycle
-        wake.wait(poll_seconds)
+        wake.wait(min(poll_seconds, 60) if job_tracker.has_open() else poll_seconds)
         wake.clear()
 
 

@@ -139,10 +139,32 @@ the form only after the check is gone.
 
 **Railway env vars**
 - `AMY_SIGNUP_MODE=assisted` — turn it on (anything else = old behavior; the
-  concierge/Jose email is unchanged when this is off).
+  concierge flow below is unchanged when this is off).
 - `ASSISTED_SIGNUP_TO=you@example.com` — where job emails go (default: the Playmaker inbox).
-- In concierge mode the job email replaces Jose's sign-up order for nights
-  that have a live sign-up link; nights without one still go to Jose.
+- In concierge mode nights with a live TAO sign-up link become AMYI sign-up
+  jobs. Nights with no live link (event not posted on TAO yet) are recorded as
+  pending jobs: AMY alerts AMYI (exception ping, "event not posted yet") and
+  emails the team a plain "Pending: <guest> — <date> (event not posted on TAO
+  yet; AMYI will book when live)". AMYI books it once it's posted. There is no
+  manual team sign-up email.
+
+## AMYI job ledger and watchdog
+
+Every AMYI job is a row in `jobs.json` in the persistent pending store
+(`AMY_PENDING_DIR`, `/data/pending` on Railway): ref, order id, guest, venue,
+dates, queued_at, webhook_status, attempts, done_at. AMYI pings retry 3 times
+(~5s, 30s, 2min) and log the real HTTP status/body; the 24h dedupe claim is
+written only after a 2xx. The poll loop re-fires a job's webhook once at ~3
+min if it isn't done, alerts AMYI + emails team@ at 5 min, and escalates and
+marks it manual at 15 min or after 3 failed deliveries. Pending (not-posted)
+jobs only escalate on delivery failures.
+
+AMYI marks a job done with (same token as /send-branded):
+
+```
+curl -X POST -H "Authorization: Bearer $BRANDED_SEND_TOKEN" \
+  https://<railway-domain>/jobs/<ref>/done
+```
 
 **One-time setup on your computer** (Python 3.10+, Google Chrome installed)
 ```
