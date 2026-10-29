@@ -36,6 +36,9 @@ sys.path.insert(0, str(ROOT))
 import assisted_jobs  # noqa: E402
 import tao_portal  # noqa: E402
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import browser_lock  # noqa: E402
+
 CHALLENGE_TIMEOUT_S = 180
 PROFILE_DIR = os.environ.get("AMY_SIGNUP_PROFILE", str(pathlib.Path.home() / ".amy-signup-profile"))
 RESULTS_DIR = pathlib.Path(os.environ.get("AMY_SIGNUP_RESULTS", "signup-results"))
@@ -281,7 +284,13 @@ def main(argv=None):
     if args.show:
         print(json.dumps(job, indent=2))
         return 0
-    result = run_job(job, confirm=args.confirm)
+    ref = job.get("ref") or f"{job.get('last_name', 'job')}-{os.getpid()}"
+    try:
+        with browser_lock.held(ref):  # one sign-up in the shared browser at a time
+            result = run_job(job, confirm=args.confirm)
+    except browser_lock.LockTimeout as e:
+        print(f"TIMEOUT: {e}; not starting this sign-up")
+        return 1
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     with open(RESULTS_DIR / "results.jsonl", "a") as f:
         f.write(json.dumps({"job": job, "result": {k: v for k, v in result.items() if k != "confirmation_text"}}) + "\n")
