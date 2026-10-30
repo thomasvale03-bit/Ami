@@ -905,16 +905,17 @@ def _job_raw(row):
 
 
 def _job_team_email(service, row, subject_prefix, note):
+    to = rules.WATCHDOG_ALERT_TO  # watchdog + escalation alerts only
     body = (f"{note}\n\nGuest: {row.get('guest') or '(none)'}\nEmail: {row.get('email') or '(none)'}\n"
             f"Venue: {row.get('venue') or '(none)'}\nDates: {', '.join(row.get('dates') or [])}\n"
             f"Webhook status: {row.get('webhook_status')} (attempts {row.get('attempts')}, "
             f"failures {row.get('failures')})\n\nRef: {row['ref']}")
     html = f'<html><body><pre style="font-family:inherit;white-space:pre-wrap">{body}</pre></body></html>'
     code, res = posh_webhook.send_branded(service, {
-        "to": rules.PLAYMAKER_EMAIL,
+        "to": to,
         "subject": f"{subject_prefix}: {row.get('guest') or row.get('email')} — {', '.join(row.get('dates') or [])}",
         "text": body, "html": html,
-        "dedupe_query": f'to:{rules.PLAYMAKER_EMAIL} subject:"{subject_prefix}" "Ref: {row["ref"]}"'})
+        "dedupe_query": f'to:{to} subject:"{subject_prefix}" "Ref: {row["ref"]}"'})
     return code == 200
 
 

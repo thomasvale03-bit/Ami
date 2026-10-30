@@ -37,6 +37,8 @@ ALL_AUTHORIZED_VENUES = set(NIGHTCLUBS) | set(DAYLIFE_VENUES)
 
 INTAKE_EMAIL = "valeconsultingaz@gmail.com"
 PLAYMAKER_EMAIL = "team@playmakerentertainment.com"
+# 5-min "AMYI job not done" and 15-min ESCALATED watchdog alerts
+WATCHDOG_ALERT_TO = __import__("os").environ.get("WATCHDOG_ALERT_TO", "infojarvis@mail.grokbot.com")
 # Wednesday "This Week in Vegas" newsletter list (override with WEEKLY_LINEUP_TO).
 NEWSLETTER_EMAIL = "newsletter@playmakerentertainment.com"
 
