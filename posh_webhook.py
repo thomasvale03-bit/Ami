@@ -1033,6 +1033,30 @@ def accept_website(intake, payload, _sleep=None):
         return 200, "queued (pending)"
 
 
+NON_PENDING_FILES = {"jobs.json"}
+_warned_pending = set()
+
+
+def _restore_jobs_ledger(d):
+    """One-time repair: build 36d3def moved the job ledger to jobs.json.bad.
+    Merge it back into jobs.json (rows written since then win)."""
+    bad = os.path.join(d, "jobs.json.bad")
+    if not os.path.exists(bad):
+        return
+    try:
+        import job_tracker
+        with open(bad) as fh:
+            old = json.load(fh)
+        with job_tracker._lock:
+            rows = job_tracker._load()
+            merged = dict(old if isinstance(old, dict) else {}, **rows)
+            job_tracker._save(merged)
+        os.remove(bad)
+        log.warning("Job ledger: restored %d row(s) from jobs.json.bad", len(merged))
+    except Exception:
+        log.exception("Job ledger: restore from jobs.json.bad failed")
+
+
 def retry_pending_website(intake):
     """Deliver sign-ups saved while Gmail was rate limited. Dedupe-safe:
     a key (pm- ref + night + venue) already delivered is just cleared.
@@ -1040,8 +1064,11 @@ def retry_pending_website(intake):
     import gmail_client
     done = left = 0
     d = pending_dir()
+    _restore_jobs_ledger(d)
     for name in sorted(os.listdir(d)):
-        if not name.endswith(".json"):
+        # jobs.json is job_tracker's ledger, not a pending sign-up: it was the
+        # source of the every-minute KeyError 'payload'.
+        if not name.endswith(".json") or name in NON_PENDING_FILES:
             continue
         path = os.path.join(d, name)
         with intake._lock:
@@ -1050,13 +1077,11 @@ def retry_pending_website(intake):
                     item = json.load(fh)
                 raw = item.get("payload") if isinstance(item, dict) else None
                 if not isinstance(raw, dict):
-                    # Malformed/legacy pending file (no "payload"): log once and
-                    # move it aside so the every-minute retry loop stops on it.
-                    log.warning("Website form: pending %s has no 'payload'; skipped and moved to .bad", name)
-                    try:
-                        os.replace(path, path + ".bad")
-                    except OSError:
-                        os.remove(path)
+                    # Not a pending sign-up (no "payload"): log once per file and
+                    # skip it, leaving it in place.
+                    if name not in _warned_pending:
+                        _warned_pending.add(name)
+                        log.warning("Website form: %s in pending dir has no 'payload'; skipping", name)
                     continue
                 clean, err = validate_website(raw)
                 if err:

@@ -65,8 +65,13 @@ class KarimaNight(unittest.TestCase):
 
 
 class PendingKeyError(unittest.TestCase):
-    def test_missing_payload_logged_and_skipped(self):
+    def setUp(self):
+        posh_webhook._warned_pending.clear()
+
+    def test_jobs_ledger_and_bad_files_skipped_without_keyerror(self):
         d = tempfile.mkdtemp()
+        with open(os.path.join(d, "jobs.json"), "w") as fh:
+            json.dump({"r1": {"ref": "r1"}}, fh)
         with open(os.path.join(d, "x.json"), "w") as fh:
             json.dump({"key": ["a"]}, fh)
         intake = mock.Mock(_lock=mock.MagicMock(), _seen=set())
@@ -74,5 +79,19 @@ class PendingKeyError(unittest.TestCase):
              self.assertLogs("amy", logging.WARNING) as cm:
             self.assertEqual(posh_webhook.retry_pending_website(intake), (0, 0))
             self.assertEqual(posh_webhook.retry_pending_website(intake), (0, 0))
-        self.assertEqual(len(cm.output), 1)
-        self.assertTrue(os.path.exists(os.path.join(d, "x.json.bad")))
+        self.assertEqual(len(cm.output), 1)  # x.json warned once; jobs.json silent
+        self.assertTrue(os.path.exists(os.path.join(d, "jobs.json")))
+        self.assertTrue(os.path.exists(os.path.join(d, "x.json")))
+
+    def test_restores_ledger_from_bad(self):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "jobs.json.bad"), "w") as fh:
+            json.dump({"old": {"ref": "old"}, "r2": {"ref": "r2", "v": 1}}, fh)
+        with open(os.path.join(d, "jobs.json"), "w") as fh:
+            json.dump({"r2": {"ref": "r2", "v": 2}}, fh)
+        with mock.patch.dict(os.environ, {"AMY_JOBS_FILE": os.path.join(d, "jobs.json")}):
+            posh_webhook._restore_jobs_ledger(d)
+        rows = json.load(open(os.path.join(d, "jobs.json")))
+        self.assertEqual(set(rows), {"old", "r2"})
+        self.assertEqual(rows["r2"]["v"], 2)
+        self.assertFalse(os.path.exists(os.path.join(d, "jobs.json.bad")))
