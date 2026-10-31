@@ -38,6 +38,20 @@ class WakeRule(unittest.TestCase):
         self.assertFalse(self.ping("90000003"))
         self.assertEqual(len(self.posts), 1)
 
+    def test_one_posh_order_one_wake_total(self):
+        with self.assertLogs("amy.amyi", logging.INFO) as cm:
+            self.assertTrue(self.ping("90000010"))  # posh_guest
+            self.assertFalse(amyi.notify("signup_job", name="Karima Hardwick", email="guest@gmail.com",
+                                         dates="2026-10-30", ref="m-10", order="90000010"))
+            self.assertTrue(amyi.notify("signup_job", name="Karima Hardwick", email="guest@gmail.com",
+                                        dates="2026-10-30", ref="m-11", order="90000011"))  # new order
+            self.assertTrue(amyi.notify("signup_job", name="Ana Real", email="ana@gmail.com",
+                                        dates="2026-10-31", ref="m-12"))  # website, no order
+        self.assertEqual([(p["type"], p["order"]) for p in self.posts],
+                         [("posh_guest", "90000010"), ("signup_job", "90000011"), ("signup_job", "")])
+        for line in cm.output:
+            print(line)
+
     def test_website_always_wakes(self):
         for _ in range(3):
             self.assertTrue(amyi.notify("contact_form", name="Ana Real", email="ana@gmail.com",

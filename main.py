@@ -703,7 +703,8 @@ def send_assisted_jobs(service, message_id, request, jobs, dry_run):
            order_id=((request.get("posh") or {}).get("order_number") or ""))
     amyi.notify("signup_job", name=name, email=request.get("email", ""),
                 venue=sorted({j.get("venue", "") for j in jobs}),
-                dates=sorted({j.get("date", "") for j in jobs}), ref=message_id)
+                dates=sorted({j.get("date", "") for j in jobs}), ref=message_id,
+                order=((request.get("posh") or {}).get("order_number") or ""))
     return sent
 
 
