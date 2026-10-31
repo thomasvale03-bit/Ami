@@ -138,7 +138,27 @@ def date_from_custom_fields(custom_fields, reference):
     return None
 
 
-def posh_night(event_start, date_purchased=None, event_end=None, custom_fields=None):
+LATE_NIGHT_RE = re.compile(r"after[\s-]*hours|late[\s-]*night|afterhours", re.I)
+
+
+def late_night_event(event_name):
+    return bool(LATE_NIGHT_RE.search(event_name or ""))
+
+
+def _utc_to_vegas(value):
+    """A 'Z'/offset timestamp converted to naive America/Los_Angeles time."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(VEGAS).replace(tzinfo=None)
+
+
+def posh_night(event_start, date_purchased=None, event_end=None, custom_fields=None, event_name=None):
     """(night, how) - the Las Vegas night this order is for.
 
     1. A date answer in custom_fields (prompt mentions date/night/day) wins.
@@ -160,6 +180,17 @@ def posh_night(event_start, date_purchased=None, event_end=None, custom_fields=N
         return None, "no_event_start"
     if bought is None or start >= bought:
         return _night(start), "event_start"
+    if late_night_event(event_name) and start < bought:
+        # After-hours / late-night series (e.g. Drai's After Hours, nightly):
+        # Posh's event_start is the series anchor. Convert it from UTC to
+        # Vegas time; if that anchor's night is already over at purchase,
+        # the order is for the purchase's own Vegas night (purchases before
+        # the 6 AM rollover belong to the previous night).
+        anchor = _utc_to_vegas(event_start) or start
+        anchor_night, bought_night = _night(anchor), _night(bought)
+        if anchor_night < bought_night:
+            return bought_night, "late_night_purchase_night"
+        return anchor_night, "late_night_event_start"
     end = _wall_clock(event_end)
     length = (end - start) if end and end > start and end - start < timedelta(days=1) else timedelta(hours=6)
     weeks = max(0, (bought - (start + length)).days // 7)
@@ -206,7 +237,8 @@ def resolve_night(payload, lookup=None):
         local = start.astimezone(VEGAS).replace(tzinfo=None)
         return _night(local), "posh_page", local
     night, how = posh_night(payload.get("event_start"), payload.get("date_purchased"),
-                            payload.get("event_end"), payload.get("custom_fields"))
+                            payload.get("event_end"), payload.get("custom_fields"),
+                            event_name=payload.get("event_name"))
     if how == "recurring_next_occurrence":
         how = REVIEW_RULE
     return night, how, None
@@ -387,7 +419,8 @@ def _ping_amyi(payload, key, night):
         venue = ""
     return amyi.notify("posh_guest", name=name, email=key[2], phone=payload.get("account_phone") or "",
                        event=event, venue=venue or event, dates=str(night or ""),
-                       party=party_size(payload), source="posh", ref=key[0] or key[1])
+                       party=party_size(payload), source="posh", ref=key[0] or key[1],
+                       order=payload.get("order_number") or "")
 
 
 # --- Branded send (POST /send-branded) -------------------------------------
@@ -1015,7 +1048,17 @@ def retry_pending_website(intake):
             try:
                 with open(path) as fh:
                     item = json.load(fh)
-                clean, err = validate_website(item["payload"])
+                raw = item.get("payload") if isinstance(item, dict) else None
+                if not isinstance(raw, dict):
+                    # Malformed/legacy pending file (no "payload"): log once and
+                    # move it aside so the every-minute retry loop stops on it.
+                    log.warning("Website form: pending %s has no 'payload'; skipped and moved to .bad", name)
+                    try:
+                        os.replace(path, path + ".bad")
+                    except OSError:
+                        os.remove(path)
+                    continue
+                clean, err = validate_website(raw)
                 if err:
                     log.error("Website form: dropping invalid pending %s: %s", name, err)
                     os.remove(path)

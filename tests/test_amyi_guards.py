@@ -41,16 +41,16 @@ class GuardTests(unittest.TestCase):
             self.assertFalse(out, kw)
             post.assert_not_called()
 
-    def test_dedupe_by_ref_and_event_persisted(self):
+    def test_dedupe_only_same_posh_order_persisted(self):
         kw = dict(type="posh_guest", name="Bob Smith", email="bob@gmail.com", venue="JEWEL", dates="2026-10-17")
-        self.assertTrue(self._live(ref="77", **kw)[0])
-        self.assertFalse(self._live(ref="77", **kw)[0])
+        self.assertTrue(self._live(ref="77", order="77", **kw)[0])
+        self.assertFalse(self._live(ref="77", order="77", **kw)[0])  # Posh retry
         amyi._sent = None  # reload from disk
-        self.assertFalse(self._live(ref="78", **kw)[0])  # same email+venue+date
-        self.assertTrue(self._live(**dict(kw, dates="2026-10-18"), ref="79")[0])
+        self.assertFalse(self._live(ref="77", order="77", **kw)[0])
+        self.assertTrue(self._live(ref="78", order="78", **kw)[0])  # same guest, new order
 
     def test_dedupe_expires(self):
-        p = amyi.build_payload("x", "Bob", "b@gmail.com", ref="1")
+        p = amyi.build_payload("x", "Bob", "b@gmail.com", ref="1", order="1")
         self.assertTrue(amyi.claim(p, now=1000))
         self.assertFalse(amyi.claim(p, now=1000 + 3600))
         self.assertTrue(amyi.claim(p, now=1000 + amyi.DEDUPE_SECONDS + 1))
@@ -76,7 +76,7 @@ class GuardTests(unittest.TestCase):
     def test_claim_written_only_after_2xx(self):
         jt = self._jobs()
         jt.record("r10", guest="Bob", email="bob@gmail.com")
-        p = amyi.build_payload("signup_job", "Bob", "bob@gmail.com", dates="2027-01-01", ref="r10")
+        p = amyi.build_payload("signup_job", "Bob", "bob@gmail.com", dates="2027-01-01", ref="r10", order="o10")
         with mock.patch.object(amyi, "_post_once", side_effect=[(None, "URLError"), (200, "ok")]):
             self.assertTrue(amyi.deliver(p, _sleep=lambda s: None))
         self.assertTrue(amyi.is_duplicate(p))

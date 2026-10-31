@@ -37,18 +37,16 @@ class EveryGuestPings(unittest.TestCase):
             posh_webhook._ping_amyi(o, (str(i), "e", o["account_email"]), "2026-10-17")
         self.assertEqual(len(self.posts), 3)
 
-    def test_changed_party_repings_once(self):
+    def test_every_website_submission_wakes(self):
         kw = dict(name="Ana Bell", email="ana@gmail.com", dates="2026-10-17", ref="r1", source="website")
-        amyi.notify("contact_form", party=2, **kw)
-        amyi.notify("contact_form", party=2, **kw)
-        amyi.notify("contact_form", party=5, **kw)
-        amyi.notify("contact_form", party=5, **kw)
-        self.assertEqual([p["party"] for p in self.posts], ["2", "5"])
+        for party in (2, 2, 5):
+            amyi.notify("contact_form", party=party, **kw)
+        self.assertEqual([p["party"] for p in self.posts], ["2", "2", "5"])
 
-    def test_signup_job_without_party_still_suppressed(self):
-        amyi.notify("posh_guest", name="Ana", email="ana@gmail.com", dates="2026-10-17", ref="o1", party=2)
+    def test_posh_and_signup_job_both_wake(self):
+        amyi.notify("posh_guest", name="Ana", email="ana@gmail.com", dates="2026-10-17", ref="o1", party=2, order="o1")
         amyi.notify("signup_job", name="Ana", email="ana@gmail.com", dates="2026-10-17", ref="m1")
-        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(len(self.posts), 2)
 
 
 if __name__ == "__main__":
