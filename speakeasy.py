@@ -48,10 +48,14 @@ def _login(page):
     Selectors are finalised against the real login page."""
     page.goto(LOGIN_URL, wait_until="domcontentloaded")
     page.wait_for_timeout(1500)
-    # Real login form: #email, #password, "Sign In with Email" (no CAPTCHA).
+    # Login is two-step now: email + "Continue", then the password page.
+    # Still handles the old one-page form (#email + #password together).
     page.fill("#email", EMAIL)
+    if page.locator("#password").count() == 0:
+        page.locator("button:has-text('Continue'), button[type=submit]").first.click()
+        page.wait_for_selector("#password", timeout=20000)
     page.fill("#password", PASSWORD)
-    page.click("button:has-text('Sign In with Email')")
+    page.locator("button:has-text('Sign In'), button[type=submit]").first.click()
     page.wait_for_load_state("networkidle", timeout=30000)
     page.wait_for_timeout(1500)
 

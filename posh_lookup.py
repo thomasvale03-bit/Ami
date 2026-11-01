@@ -226,10 +226,13 @@ def _default_fetch(url):
 class _Fetcher:
     def __init__(self, fetch, sleep, limit):
         self.fetch, self.sleep, self.left, self.first = fetch, sleep, limit, True
+        self.deadline = time.monotonic() + float(os.environ.get("POSH_LOOKUP_MAX_SECONDS", "90"))
 
     def __call__(self, slug):
         if self.left <= 0:
             raise RuntimeError("fetch budget used up")
+        if time.monotonic() > self.deadline:
+            raise RuntimeError("time budget used up")
         self.left -= 1
         if not self.first:
             self.sleep(1)

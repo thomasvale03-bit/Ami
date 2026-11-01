@@ -248,6 +248,24 @@ def needs_review(body):
     return f"Night Rule: {REVIEW_RULE}" in (body or "")
 
 
+# --- orders already booked outside AMY (hand recon) -------------------------
+
+_HANDLED_FILES = (os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "posh_handled_orders.txt"),
+                  "/data/posh_handled_orders.txt")
+
+
+def handled_orders():
+    """Posh order numbers booked by hand / reconciliation: never turn into jobs."""
+    out = {x.strip() for x in os.environ.get("POSH_HANDLED_ORDERS", "").replace(";", ",").split(",") if x.strip()}
+    for path in _HANDLED_FILES:
+        try:
+            with open(path) as fh:
+                out |= {ln.split("#")[0].strip() for ln in fh if ln.split("#")[0].strip()}
+        except OSError:
+            pass
+    return out
+
+
 # --- payload -> request -----------------------------------------------------
 
 def should_ignore(payload):
@@ -353,6 +371,9 @@ class Intake:
         reason = should_ignore(payload)
         if reason:
             return 200, f"ignored: {reason}"
+        if str(payload.get("order_number") or "").strip() in handled_orders():
+            log.info("Posh order %s already handled (posh_handled_orders); skipping", payload.get("order_number"))
+            return 200, "duplicate (already handled)"
         key = (payload.get("order_number") or "", payload.get("event_id") or "",
                (payload.get("account_email") or "").lower())
         night, how, start_local = resolve_night(payload, self.lookup)
@@ -1330,12 +1351,24 @@ def make_handler(intake, store=None):
                     raise ValueError("not an object")
             except ValueError:
                 return self._reply(400, "bad json")
-            try:
-                code, text = intake.accept(payload)
-            except Exception:
-                log.exception("Posh webhook failed")
-                return self._reply(500, "error")
-            self._reply(code, text)
+            # Posh times out webhooks at ~10 s (HTTP 499) and backs off / drops
+            # deliveries after repeated timeouts; the child-event page lookup can
+            # take far longer. Ack at once and process on a background thread.
+            def _run(p=payload):
+                try:
+                    code, text = intake.accept(p)
+                    log.info("Posh webhook order %s processed: %s %s", p.get("order_number"), code, text)
+                except Exception:
+                    log.exception("Posh webhook failed (order %s)", p.get("order_number"))
+            if os.environ.get("POSH_WEBHOOK_SYNC", "").strip().lower() in ("1", "true", "yes"):
+                try:
+                    code, text = intake.accept(payload)
+                except Exception:
+                    log.exception("Posh webhook failed")
+                    return self._reply(500, "error")
+                return self._reply(code, text)
+            threading.Thread(target=_run, name="posh-accept", daemon=True).start()
+            self._reply(200, "accepted")
     return Handler
 
 
