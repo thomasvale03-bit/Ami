@@ -233,6 +233,10 @@ def notify(type, name="", email="", venue="", dates="", ref="", test=False, wait
            phone="", event="", party="", source="", order=""):
     """Returns True if a ping was dispatched."""
     try:
+        # Queue-only intake has no per-alert booking wakes; AMYI polls hourly.
+        import queue_service
+        if queue_service.enabled():
+            return False
         if disabled():
             return False
         if is_test_traffic(name, email, test):

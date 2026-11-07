@@ -43,6 +43,7 @@ import amyi
 import headliners
 import speakeasy
 import job_tracker
+import queue_service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("amy")
@@ -986,7 +987,7 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
         raw = gmail_client.parse_request(message_id, body)
         ref = raw.get("form_ref")
         if ref:
-            if ref in _WEBSITE_REFS_SEEN or gmail_client.website_ref_already_handled(service, ref, message_id):
+            if not queue_service.enabled() and (ref in _WEBSITE_REFS_SEEN or gmail_client.website_ref_already_handled(service, ref, message_id)):
                 log.info("%s: website submission %s was already processed; not booking it again", message_id, ref)
                 return gmail_client.PROCESSED_LABEL
 
@@ -996,6 +997,14 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
                                            and any(a in body.lower() for a in allowlist)):
             log.info("[test mode] leaving %s untouched (not from an allowlisted address)", message_id)
             return None
+
+    # Intake remains active. Persist source before routing/browser/email.
+    # Existing operational ledger rows are deliberately NOT migrated.
+    if queue_service.enabled():
+        if dry_run:
+            return None
+        queue_service.enqueue(message_id, raw)
+        return gmail_client.PROCESSED_LABEL
 
     if raw.get("form_ref") and raw.get("source") != "Posh":
         _WEBSITE_REFS_SEEN.add(raw["form_ref"])
@@ -1497,6 +1506,10 @@ def run_once(service, mode, labels, allowlist=None, start_after=None):
             outcome = handle_message(service, message_id, dry_run, labels, allowlist)
         except Exception:
             log.exception("Failed while processing %s", message_id)
+            if queue_service.enabled() and not dry_run:
+                # No booking happened in intake-only mode. A persistence failure
+                # must leave the source in the inbox, not label/drop it.
+                continue
             if dry_run:
                 continue
             # A TAO submission may already have gone through, so never let
@@ -1548,7 +1561,7 @@ def main():
     if mode not in ("dry-run", "test", "live"):
         sys.exit(f"AMY_MODE must be dry-run, test or live (got {mode!r}).")
 
-    if mode != "dry-run" and not tao_portal.READY:
+    if mode != "dry-run" and not queue_service.enabled() and not tao_portal.READY:
         sys.exit("Booking is disabled until tao_portal.READY is True.")
 
     allowlist = None
@@ -1581,7 +1594,7 @@ def main():
         for name in (gmail_client.PROCESSING_LABEL, gmail_client.PROCESSED_LABEL, gmail_client.EXCEPTION_LABEL):
             labels[name] = gmail_client.get_or_create_label(service, name)
 
-    if mode != "dry-run":
+    if mode != "dry-run" and not queue_service.enabled():
         try:
             run_speakeasy_test(service)  # one-shot, no-op unless the sentinel file is present
         except Exception:
@@ -1607,6 +1620,8 @@ def main():
     while True:
         if intake is not None:
             try:
+                if queue_service.enabled():
+                    queue_service.retry_intake(intake)
                 posh_webhook.retry_pending_website(intake)
             except Exception:
                 log.exception("Pending website retry failed; will retry next cycle")
@@ -1653,7 +1668,7 @@ def main():
             if not args.loop:
                 raise
             log.exception("Scottsdale door-list pass failed; will retry next cycle")
-        if mode != "dry-run":
+        if mode != "dry-run" and not queue_service.enabled():
             try:
                 run_job_watchdog(service)
             except Exception:
