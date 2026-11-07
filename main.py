@@ -1620,6 +1620,8 @@ def main():
     while True:
         if intake is not None:
             try:
+                if queue_service.enabled():
+                    queue_service.retry_intake(intake)
                 posh_webhook.retry_pending_website(intake)
             except Exception:
                 log.exception("Pending website retry failed; will retry next cycle")
@@ -1629,14 +1631,6 @@ def main():
             if not args.loop:
                 raise
             log.exception("Inbox check failed; will retry next cycle")
-        if queue_service.enabled():
-            # Queue-only service: no Railway booking browser, receipt email,
-            # follow-up sends, door-list submission or old watchdog execution.
-            if not args.loop:
-                break
-            wake.wait(poll_seconds)
-            wake.clear()
-            continue
         # Follow-ups and the weekly lineup each get their own guard so a failure
         # in one never blocks the other (or the inbox) from running.
         try:

@@ -10,21 +10,32 @@ edit routines, create viewers or expose browsers. Default is feature OFF.
 - `main.py` retains existing Posh/website -> Gmail intake. It parses requests and
   saves full immutable payloads into SQLite before marking the source processed.
   Source persistence failure leaves the Gmail message unlabeled for retry.
-- Queue mode skips ALL legacy Railway booking, assisted signup, follow-up,
-  newsletter/door-list sends and short watchdog passes. `/send-branded` returns
-  409 in queue mode. Immediate AMYI intake/job wakes and website team notices are
-  suppressed. Other behavior is unchanged while feature OFF.
-- Railway never runs a booking browser or sends receipts for queue-owned jobs.
-  AMYI polls once hourly and executes actual bookings and approved emails through
-  her normal own-desktop/app workflow. No per-alert booking path is enabled.
+- Queue mode skips legacy BOOKING/assisted signup and short booking watchdogs.
+  Existing newsletters, follow-ups, Scottsdale door-list emails and `/send-branded`
+  remain enabled under their existing feature switches, resend controls and cap.
+  Immediate booking wakes/website team intake notices stay suppressed. No second
+  booking execution path is introduced.
+- Railway never runs a booking browser. AMYI polls once hourly and performs actual
+  bookings in her own desktop. Approved receipt emails use the retained sanctioned
+  `/send-branded` endpoint (separate existing BRANDED_SEND_TOKEN authentication),
+  not arbitrary direct sends that bypass its existing 20/hour/resend controls.
 - Durable claim tokens, attempts, same-hour batches, exact source payload,
   evidence, human-pause metadata and terminal outcomes survive process restart.
 - A repeated hourly claim returns the same batch, not newly arrived jobs. There
   is one active desktop lane; another caller receives the existing active jobs.
   New jobs can be claimed only :00–:09 America/Phoenix, all days, 24 hours/day.
   This is a pickup tolerance window, not a ten-minute polling schedule.
-- No old `jobs.json` migration. No historical booking/order investigations.
-  Queue idempotency only prevents simultaneous processing of the same queue item.
+- No old `jobs.json` migration or historical order investigations. Authenticated
+  `/queue/legacy` exposes the entire legacy status/date/payload projection as
+  non-runnable review work; unresolved rows gate sole-queue claims until explicit
+  review is recorded against the current fingerprint. A completed legacy ref
+  cannot be re-enqueued as runnable. Legacy source rows remain unchanged.
+- Authenticated Posh HTTP and validated website intake store original vendor
+  receipts before acknowledgement/Gmail insertion. Persist failure refuses ACK.
+  Receipt payloads are NEVER directly guessed into runnable bookings: the existing
+  Gmail parser/consent/date validation bridge remains. Restart recovery retries
+  bridge delivery with durable leases, at most three recovery attempts, then
+  exposes a review receipt. Existing website pending-file recovery is preserved.
 
 ## Configuration / cutover prerequisites (review first; do NOT apply blindly)
 
@@ -45,10 +56,19 @@ Target remains existing `capable-motivation` / production / `AMY` at
    - Existing live intake mode, inbox credentials and `AMY_START_AFTER` must be
      validated. Dry-run intake is not a durable live intake mode.
 4. Leave Posh and website intake active. Existing HTTP intake still bridges into
-   Gmail: this is NOT direct vendor-to-SQLite ingestion. A Gmail outage remains
-   an intake dependency (website has existing pending-file retry behavior).
-5. Review legacy backlog outside this queue; do not blindly migrate or retry it.
-   Shanequa `1a1b3491f8da2fff` and Ashley `1a1b3778ba3bf808` are held manual.
+   Gmail for normalization: original webhook receipts now survive before that
+   dependency, but runnable jobs still require bridge/parser success. Review
+   `/queue/intake` for bridge failures; existing website pending-file retries remain.
+5. Review `/queue/legacy`; do not blindly migrate or retry it. Use
+   `POST /queue/legacy/<ref>` with the current `fingerprint`, an explicit `decision`
+   and actionable `reason`. Decisions: `retain_hold`, `retain_pending_event`,
+   `manual_followup`, `completed_do_not_rebook`. This records ownership/review only:
+   it NEVER imports a runnable job or mutates the legacy ledger. Held exceptions
+   permit ONLY `retain_hold`; completion cannot be invented. Changed legacy rows
+   invalidate prior review. Corrupt ledger JSON fails closed rather than appearing
+   empty. Parent must retain future/pending-event review in the existing hourly
+   workflow, including exact source dates, until resolved through authorized action.
+   Shanequa `1a1b3491f8da2fff` and Ashley `1a1b3778ba3bf808` remain held.
 6. Parent updates the EXISTING hourly 24/7 routine to authenticated queue pickup
    and own-desktop execution. No routine edits were made here. Keep per-alert
    booking disabled; do not introduce another booking worker or shell helper.
@@ -65,7 +85,12 @@ All `/queue/*` routes require `Authorization: Bearer <AMY_QUEUE_API_TOKEN>`;
 missing/weak server configuration fails closed. JSON only, POST max 64 KiB.
 Never log/store bearer headers in routine prose. Public browser endpoints: NONE.
 
-- `GET /queue/status`: counts, execution owner and timezone (no guest payloads).
+- `GET /queue/status`: counts, execution owner, timezone, claims-paused state,
+  required legacy-review count and intake receipt statuses (no guest payloads).
+- `GET /queue/legacy`: authenticated non-runnable legacy review projection;
+  `POST /queue/legacy/<ref>` records an explicit non-runnable review decision.
+- `GET /queue/intake`: bridge receipt states; `GET /queue/intake/<key>` returns
+  the authenticated original receipt for manual source review, never a claim.
 - `GET /queue/jobs?state=queued&limit=50`: authenticated full payloads, capped 100.
 - `GET /queue/jobs/<URL-encoded-ref>`: payload/status/evidence, no claim token.
 - `POST /queue/claim`, body `{"limit": 1}`: claim one or more jobs (max 25).
@@ -121,10 +146,14 @@ Partial booking/email failures stay assigned or manual with saved resolution
 metadata; do not submit a completed booking again to recover an email failure.
 The queue validates consistency, not the authenticity of a remote order ID;
 AMYI remains responsible for observing actual vendor/UI/provider receipts.
-Approved sender/templates, resend controls and the existing 20/hour branded-send
-cap remain AMYI execution constraints; this queue neither sends nor independently
-rate-limits external email connectors. Cross-job desktop email throttling remains
-an operational cutover prerequisite (not implemented by queue-only code).
+Use approved sender/templates through retained `/send-branded`: its existing
+20/hour limiter and Sent-folder resend checks remain active in queue mode.
+A 429 means defer email, not bypass the endpoint or repeat a booking. A duplicate
+response is not a fabricated message ID: obtain actual prior send evidence before
+completion. The existing limiter is process-local and resets on restart; this
+change does not claim a new durable global mail limiter. Unknown send outcomes
+remain manual; do not retry via another connector. Parent must preserve the cap
+across any endpoint restart and must not select a bypassing direct-send path.
 
 Drai's: ONLY Speakeasy name+party, NO guest/team emails, NO TAO/Hakkasan/MDC.
 Each Drai's record uses `system:"speakeasy"`, an actual `entry_id`, exact date and
@@ -145,6 +174,9 @@ Do NOT simply turn `AMY_QUEUE_ENABLED` off: that restores legacy Railway behavio
 (including its booking/email paths). A full binary/flag rollback requires a
 reviewed plan to retain intake, preserve this DB and reconcile active queue jobs.
 No data deletion, blind backlog migration or automatic rebooking is provided.
+Before a sole-queue routine switch, parent must read status + legacy + intake,
+explicitly retain pending-event/held/manual review responsibilities, and verify
+intake recovery. Review records do not authorize bookings or remediation.
 
 ## Tests
 

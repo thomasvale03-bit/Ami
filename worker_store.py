@@ -25,6 +25,14 @@ class Store:
                   lease_until REAL, metadata TEXT NOT NULL DEFAULT '{}',
                   reason TEXT NOT NULL DEFAULT '');
                 CREATE TABLE IF NOT EXISTS queue_batches (slot TEXT PRIMARY KEY, refs TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS intake_receipts (
+                  key TEXT PRIMARY KEY, source TEXT NOT NULL, payload TEXT NOT NULL,
+                  state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+                  created REAL NOT NULL, due REAL NOT NULL, lease_until REAL);
+                CREATE TABLE IF NOT EXISTS legacy_reviews (
+                  ref TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, decision TEXT NOT NULL,
+                  reason TEXT NOT NULL, reviewed_at REAL NOT NULL);
+
             ''')
         os.chmod(self.path, 0o600)
 
@@ -170,3 +178,44 @@ class Store:
             db.execute('''UPDATE queue_jobs SET state=?,metadata=?,reason=?,updated=?,lease_until=?,due=? WHERE ref=?''',
                        (state, json.dumps(saved), reason, now, lease, due, ref))
         return self.get(ref)
+
+    def intake(self, key, source, payload, now):
+        with self.connect() as db:
+            db.execute('''INSERT OR IGNORE INTO intake_receipts(key,source,payload,created,due,lease_until)
+                          VALUES(?,?,?,?,?,?)''', (key, source, json.dumps(payload), now, now, now + 300))
+        return key
+
+    def pending_intake(self, now, limit=5):
+        # Durable lease avoids overlapping recovery passes. A process dying after
+        # Gmail insert is recovered through the existing intake dedupe, not booking.
+        with self.connect() as db:
+            db.execute("UPDATE intake_receipts SET state='review' WHERE attempts>=3 AND state='pending'")
+            rows = db.execute("""SELECT * FROM intake_receipts WHERE state='pending' AND attempts<3
+                AND due<=? AND (lease_until IS NULL OR lease_until<=?) ORDER BY created LIMIT ?""", (now, now, limit)).fetchall()
+            for row in rows:
+                db.execute('UPDATE intake_receipts SET attempts=attempts+1,lease_until=? WHERE key=?', (now + 300, row['key']))
+        return [{**dict(r), 'payload': json.loads(r['payload'])} for r in rows]
+
+    def finish_intake(self, key, ok, now):
+        with self.connect() as db:
+            db.execute("UPDATE intake_receipts SET state=?,due=?,lease_until=NULL WHERE key=?",
+                       ('bridged' if ok else 'pending', now + 300, key))
+
+    def intake_listing(self):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute('SELECT key,source,state,attempts,created,due FROM intake_receipts ORDER BY created DESC LIMIT 100')]
+
+    def legacy_review(self, ref, fingerprint, decision, reason, now):
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO legacy_reviews VALUES(?,?,?,?,?)', (ref, fingerprint, decision, reason, now))
+
+    def legacy_reviews(self):
+        with self.connect() as db:
+            return {r['ref']: dict(r) for r in db.execute('SELECT * FROM legacy_reviews')}
+
+    def intake_get(self, key):
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM intake_receipts WHERE key=?', (key,)).fetchone()
+            if not row:
+                return None
+            return {**dict(row), 'payload': json.loads(row['payload'])}

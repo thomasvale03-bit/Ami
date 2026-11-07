@@ -532,9 +532,6 @@ def send_branded(service, payload, _sleep=None):
     import gmail_client
     to, subject = (payload.get("to") or "").strip(), (payload.get("subject") or "").strip()
     html, text = payload.get("html") or "", payload.get("text") or ""
-    import queue_service
-    if queue_service.enabled():
-        return 409, "Queue-only mode: AMYI handles approved email sends; Railway does not send"
     if not (to and subject and html and text) or "@" not in to or any(c in to + subject for c in "\r\n,;"):
         return 400, "need to (one address), subject, html, text"
     now = time.time()
@@ -1026,26 +1023,35 @@ def accept_website(intake, payload, _sleep=None):
     clean, err = validate_website(payload)
     if err:
         return 400, err
+    import queue_service
+    receipt = None
+    if queue_service.enabled() and not intake.dry_run:
+        receipt = queue_service.persist_intake("website", payload)
+
+    def _result(code, text):
+        if receipt:
+            queue_service.finish_intake(receipt, code, text)
+        return code, text
     key = _website_key(clean)
     with intake._lock:
         if key in intake._seen:
-            return 200, "duplicate (this run)"
+            return _result(200, "duplicate (this run)")
         if intake.dry_run:
             intake._seen.add(key)
             log.info("[dry run] would add website signup %s:\n%s", key, to_website_text(clean))
-            return 200, "dry run"
+            return _result(200, "dry run")
         if _delivered(key):
             intake._seen.add(key)
-            return 200, "duplicate"
+            return _result(200, "duplicate")
         path = os.path.join(pending_dir(), _pending_name(key))
         if os.path.exists(path):
-            return 200, "queued (pending)"
+            return _result(200, "queued (pending)")
         for i, delay in enumerate((0.0,) + WEBSITE_RETRY_DELAYS):
             if delay:
                 _sleep(delay)
             try:
                 _deliver_website(intake, clean)
-                return 200, "queued"
+                return _result(200, "queued")
             except Exception as e:
                 if not gmail_client.is_rate_limited(e):
                     raise
@@ -1054,8 +1060,7 @@ def accept_website(intake, payload, _sleep=None):
             json.dump({"key": list(key), "payload": payload, "saved": datetime.now(timezone.utc).isoformat()}, fh)
         os.replace(path + ".tmp", path)
         log.warning("Website form: saved %s for retry (Gmail rate limited)", key)
-        return 200, "queued (pending)"
-
+        return _result(200, "queued (pending)")
 
 NON_PENDING_FILES = {"jobs.json"}
 _warned_pending = set()
@@ -1376,18 +1381,30 @@ def make_handler(intake, store=None):
                     raise ValueError("not an object")
             except ValueError:
                 return self._reply(400, "bad json")
+            import queue_service
+            receipt = None
+            if queue_service.enabled() and not intake.dry_run:
+                try:
+                    receipt = queue_service.persist_intake("posh", payload)
+                except Exception:
+                    log.exception("Posh durable receipt failed; refusing acknowledgement")
+                    return self._reply(503, "durable intake unavailable")
             # Posh times out webhooks at ~10 s (HTTP 499) and backs off / drops
             # deliveries after repeated timeouts; the child-event page lookup can
             # take far longer. Ack at once and process on a background thread.
             def _run(p=payload):
                 try:
                     code, text = intake.accept(p)
+                    if receipt:
+                        queue_service.finish_intake(receipt, code, text)
                     log.info("Posh webhook order %s processed: %s %s", p.get("order_number"), code, text)
                 except Exception:
                     log.exception("Posh webhook failed (order %s)", p.get("order_number"))
             if os.environ.get("POSH_WEBHOOK_SYNC", "").strip().lower() in ("1", "true", "yes"):
                 try:
                     code, text = intake.accept(payload)
+                    if receipt:
+                        queue_service.finish_intake(receipt, code, text)
                 except Exception:
                     log.exception("Posh webhook failed")
                     return self._reply(500, "error")

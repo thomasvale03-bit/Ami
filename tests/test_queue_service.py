@@ -195,7 +195,7 @@ def test_intake_no_browser_email_or_wake(raw, monkeypatch):
     import amyi
     assert not amyi.notify('posh_guest', ref='mock')
     assert not main.posh_webhook.notify_team_website(Mock(), {}, 'mock')
-    assert main.posh_webhook.send_branded(Mock(), {})[0] == 409
+    assert main.posh_webhook.send_branded(Mock(), {})[0] == 400  # existing endpoint retained
 
 
 def test_persistence_failure_preserves_inbox_source(monkeypatch):
@@ -216,3 +216,164 @@ def test_owned_watchdog_suppressed():
     assert job_tracker.watchdog(*callbacks, now=NOW) == []
     for callback in callbacks:
         callback.assert_not_called()
+
+
+def test_legacy_backlog_visible_review_gate_never_imports(raw):
+    import job_tracker
+    job_tracker.record('legacy-future', dates=['2026-12-01'], now=NOW)
+    job_tracker.update('legacy-future', status='pending_event', payload={'date': '2026-12-01'})
+    job_tracker.record('legacy-done', now=NOW)
+    job_tracker.mark_done('legacy-done', now=NOW)
+    s = q.store()
+    s.enqueue('mock', raw, NOW)
+    before = job_tracker.snapshot_strict()
+    assert api(s, '/queue/claim')[0] == 409
+    rows = api(s, '/queue/legacy', method='GET')[1]['jobs']
+    future = next(r for r in rows if r['ref'] == 'legacy-future')
+    assert future['classification'] == 'pending_event_review'
+    assert future['legacy']['dates'] == ['2026-12-01']
+    body = {'fingerprint': future['fingerprint'], 'decision': 'retain_pending_event', 'reason': 'Parent retains future review path'}
+    assert api(s, '/queue/legacy/legacy-future', body)[1]['runnable'] is False
+    assert job_tracker.snapshot_strict() == before
+    assert s.get('legacy-future') is None
+    assert api(s, '/queue/claim')[1]['jobs'][0]['ref'] == 'mock'
+    job_tracker.update('legacy-future', status='unknown-new-state')
+    assert api(s, '/queue/status', method='GET')[1]['legacy_review_required'] == 1
+
+
+def test_legacy_held_and_corrupt_ledger_fail_closed(raw):
+    import job_tracker
+    from pathlib import Path
+    ref = sorted(q.HELD_REFS)[0]
+    job_tracker.record(ref, now=NOW)
+    s = q.store()
+    row = api(s, '/queue/legacy', method='GET')[1]['jobs'][0]
+    assert api(s, '/queue/legacy/' + ref, {'fingerprint': row['fingerprint'], 'decision': 'manual_followup', 'reason': 'no'})[0] == 409
+    assert api(s, '/queue/legacy/' + ref, {'fingerprint': row['fingerprint'], 'decision': 'retain_hold', 'reason': 'Awaiting Thomas'})[0] == 200
+    Path(job_tracker._path()).write_text('{invalid')
+    s.enqueue('mock', raw, NOW)
+    assert api(s, '/queue/claim')[0] == 409
+    assert s.get('mock')['state'] == 'queued'
+
+
+def test_posh_http_receipt_precedes_ack_and_background(monkeypatch):
+    import io, json
+    import posh_webhook as pw
+    from tests.test_posh_webhook import BASE
+    intake = Mock(dry_run=False)
+    cls = pw.make_handler(intake)
+    handler = object.__new__(cls)
+    payload = json.dumps(BASE).encode()
+    handler.path, handler.headers = '/webhooks/posh', {'Content-Length': str(len(payload))}
+    handler.rfile, handler._reply = io.BytesIO(payload), Mock()
+    monkeypatch.setattr(pw, 'token_ok', Mock(return_value=True))
+    thread = Mock()
+    monkeypatch.setattr(pw.threading, 'Thread', thread)
+    handler.do_POST()
+    assert q.store().intake_listing()[0]['state'] == 'pending'
+    assert q.store().intake_get(q.store().intake_listing()[0]['key'])['payload'] == BASE
+    handler._reply.assert_called_once_with(200, 'accepted')
+    intake.accept.assert_not_called()  # fake background thread not executed
+    # A durable-write failure must not acknowledge/drop an authenticated request.
+    handler.rfile, handler._reply = io.BytesIO(payload), Mock()
+    monkeypatch.setattr(q, 'persist_intake', Mock(side_effect=OSError('mock full volume')))
+    handler.do_POST()
+    handler._reply.assert_called_once_with(503, 'durable intake unavailable')
+    assert thread.call_count == 1
+
+
+def test_unauthenticated_posh_never_persisted(monkeypatch):
+    import posh_webhook as pw
+    handler = object.__new__(pw.make_handler(Mock(dry_run=False)))
+    handler.path, handler.headers, handler._reply = '/webhooks/posh', {}, Mock()
+    monkeypatch.setattr(pw, 'token_ok', Mock(return_value=False))
+    persist = Mock()
+    monkeypatch.setattr(q, 'persist_intake', persist)
+    handler.do_POST()
+    handler._reply.assert_called_once_with(401, 'unauthorized')
+    persist.assert_not_called()
+
+
+def test_website_receipt_survives_bridge_failure(monkeypatch):
+    import posh_webhook as pw
+    from tests.test_website_form import payload
+    p = payload()
+    intake = pw.Intake(Mock(), 'inbox@example.invalid', dry_run=False)
+    monkeypatch.setattr(pw, '_deliver_website', Mock(side_effect=RuntimeError('mock Gmail unavailable')))
+    with pytest.raises(RuntimeError):
+        pw.accept_website(intake, p)
+    receipts = q.store().intake_listing()
+    assert len(receipts) == 1
+    assert q.store().intake_get(receipts[0]['key'])['payload'] == p
+    assert q.store().listing() == []  # vendor payload never guessed into runnable booking
+    assert pw.accept_website(intake, {**p, 'venue': 'unknown'})[0] == 400
+    assert len(q.store().intake_listing()) == 1
+
+
+def test_intake_recovery_bounded_and_readable(monkeypatch):
+    s = q.store()
+    s.intake('mock-receipt', 'posh', {'event_name': "Drai's", 'event_start': 'ambiguous'}, NOW - 301)
+    intake = Mock(dry_run=False)
+    intake.accept.side_effect = RuntimeError('mock outage')
+    for i in range(4):
+        q.retry_intake(intake, s=s, now=NOW + i * 301)
+    assert intake.accept.call_count == 3
+    assert s.intake_listing()[0]['state'] == 'review'
+    assert api(s, '/queue/intake/mock-receipt', method='GET')[1]['payload']['event_name'] == "Drai's"
+    assert s.listing() == []
+
+
+def test_queue_mode_preserves_unrelated_scheduled_sends(monkeypatch):
+    import main
+    monkeypatch.setattr(main.sys, 'argv', ['main.py', '--live'])
+    monkeypatch.delenv('PORT', raising=False)
+    monkeypatch.setenv('AMY_START_AFTER', '0')
+    monkeypatch.setenv('FOLLOW_UPS_ENABLED', 'true')
+    monkeypatch.setenv('WEEKLY_LINEUP_ENABLED', 'true')
+    monkeypatch.setenv('SCOTTSDALE_DOOR_LISTS_ENABLED', 'true')
+    monkeypatch.setattr(main.gmail_client, 'get_service', Mock(return_value=Mock()))
+    monkeypatch.setattr(main.gmail_client, 'get_account_email', Mock(return_value=main.rules.INTAKE_EMAIL))
+    monkeypatch.setattr(main.gmail_client, 'get_or_create_label', Mock())
+    monkeypatch.setattr(main, 'outbound_ip', Mock(return_value='mock'))
+    mocks = {}
+    for name in ['run_once', 'prep_weekly_lineup', 'send_weekly_lineup', 'send_follow_ups',
+                 'send_scottsdale_door_lists', 'run_job_watchdog', 'run_speakeasy_test']:
+        mocks[name] = Mock()
+        monkeypatch.setattr(main, name, mocks[name])
+    main.main()
+    for name in ['run_once', 'send_weekly_lineup', 'send_follow_ups', 'send_scottsdale_door_lists']:
+        mocks[name].assert_called_once()
+    mocks['run_job_watchdog'].assert_not_called()
+    mocks['run_speakeasy_test'].assert_not_called()
+
+
+def test_queue_mode_branded_endpoint_preserves_cap_and_resend_guard(monkeypatch):
+    import posh_webhook as pw
+    import gmail_client
+    service = Mock()
+    service.users().messages().send().execute.return_value = {'id': 'MOCK-SEND'}
+    monkeypatch.setattr(pw, '_branded_times', [])
+    monkeypatch.setattr(pw, '_zoho_sent', set())
+    monkeypatch.setattr(pw, 'zoho_configured', Mock(return_value=False))
+    sent_check = Mock(return_value=False)
+    monkeypatch.setattr(gmail_client, 'already_sent', sent_check)
+    p = {'to': 'guest@example.invalid', 'subject': 'Mock', 'text': 'Mock', 'html': '<p>Mock</p>'}
+    sent_check.return_value = True
+    assert pw.send_branded(service, p)[1] == 'duplicate (already in Sent)'
+    sent_check.return_value = False
+    for i in range(19):  # Existing limiter counts deduped attempts too.
+        assert pw.send_branded(service, {**p, 'subject': f'Mock-{i}'})[0] == 200
+    assert pw.send_branded(service, p)[0] == 429
+
+
+def test_completed_or_existing_legacy_ref_never_blindly_migrates(raw):
+    import job_tracker
+    job_tracker.record('old-complete', now=NOW)
+    job_tracker.mark_done('old-complete', now=NOW)
+    job_tracker.record('old-pending', dates=['2026-12-01'], now=NOW)
+    job_tracker.update('old-pending', status='pending_event')
+    before = job_tracker.snapshot_strict()
+    for ref in before:
+        assert q.enqueue(ref, raw)['state'] == 'manual'
+    assert job_tracker.snapshot_strict() == before
+    assert all(not r.get('queue_owned') for r in job_tracker.snapshot_strict().values())
