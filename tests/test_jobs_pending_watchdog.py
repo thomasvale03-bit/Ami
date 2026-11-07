@@ -114,7 +114,7 @@ class Ledger(unittest.TestCase):
             self.assertEqual(main.run_job_watchdog(mock.MagicMock(), now=301), [("m9", "alert")])
         self.assertEqual(ne.call_args[0][0], "m9:watchdog")
         self.assertFalse(ne.call_args[1]["track"])
-        self.assertEqual(sb.call_args[0][1]["to"], main.rules.PLAYMAKER_EMAIL)
+        self.assertEqual(sb.call_args[0][1]["to"], main.rules.WATCHDOG_ALERT_TO)
         with mock.patch.object(main, "_notify_exception") as ne, \
              mock.patch.object(main.posh_webhook, "send_branded", return_value=(200, {})):
             self.assertEqual(main.run_job_watchdog(mock.MagicMock(), now=901), [("m9", "manual")])

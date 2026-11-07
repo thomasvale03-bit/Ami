@@ -132,7 +132,7 @@ def watchdog(refire, alert, escalate, now=None):
     now = now if now is not None else time.time()
     actions = []
     for ref, row in list(_load().items()):
-        if row.get("done_at") or row.get("status") in ("done", "manual"):
+        if row.get("queue_owned") or row.get("done_at") or row.get("status") in ("done", "manual"):
             continue
         queued = row.get("queued_at")
         age = now - float(queued if queued is not None else now)

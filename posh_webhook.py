@@ -532,6 +532,9 @@ def send_branded(service, payload, _sleep=None):
     import gmail_client
     to, subject = (payload.get("to") or "").strip(), (payload.get("subject") or "").strip()
     html, text = payload.get("html") or "", payload.get("text") or ""
+    import queue_service
+    if queue_service.enabled():
+        return 409, "Queue-only mode: AMYI handles approved email sends; Railway does not send"
     if not (to and subject and html and text) or "@" not in to or any(c in to + subject for c in "\r\n,;"):
         return 400, "need to (one address), subject, html, text"
     now = time.time()
@@ -1129,6 +1132,9 @@ def retry_pending_website(intake):
 def notify_team_website(service, clean, subject):
     """Also send the same notice to the team inbox (team@playmakerentertainment.com)
     via Amy's normal send path. Best effort: a failure here never breaks intake."""
+    import queue_service
+    if queue_service.enabled():
+        return False  # queued completion/exception digest replaces immediate team notices
     import gmail_client
     from config import rules
     tag = clean["ref"] or re.sub(r"[^\w-]", "", clean["email"])
@@ -1198,6 +1204,10 @@ def make_handler(intake, store=None):
 
         def do_GET(self):
             path = urlparse(self.path).path.rstrip("/")
+            if path.startswith("/queue/"):
+                import queue_service
+                code, result = queue_service.handle("GET", self.path, self.headers, None)
+                return self._send(code, "application/json", json.dumps(result).encode())
             if path == "/healthz":
                 return self._reply(200, "ok")
             if path == "/newsletter/optin":
@@ -1321,10 +1331,25 @@ def make_handler(intake, store=None):
             ref = unquote(ref)
             if not ref or job_tracker.get(ref) is None:
                 return self._reply(404, {"done": False, "error": "unknown ref"})
+            if job_tracker.get(ref).get("queue_owned"):
+                return self._reply(409, "Worker jobs require verified worker receipts; not manually completed here")
             row = job_tracker.mark_done(ref)
             return self._reply(200, {"done": True, "ref": ref, "done_at": (row or {}).get("done_at")})
 
         def do_POST(self):
+            if urlparse(self.path).path.startswith("/queue/"):
+                import queue_service
+                if not queue_service.authorized(self.headers.get("Authorization", "")):
+                    return self._reply(401, "unauthorized")
+                try:
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < size <= 65536:
+                        return self._reply(400, "invalid body size")
+                    payload = json.loads(self.rfile.read(size))
+                    code, result = queue_service.handle("POST", self.path, self.headers, payload)
+                except (ValueError, TypeError):
+                    return self._reply(400, "invalid JSON body")
+                return self._send(code, "application/json", json.dumps(result).encode())
             _p = urlparse(self.path).path.rstrip("/")
             if _p.startswith("/jobs/") and _p.endswith("/done") and _p.count("/") == 3:
                 return self._job_done(_p[len("/jobs/"):-len("/done")])
