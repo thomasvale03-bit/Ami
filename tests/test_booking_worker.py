@@ -434,3 +434,36 @@ def test_kick_file_triggers_run_in_window(tmp_path):
     state = bw.SlotState(tmp_path)
     state.kick_file.touch()
     assert state.take_kick() and not state.take_kick()
+
+
+class BatchWorker:
+    def __init__(self, sizes):
+        self.sizes, self.calls = list(sizes), 0
+
+    def run_pickup(self):
+        self.calls += 1
+        n = self.sizes.pop(0)
+        return {'status': 'run_done', 'handled': n,
+                'results': [{'status': 'booked'}] * n + ([{'status': 'idle'}] if n < 25 else [])}
+
+
+def test_run_now_claims_again_after_full_batch():
+    w = BatchWorker([25, 2])
+    assert bw.run_now(w) == {'status': 'run_now_done', 'batches': 2, 'handled': 27}
+
+
+def test_run_now_file_runs_once_and_keeps_slot(tmp_path):
+    w = BatchWorker([3])
+    state = bw.SlotState(tmp_path)
+    state.run_now_file.touch()
+    times = iter([_ts(2026, 11, 9, 4, 1)] * 3)
+
+    def clock():
+        try:
+            return next(times)
+        except StopIteration:
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        bw.live_loop(w, tmp_path, step=5, clock=clock, sleep=lambda s: None)
+    assert w.calls == 1 and state.last() is None and not state.run_now_file.exists()
