@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Run the AMY booking worker on the Grok Bot box as a background process.
-# Usage: tools/run_worker_box.sh start|stop|status|ensure
+# Usage: tools/run_worker_box.sh start|stop|status|ensure|kick
 #   ensure = start only if not running (safe to call from a routine after a box restart)
+#   kick   = ensure running, then ask for an immediate pickup if NOW is a scheduled
+#            pickup time (minute < 30). Idempotent: the worker records each hour it
+#            has run (data/last_slot) and ignores a kick for an hour already run.
 # Secrets are read from files (never put on the command line):
 #   /home/box/agent-data/amy-queue-client/api-token      -> AMY_QUEUE_API_TOKEN
 #   /home/box/.config/amy_branded_send_token              -> BRANDED_SEND_TOKEN
@@ -14,6 +17,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 RUN=/workspace/amy-worker
 PIDFILE="$RUN/worker.pid"
 LOG="$RUN/worker.log"
+DATA="${AMY_WORKER_DIR:-$RUN/data}"
 mkdir -p "$RUN" && chmod 700 "$RUN"
 
 running() { [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
@@ -50,10 +54,26 @@ stop() {
   rm -f "$PIDFILE"; echo stopped
 }
 
+kick() {
+  running || start >/dev/null
+  local slot last
+  slot="$(cd "$REPO" && python3 -c 'import time,booking_worker as b; print(b.scheduled_slot(time.time()) or "")')"
+  last="$(cat "$DATA/last_slot" 2>/dev/null || true)"
+  if [[ -z "$slot" ]]; then
+    echo "worker pid $(cat "$PIDFILE"): not a pickup time; next $(cd "$REPO" && python3 -c 'import time,booking_worker as b; print(b.next_slot_label(time.time()))')"
+  elif [[ "$slot" == "$last" ]]; then
+    echo "worker pid $(cat "$PIDFILE"): pickup $slot already ran"
+  else
+    mkdir -p "$DATA" && touch "$DATA/kick"
+    echo "worker pid $(cat "$PIDFILE"): pickup $slot requested (runs within 5 s)"
+  fi
+}
+
 case "${1:-}" in
   start) start ;;
+  kick) kick ;;
   ensure) running && echo "running (pid $(cat "$PIDFILE"))" || start ;;
   stop) stop ;;
   status) running && echo "running (pid $(cat "$PIDFILE"))" || echo "not running"; tail -n 5 "$LOG" 2>/dev/null || true ;;
-  *) echo "usage: $0 start|stop|status|ensure" >&2; exit 2 ;;
+  *) echo "usage: $0 start|stop|status|ensure|kick" >&2; exit 2 ;;
 esac

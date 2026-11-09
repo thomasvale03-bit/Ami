@@ -7,7 +7,14 @@ service's authenticated HTTPS API (`/queue/*`, `/send-branded`).
 ## Pickup schedule (Thomas, Nov 9 2026, America/Phoenix)
 * Mon–Wed: runs at 12 AM, 3, 6, 9 AM, 12 PM, 3, 6, 9 PM.
 * Thu–Sun: no runs 1 AM–10 AM; runs at 10 AM, 12 PM, 2 PM, 4 PM, then hourly 6 PM–11 PM and 12 AM.
-* A run starts only in :00–:09 of a scheduled hour, then claims ONE job at a
+* A run starts in :00–:29 of a scheduled hour (`AMY_WORKER_RUN_WINDOW_MIN`, default 30;
+  the box VM is paused while no agent is active, so wakes can be late). The loop
+  sleeps 5 s at a time and re-reads wall-clock Phoenix time every step, logs a
+  heartbeat every 10 min, and records each hour it ran in `data/last_slot`
+  (never two runs in one hour, even across restarts). `tools/run_worker_box.sh kick`
+  starts the worker if needed and requests an immediate pickup when it is a
+  scheduled time. The server does not enforce the :00–:09 window in worker-claims
+  mode. Each run claims ONE job at a
   time back to back until the queue is empty (max 25 per run), so each job has
   its own one-hour lease. Live mode never claims outside a run.
 
