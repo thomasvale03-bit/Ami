@@ -157,8 +157,12 @@ def validate_completion(raw, metadata):
             if drais:
                 if not rules.is_drais(venue) or not record.get('entry_id') or record.get('system') != 'speakeasy':
                     raise Conflict("Drai's requires actual Speakeasy entry ID, never TAO")
-                if evidence.get('no_guest_or_team_email') is not True or evidence.get('email_receipts'):
-                    raise Conflict("Drai's: no guest/team email")
+                # Drai's: either no emails at all, or (Thomas, Nov 9 2026) the
+                # guest confirmation + team@ receipts, checked below.
+                if evidence.get('no_guest_or_team_email') is True and evidence.get('email_receipts'):
+                    raise Conflict("Drai's: no_guest_or_team_email conflicts with email receipts")
+                if evidence.get('no_guest_or_team_email') is not True and not evidence.get('email_receipts'):
+                    raise Conflict("Drai's: guest/team receipts or no_guest_or_team_email required")
                 fields = record.get('submitted_fields')
                 allowed = {'first_name', 'last_name', 'male_count', 'female_count', 'name', 'party_size'}
                 if not isinstance(fields, list) or not fields or not set(fields) <= allowed:
@@ -168,7 +172,7 @@ def validate_completion(raw, metadata):
             actual.add((venue, night))
         if actual != expected:
             raise Conflict('All exact source venue/date records required; incomplete jobs stay active/manual')
-        if not drais:
+        if not drais or evidence.get('email_receipts'):
             receipts = evidence.get('email_receipts')
             if not isinstance(receipts, list) or not receipts or any(not isinstance(r, dict) or not r.get('id') for r in receipts):
                 raise Conflict('Actual email send receipts required before completion')

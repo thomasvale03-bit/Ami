@@ -233,7 +233,26 @@ class FakeDrais:
         return {'verified': True, 'row': f'{first} {last} {male + female} ({male}m, {female}f)'}
 
 
-def test_drais_speakeasy_only_no_emails(tmp_path, monkeypatch):
+def test_drais_same_night_by_default_and_sends_guest_and_team(tmp_path, monkeypatch):
+    monkeypatch.setenv('AMY_WORKER_DRAIS', 'true')
+    drais = FakeDrais()
+    s, api, worker = make(tmp_path, drais=drais)
+    s.enqueue('d', raw(venues=["Drai's"]), NOW)
+    assert worker.run_once()['status'] == 'done'
+    assert drais.calls == ['2026-11-25']  # same night (Thomas, Nov 9 2026)
+    assert [p['to'] for p in api.sent] == ['guest@example.invalid', 'team@playmakerentertainment.com']
+    guest, team = api.sent
+    assert "Drai's After Hours" in guest['subject'] and 'PLAYMAKER ENTERTAINMENT' in guest['text']
+    assert 'skip the line' not in guest['html'].lower() and 'speakeasygo.com/ms/playmaker' in guest['html']
+    assert team['subject'].startswith('Signed up: Mock Guest - Drai') and ',' not in team['subject']
+    assert 'AMY ref: d' in team['text']
+    ev = s.get('d')['metadata']['evidence']
+    assert ev['bookings'][0]['system'] == 'speakeasy'
+    assert {r['kind'] for r in ev['email_receipts']} == {'guest', 'team'}
+    assert worker.tao.submits == []  # never TAO for Drai's
+
+
+def test_drais_offset_override(tmp_path, monkeypatch):
     monkeypatch.setenv('AMY_WORKER_DRAIS', 'true')
     monkeypatch.setenv('DRAIS_SPEAKEASY_DAY_OFFSET', '1')
     drais = FakeDrais()
@@ -241,16 +260,41 @@ def test_drais_speakeasy_only_no_emails(tmp_path, monkeypatch):
     s.enqueue('d', raw(venues=["Drai's"]), NOW)
     assert worker.run_once()['status'] == 'done'
     assert drais.calls == ['2026-11-26']
-    assert api.sent == []
-    ev = s.get('d')['metadata']['evidence']
-    assert ev['no_guest_or_team_email'] is True and ev['bookings'][0]['system'] == 'speakeasy'
 
 
-def test_drais_without_offset_is_manual(tmp_path, monkeypatch):
+def test_drais_bad_offset_is_manual(tmp_path, monkeypatch):
     monkeypatch.setenv('AMY_WORKER_DRAIS', 'true')
+    monkeypatch.setenv('DRAIS_SPEAKEASY_DAY_OFFSET', 'tomorrow')
     s, api, worker = make(tmp_path, drais=FakeDrais())
     s.enqueue('d', raw(venues=["Drai's"]), NOW)
     assert 'DRAIS_SPEAKEASY_DAY_OFFSET' in worker.run_once()['reason']
+
+
+def test_box_lock_busy_releases_job_for_retry(tmp_path, monkeypatch):
+    lock = tmp_path / 'lock'
+    lock.mkdir()
+    (lock / 'owner').write_text('amyi-computeruse\n%d\n' % int(__import__('time').time()))
+    monkeypatch.setenv('AMY_WORKER_BOX_LOCK', 'true')
+    from tools import browser_lock
+    monkeypatch.setattr(browser_lock, 'LOCK_DIR', str(lock))
+    monkeypatch.setattr(browser_lock.acquire, '__defaults__',
+                        (str(lock), str(tmp_path / 'l.log'), 0.01, 0.05, 720.0, __import__('time').time, lambda _s: None))
+    s, api, worker = make(tmp_path)
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'retry', result
+    assert s.get('a')['state'] == 'retry' and worker.tao.submits == []
+    assert 'TIMEOUT' in (tmp_path / 'l.log').read_text()
+
+
+def test_browser_host_refuses_computeruse_profile(monkeypatch):
+    import browser_host
+    monkeypatch.setenv('AMY_BROWSER_LAUNCH', 'plain')
+    monkeypatch.setenv('AMY_BROWSER_PROFILE', '/home/box/chrome-profile/Fork-2')
+    with pytest.raises(RuntimeError):
+        browser_host.start()
+    monkeypatch.delenv('AMY_BROWSER_LAUNCH')
+    assert browser_host.start() is None
 
 
 def test_dry_run_never_claims_or_sends(tmp_path):

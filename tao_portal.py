@@ -185,6 +185,11 @@ def _launch_opts():
     proxy = browser_proxy()
     if proxy:
         opts["proxy"] = proxy
+    # Extra Chrome flags (e.g. --password-store=basic so a copied desktop
+    # profile can read its own saved cookies). Space-separated.
+    extra = os.environ.get("AMY_BROWSER_ARGS", "").split()
+    if extra:
+        opts["args"] = extra
     return opts
 
 
@@ -201,6 +206,19 @@ def access_headers():
     return {"X-Playmaker-Access": token} if token else {}
 
 
+class _TabOnly:
+    """close() closes just the tab we opened, never the attached Chrome."""
+
+    def __init__(self, page):
+        self.page = page
+
+    def close(self):
+        try:
+            self.page.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _browser_page(playwright):
     """Returns (closable, page). closable.close() shuts it down either way.
 
@@ -208,6 +226,17 @@ def _browser_page(playwright):
     profile, so once TAO's security check is cleared the pass (its cookie)
     carries over to later runs instead of being thrown away each time. Put
     that folder on a Railway volume so it also survives redeploys."""
+    cdp = os.environ.get("AMY_BROWSER_CDP_URL", "").strip()
+    if cdp:
+        # Attach to an already-running, normally launched Chrome (see
+        # browser_host.py). A Playwright-launched browser carries automation
+        # flags and is re-challenged by Cloudflare even after a human pass; a
+        # plain Chrome is not. Only our own tab is ever closed.
+        browser = playwright.chromium.connect_over_cdp(cdp)
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        page = context.new_page()
+        page.set_default_timeout(15_000)
+        return _TabOnly(page), page
     profile = os.environ.get("AMY_BROWSER_PROFILE", "").strip()
     opts = dict(locale="en-US", timezone_id="America/Los_Angeles",
                 extra_http_headers=access_headers())

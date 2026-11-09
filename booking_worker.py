@@ -166,9 +166,9 @@ class DraisBooker:
         from playwright.sync_api import sync_playwright
         name = f"{first} {last}".strip()
         url = self.LIST_URL.format(d=listing_date)
+        import tao_portal
         with sync_playwright() as p:
-            browser = speakeasy._browser(p)
-            page = browser.new_context(locale="en-US").new_page()
+            browser, page = tao_portal._browser_page(p)
             page.set_default_timeout(20000)
             try:
                 speakeasy._login(page)
@@ -227,13 +227,28 @@ def source_nights(raw):
 
 
 def drais_offset():
-    """Days between the guest's night and SpeakeasyGo's listing date. Must be
-    set explicitly (DRAIS_SPEAKEASY_DAY_OFFSET); None => Drai's goes manual."""
+    """Days between the guest's night and SpeakeasyGo's listing date.
+    Default 0: Speakeasy entry goes on the SAME night as the Posh/request date
+    (Thomas's decision, Nov 9 2026). DRAIS_SPEAKEASY_DAY_OFFSET overrides;
+    an unparseable value => None => Drai's goes manual."""
     value = os.environ.get("DRAIS_SPEAKEASY_DAY_OFFSET", "").strip()
+    if not value:
+        return 0
     try:
-        return int(value) if value else None
+        return int(value)
     except ValueError:
         return None
+
+
+def box_lock(ref):
+    """AMY_WORKER_BOX_LOCK=true (running on the Grok Bot box): hold the same
+    /workspace/.tao_browser.lock that AMYI's computerUse TAO runs use, so the
+    worker and AMYI never sign up guests at the same moment. No-op otherwise."""
+    import contextlib
+    if os.environ.get("AMY_WORKER_BOX_LOCK", "").lower() != "true":
+        return contextlib.nullcontext()
+    from tools import browser_lock
+    return browser_lock.held(f"worker:{ref}")
 
 
 class Worker:
@@ -290,8 +305,15 @@ class Worker:
     def process(self, job):
         ref, token, raw = job["ref"], job["claim_token"], job.get("raw") or {}
         try:
-            result = self._process(job, ref, token, raw)
-            return result
+            try:
+                lock = box_lock(ref)
+                lock.__enter__()
+            except Exception as exc:  # noqa: BLE001 - lock timeout: nothing was touched yet
+                raise Stop("retry", f"Box browser busy (AMYI computerUse holds the TAO lock): {exc}")
+            try:
+                return self._process(job, ref, token, raw)
+            finally:
+                lock.__exit__(None, None, None)
         except Stop as stop:
             meta = {"worker": "railway", **stop.extra}
             if stop.action == "retry":
@@ -330,10 +352,7 @@ class Worker:
         from config import rules
         drais = any(rules.is_drais(v) for v in raw.get("venues") or [])
         evidence = {"verified": True, "worker": "railway", "bookings": [b["record"] for b in bookings]}
-        if drais:
-            evidence["no_guest_or_team_email"] = True
-        else:
-            evidence["email_receipts"] = self._send_emails(job, ref, token, raw, bookings)
+        evidence["email_receipts"] = self._send_emails(job, ref, token, raw, bookings, drais=drais)
         code, body = self.api.update(ref, token, "complete", {"evidence": evidence}, "Booked by Railway worker")
         if code != 200:
             raise Stop("manual", f"Booked and emailed but completion refused (HTTP {code}: "
@@ -450,7 +469,7 @@ class Worker:
             raise Stop("manual", "Drai's: worker Speakeasy booking is off (AMY_WORKER_DRAIS); add on Speakeasy by hand")
         offset = drais_offset()
         if offset is None:
-            raise Stop("manual", "Drai's: DRAIS_SPEAKEASY_DAY_OFFSET not configured; listing date would be a guess")
+            raise Stop("manual", "Drai's: DRAIS_SPEAKEASY_DAY_OFFSET is not a whole number; listing date would be a guess")
         listing_date = (date.fromisoformat(night) + timedelta(days=offset)).isoformat()
         key = night_key(ref, venue, night)
         first, last = request["first_name"].strip(), (request.get("last_name") or "").strip()
@@ -470,16 +489,21 @@ class Worker:
         self._checkpoint(ref, token, key, {"state": "booked", "record": record, "meta": meta})
         return {"record": record, "meta": meta}
 
-    def _send_emails(self, job, ref, token, raw, bookings):
+    def _send_emails(self, job, ref, token, raw, bookings, drais=False):
         import worker_emails
         from rules_engine import normalize_guest_request
         request = normalize_guest_request(raw)
         rows = [{**b["record"], **(b.get("meta") or {})} for b in bookings]
+        if drais:
+            builders = (("guest", worker_emails.drais_guest_email(request, rows)),
+                        ("team", worker_emails.drais_team_email(ref, raw, request, rows)))
+        else:
+            builders = (("guest", worker_emails.guest_email(request, rows)),
+                        ("team", worker_emails.team_email(ref, raw, request, rows)))
         saved = ((job.get("metadata") or {}).get("progress") or {}).get("emails") or {}
         saved.update((self.ledger.get(f"{ref}|emails") or {}).get("receipts") or {})
         receipts = []
-        for kind, payload in (("guest", worker_emails.guest_email(request, rows)),
-                              ("team", worker_emails.team_email(ref, raw, request, rows))):
+        for kind, payload in builders:
             if saved.get(kind):
                 receipts.append({"kind": kind, "id": saved[kind]})
                 continue
@@ -567,6 +591,37 @@ def probe():
     return report
 
 
+def probe_speakeasy(listing_date=None):
+    """Log into the SpeakeasyGo manager and open one date's guest list.
+    Read-only: adds nothing, reports only whether the list page loaded."""
+    import speakeasy
+    import tao_portal
+    from playwright.sync_api import sync_playwright
+    listing_date = listing_date or datetime.now(VEGAS).date().isoformat()
+    report = {"email_set": bool(speakeasy.EMAIL), "password_set": bool(speakeasy.PASSWORD), "date": listing_date}
+    if not (speakeasy.EMAIL and speakeasy.PASSWORD):
+        report["result"] = "missing SPEAKEASY_EMAIL/SPEAKEASY_PASSWORD"
+        return report
+    started = time.time()
+    with sync_playwright() as p:
+        closable, page = tao_portal._browser_page(p)
+        page.set_default_timeout(20000)
+        try:
+            speakeasy._login(page)
+            report["after_login_url"] = page.url.split("?")[0]
+            page.goto(DraisBooker.LIST_URL.format(d=listing_date), wait_until="domcontentloaded")
+            page.wait_for_timeout(8000)
+            body = page.locator("body").inner_text()
+            report["list_url"] = page.url.split("?")[0]
+            report["login_wall"] = "password" in body.lower() and "sign in" in body.lower()
+            report["add_new_button"] = bool(page.get_by_role("button", name="Add new").count())
+            report["page_chars"] = len(body)
+        finally:
+            closable.close()
+    report["seconds"] = round(time.time() - started)
+    return report
+
+
 # --- Entry point -------------------------------------------------------------
 
 def check_config(mode):
@@ -589,7 +644,18 @@ def main(argv=None):
     parser.add_argument("--mode", choices=("dry-run", "live"), default=None)
     parser.add_argument("--probe", action="store_true",
                         help="only check TAO reachability/Cloudflare from this host, then idle")
+    parser.add_argument("--probe-speakeasy", action="store_true",
+                        help="only log into SpeakeasyGo and open one guest list (read-only)")
     args = parser.parse_args(argv)
+    import browser_host
+    browser_host.start()  # no-op unless AMY_BROWSER_LAUNCH=plain
+    if args.probe_speakeasy:
+        try:
+            result = probe_speakeasy()
+        except Exception as exc:  # noqa: BLE001
+            result = {"error": f"{type(exc).__name__}: {str(exc)[:500]}"}
+        log.info("SPEAKEASY PROBE RESULT %s", json.dumps(result, default=str))
+        return result
     if args.probe:
         os.environ.setdefault("TAO_CHALLENGE_RETRIES", "15")
         os.environ.setdefault("TAO_CHALLENGE_WAIT_SECONDS", "20")

@@ -126,3 +126,66 @@ def alert_email(ref, state, reason, raw):
 
 def allowed_recipient(address):
     return bool(address) and address.strip().lower() not in BLOCKED_RECIPIENTS
+
+
+# --- Drai's After Hours (SpeakeasyGo list; same emails AMYI sent by hand) ----
+
+DRAIS_TEXT = """PLAYMAKER ENTERTAINMENT'S GUESTLIST
+Drai's After Hours @ Vanderpump Hotel - doors open at 1 AM
+Free champagne for ladies, 1-2 AM
+Ladies: FREE until 3 AM
+Guys: FREE until 3 AM with an even ratio (at least one girl per guy)
+Reduced cover after 3 AM
+At the door, tell them you're on Playmaker Entertainment's guestlist, and bring a valid 21+ photo ID.
+Tag us on IG so we can repost your story: @playmaker.entertainment"""
+DRAIS_VENUE = "Drai's After Hours"
+
+
+def _drais_html(first, nights, party):
+    page = html_emails.render_confirmation(first, nights, party)
+    a, b = page.index("<!-- How to get passes -->"), page.index("<!-- Before you go -->")
+    page = page[:a] + html_emails._read("partials/drais_details.html") + page[b:]
+    page = (page.replace("https://booketing.com/microsite/pme/", "https://speakeasygo.com/ms/playmaker")
+                .replace("Book a VIP Table", "Tickets &amp; VIP Tables")
+                .replace("Follow the steps to grab your passes before you head out.", "Arrive before 3 AM.")
+                .replace("Skip the line and lock in your own table", "Lock in your own table"))
+    return page
+
+
+def drais_guest_email(request, bookings):
+    first = request.get("first_name") or "there"
+    nights = [(html_emails._short_date(b["date"]), DRAIS_VENUE, None)
+              for b in sorted(bookings, key=lambda b: b["date"])]
+    text = (f"Hi {first},\n\nYou're on the list for:\n" + "\n".join(f"{d} - {v}" for d, v, _ in nights)
+            + "\n\n" + DRAIS_TEXT + "\n\nTickets & VIP Tables: https://speakeasygo.com/ms/playmaker"
+            "\n\nQuestions? Email info@playmakerentertainment.com\n\nPlaymaker Entertainment")
+    text = text.replace("Skip the line and lock in your own table", "Lock in your own table")
+    html = _drais_html(first, nights, html_emails.party_size(request["female_count"], request["male_count"]))
+    for body in (html, text):
+        low = body.lower()
+        if "skip the line" in low or "discount" in low:
+            raise ValueError("Drai's email must not promise skip-the-line or discounts")
+    label = date_label(request["start_date"], request["end_date"])
+    subject = f"You're on the list: Drai's After Hours — Playmaker Entertainment ({label})"
+    return {"to": request["email"], "subject": subject, "text": text, "html": html,
+            "dedupe_query": f'to:{request["email"]} subject:"{subject}"'}
+
+
+def drais_team_email(ref, raw, request, bookings):
+    name = f"{request.get('first_name', '')} {request.get('last_name', '')}".strip() or raw.get("name", "")
+    f, m = int(request["female_count"]), int(request["male_count"])
+    posh = raw.get("posh") or {}
+    source = f"Posh order {posh['order_number']}" if posh.get("order_number") else (raw.get("source") or "website")
+    lines = ["ALREADY SIGNED UP — NO ACTION NEEDED", f"Guest: {name}", f"Email: {request['email']}",
+             f"Phone: {raw.get('phone') or '(none)'}", f"Party: {f} women, {m} men"]
+    for b in sorted(bookings, key=lambda b: b["date"]):
+        listed = b.get("speakeasy_date") or b["date"]
+        lines.append(f"{date.fromisoformat(b['date']).strftime('%a')} {b['date']} (night) - {DRAIS_VENUE} - "
+                     f"Added in Speakeasy (listed under {listed})")
+    lines += [f"Source: {source}", f"AMY ref: {ref}"]
+    text = "\n".join(lines)
+    label = date_label(request["start_date"], request["end_date"])
+    subject = f"Signed up: {name} - Drai's AH {label} ({f}F {m}M)".replace(",", "")
+    html = "<pre>" + _html.escape(text, quote=False) + "</pre>"
+    return {"to": TEAM_TO, "subject": subject, "text": text, "html": html,
+            "dedupe_query": f'to:{TEAM_TO} subject:"{subject}" "AMY ref: {ref}"'}

@@ -21,8 +21,14 @@ service's authenticated HTTPS API (`/queue/*`, `/send-branded`).
      `submitting` to the ledger, clicks Submit once, reads the order ID from
      `/orders/confirmation/<id>`, saves a screenshot + sha256, checkpoints
      `progress` on the server. No confirmation -> **uncertain**.
-   * Drai's: SpeakeasyGo only (name + party, no emails), only when
-     `AMY_WORKER_DRAIS=true` and `DRAIS_SPEAKEASY_DAY_OFFSET` is set.
+   * Drai's: SpeakeasyGo only (never TAO), only when `AMY_WORKER_DRAIS=true`.
+     The entry goes on the SAME night as the Posh/request date
+     (`DRAIS_SPEAKEASY_DAY_OFFSET` default 0, Thomas's decision Nov 9 2026;
+     a non-integer value stops Drai's as manual). Skips a name already on the
+     list; verifies the row appears after saving. Then sends the same Drai's
+     guest confirmation ("You're on the list: Drai's After Hours …", door
+     details, Speakeasy Tickets & VIP link) and team@ "Signed up: … - Drai's AH …"
+     email AMYI sent by hand.
 5. Guest email ("You're on the Playmaker Entertainment guest list for <date>")
    and team email ("Signed up: <name> — <date>" to team@) via `/send-branded`
    (its 20/hour cap and resend guard stay). 429 -> waits up to
@@ -56,7 +62,8 @@ Unexpected errors -> uncertain if a submit had started, else manual. Never a ret
 | `AMY_WORKER_DIR` | `/data/worker` on a **volume** (ledger + screenshots) |
 | `AMY_BROWSER_PROFILE` | `/data/worker/profile` (keeps Cloudflare clearance cookies) |
 | `AMY_BROWSER_PROXY` | residential proxy URL if Cloudflare blocks Railway IPs |
-| `AMY_WORKER_DRAIS`, `DRAIS_SPEAKEASY_DAY_OFFSET`, `SPEAKEASY_EMAIL`, `SPEAKEASY_PASSWORD` | Drai's only |
+| `AMY_WORKER_DRAIS`, `SPEAKEASY_EMAIL`, `SPEAKEASY_PASSWORD` | Drai's only (`DRAIS_SPEAKEASY_DAY_OFFSET` optional, default 0) |
+| `AMY_BROWSER_LAUNCH` | `plain`: start a normal Chrome and attach over CDP (needed for Cloudflare) |
 | `AMY_WORKER_ALERTS` | `true` to email team@ (WATCHDOG_ALERT_TO) on each manual/uncertain stop |
 | `AMY_SIGNUP_MODE` | must be unset |
 
@@ -73,3 +80,31 @@ Already server-side: `main.py --loop` polls valeconsultingaz@gmail.com every
 `AMY_POLL_SECONDS` for website, contact-form and "NEW POSH SIGNUP" mail (Drai's
 included) and enqueues them in queue mode; Posh webhooks and the website form
 enqueue directly. No new Gmail code was needed.
+
+## Cloudflare findings (box tests, Nov 9 2026)
+| Browser | Result |
+|---|---|
+| Playwright-launched Chrome, headless or headed, fresh or copied profile | stuck on "Just a moment…", even after Thomas clicked the check (re-challenged) |
+| AMYI's desktop Chrome via CDP (new tab only) | promoter page + form load, no check |
+| Plain `google-chrome --remote-debugging-port` (copied OR fresh profile) in a private Xvfb, attached via `connect_over_cdp` | check clears by itself in ~5 s; promoter page, form, all fields found |
+
+So the fix is `AMY_BROWSER_LAUNCH=plain` (browser_host.py): Chrome started
+normally, no Playwright automation flags. Nothing clicks or solves the check.
+Untested from Railway's datacenter IPs.
+
+## Running on the Grok Bot box (recommended first)
+`tools/run_worker_box.sh start|stop|status|ensure`
+* Own Chrome + own profile (`/workspace/worker-profile`) in a private Xvfb; it
+  never touches computerUse's Chrome or profile (`/home/box/chrome-profile/*`
+  is refused by browser_host.py).
+* `AMY_WORKER_BOX_LOCK=true`: each job holds `/workspace/.tao_browser.lock`
+  (same lock as `/workspace/tao_lock.sh` / tools/browser_lock.py). If AMYI holds
+  it for 20 min the job is released as `retry` (nothing submitted). AMYI's
+  computerUse TAO/Speakeasy runs must take the same lock.
+* Secrets come from files (queue token, branded-send token) and
+  `/home/box/.config/amy-worker.env` (mode 600) for mode/Speakeasy creds.
+* Background supervisor (nohup loop) restarts the worker if it exits. The box
+  has no systemd or cron; after a box restart run `tools/run_worker_box.sh ensure`
+  (one shell command, e.g. from AMYI's daily check). Log: `/workspace/amy-worker/worker.log`.
+* Probes: `python booking_worker.py --probe` (TAO) and `--probe-speakeasy`
+  (logs in, opens one list, adds nothing).
