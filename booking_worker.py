@@ -240,6 +240,36 @@ def drais_offset():
         return None
 
 
+# --- Pickup schedule (Thomas, Nov 9 2026; America/Phoenix) ---------------------
+# Mon-Wed: every 3 hours. Thu-Sun: nothing 1 AM-10 AM, then 10 AM, noon, 2 PM,
+# 4 PM and every hour 6 PM through midnight. A run starts only in the first ten
+# minutes of a scheduled hour (same :00-:09 window as the server's hourly
+# pickup) and then claims ONE job at a time back to back until the queue is
+# empty (at most RUN_MAX_JOBS), so every job keeps its own one-hour lease.
+MON_WED_HOURS = frozenset({0, 3, 6, 9, 12, 15, 18, 21})
+THU_SUN_HOURS = frozenset({0, 10, 12, 14, 16, 18, 19, 20, 21, 22, 23})
+RUN_MAX_JOBS = 25
+
+
+def scheduled_slot(ts):
+    """'YYYY-MM-DDTHH' when a pickup run may start at ts, else None."""
+    local = datetime.fromtimestamp(ts, PHOENIX)
+    if local.minute >= 10:
+        return None
+    hours = MON_WED_HOURS if local.weekday() <= 2 else THU_SUN_HOURS
+    return local.strftime("%Y-%m-%dT%H") if local.hour in hours else None
+
+
+def next_slot_label(ts):
+    """Human label of the next scheduled run start, for the log."""
+    t = int(ts // 600 + 1) * 600
+    for _ in range(24 * 6 * 8):
+        if scheduled_slot(t):
+            return datetime.fromtimestamp(t, PHOENIX).strftime("%a %b %d %I:%M %p MST")
+        t += 600
+    return "unknown"
+
+
 def box_lock(ref):
     """AMY_WORKER_BOX_LOCK=true (running on the Grok Bot box): hold the same
     /workspace/.tao_browser.lock that AMYI's computerUse TAO runs use, so the
@@ -288,6 +318,18 @@ class Worker:
                 return {"status": "rehearsal_stopped", "ref": job["ref"], "action": stop.action, "reason": stop.reason}
             return {"status": "rehearsed", "ref": job["ref"], "nights": result}
         return {"status": "idle"}
+
+    def run_pickup(self, max_jobs=RUN_MAX_JOBS):
+        """One scheduled run: claim and finish one job at a time until the
+        queue is empty, a claim is refused, or max_jobs were handled."""
+        results = []
+        for _ in range(max_jobs):
+            result = self._live_once()
+            results.append(result)
+            if result.get("status") in ("idle", "claim_refused", "not_assigned", "error"):
+                break
+        handled = [r for r in results if r.get("ref") and r.get("status") not in ("not_assigned",)]
+        return {"status": "run_done", "handled": len(handled), "results": results}
 
     def _live_once(self):
         code, body = self.api.claim()
@@ -681,6 +723,27 @@ def main(argv=None):
     worker = Worker(Api.from_env(), Ledger(work_dir / "ledger.json"), mode=mode, evidence_dir=work_dir)
     idle = max(int(os.environ.get("AMY_WORKER_IDLE_SECONDS", "120")), 30)
     log.info("AMY booking worker started in %s mode", mode)
+    if mode == "live":
+        last_slot = None
+        log.info("Pickup schedule (Phoenix): Mon-Wed %s; Thu-Sun %s; next run %s",
+                 sorted(MON_WED_HOURS), sorted(THU_SUN_HOURS), next_slot_label(time.time()))
+        while True:
+            slot = scheduled_slot(time.time())
+            if slot and slot != last_slot:
+                last_slot = slot
+                log.info("Pickup run %s starting", slot)
+                try:
+                    result = worker.run_pickup()
+                except Exception:  # noqa: BLE001
+                    log.exception("Pickup run failed")
+                    result = {"status": "error"}
+                log.info("run %s: %s", slot, json.dumps(result, default=str)[:4000])
+                log.info("next run %s", next_slot_label(time.time()))
+                if not args.loop:
+                    return result
+            elif not args.loop:
+                return {"status": "not_scheduled", "next": next_slot_label(time.time())}
+            time.sleep(30)
     while True:
         try:
             result = worker.run_once()
@@ -690,8 +753,7 @@ def main(argv=None):
         log.info("cycle: %s", json.dumps(result, default=str)[:2000])
         if not args.loop:
             return result
-        # Busy -> go straight to the next job; idle/dry-run -> wait.
-        time.sleep(5 if result.get("status") in ("done",) else idle if mode == "live" else max(idle, 1800))
+        time.sleep(max(idle, 1800))
 
 
 if __name__ == "__main__":

@@ -4,6 +4,13 @@
 repo/image. It never touches the queue database directly; it uses the AMY
 service's authenticated HTTPS API (`/queue/*`, `/send-branded`).
 
+## Pickup schedule (Thomas, Nov 9 2026, America/Phoenix)
+* Mon–Wed: runs at 12 AM, 3, 6, 9 AM, 12 PM, 3, 6, 9 PM.
+* Thu–Sun: no runs 1 AM–10 AM; runs at 10 AM, 12 PM, 2 PM, 4 PM, then hourly 6 PM–11 PM and 12 AM.
+* A run starts only in :00–:09 of a scheduled hour, then claims ONE job at a
+  time back to back until the queue is empty (max 25 per run), so each job has
+  its own one-hour lease. Live mode never claims outside a run.
+
 ## What it does per job (live mode)
 1. `POST /queue/claim {"limit":1}` (server must have `AMY_QUEUE_WORKER_CLAIMS=true`).
 2. Re-checks the source rules (`queue_service.source_policy`: past dates, held

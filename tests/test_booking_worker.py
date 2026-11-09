@@ -342,3 +342,44 @@ def test_proxy_parsing(monkeypatch):
     assert tao_portal.browser_proxy() == {'server': 'http://proxy.example:8000', 'username': 'us@er', 'password': 'p:ss'}
     monkeypatch.delenv('AMY_BROWSER_PROXY')
     assert tao_portal.browser_proxy() is None
+
+
+def _ts(y, mo, d, h, mi):
+    return datetime(y, mo, d, h, mi, tzinfo=q.PHOENIX).timestamp()
+
+
+@pytest.mark.parametrize('day', [9, 10, 11])  # Mon-Wed Nov 9-11 2026
+def test_schedule_mon_wed_every_three_hours(day):
+    allowed = {h for h in range(24) if bw.scheduled_slot(_ts(2026, 11, day, h, 0))}
+    assert allowed == {0, 3, 6, 9, 12, 15, 18, 21}
+
+
+@pytest.mark.parametrize('day', [12, 13, 14, 15])  # Thu-Sun Nov 12-15 2026
+def test_schedule_thu_sun(day):
+    allowed = {h for h in range(24) if bw.scheduled_slot(_ts(2026, 11, day, h, 5))}
+    assert allowed == {0, 10, 12, 14, 16, 18, 19, 20, 21, 22, 23}
+    assert not any(bw.scheduled_slot(_ts(2026, 11, day, h, 0)) for h in range(1, 10))
+
+
+def test_schedule_only_first_ten_minutes():
+    assert bw.scheduled_slot(_ts(2026, 11, 9, 3, 9)) == '2026-11-09T03'
+    assert bw.scheduled_slot(_ts(2026, 11, 9, 3, 10)) is None
+    assert 'Mon Nov 09 03:00 AM' in bw.next_slot_label(_ts(2026, 11, 9, 1, 45))
+
+
+def test_run_pickup_clears_queue_one_job_at_a_time(tmp_path):
+    s, api, worker = make(tmp_path)
+    for i, d in enumerate(['2026-11-20', '2026-11-12', '2026-11-15']):
+        s.enqueue(f'j{i}', raw(start_date=d, end_date=d, email=f'g{i}@example.invalid', source_message_id=f'm{i}'), NOW)
+    claims = []
+    real_claim = api.claim
+    def claim():
+        code, body = real_claim()
+        claims.append([j['ref'] for j in body.get('jobs', [])])
+        return code, body
+    api.claim = claim
+    result = worker.run_pickup()
+    assert result['handled'] == 3
+    assert claims[:3] == [['j1'], ['j2'], ['j0']]  # soonest date first, one per claim
+    assert all(s.get(r)['state'] == 'done' for r in ('j0', 'j1', 'j2'))
+    assert len(api.sent) == 6
