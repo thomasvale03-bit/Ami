@@ -374,6 +374,7 @@ def live_loop(worker, work_dir, loop=True, step=5, heartbeat=600, clock=time.tim
             return result or {"status": "not_scheduled", "next": next_slot_label(now)}
         if now - last_beat >= heartbeat:
             last_beat = now
+            ensure_browser()
             log.info("heartbeat %s; last run %s; next run %s",
                      datetime.fromtimestamp(now, PHOENIX).strftime("%a %b %d %I:%M %p MST"),
                      state.last() or "none", next_slot_label(now))
@@ -432,6 +433,7 @@ class Worker:
     def run_pickup(self, max_jobs=RUN_MAX_JOBS):
         """One scheduled run: claim and finish one job at a time until the
         queue is empty, a claim is refused, or max_jobs were handled."""
+        ensure_browser()
         results = []
         for _ in range(max_jobs):
             result = self._live_once()
@@ -479,6 +481,26 @@ class Worker:
             log.exception("Job %s failed unexpectedly", ref)
             attempted = any((self.ledger.get(night_key(ref, v, n)) or {}).get("state")
                             for v, n in self._safe_nights(raw))
+            if not attempted and browser_lost(exc):
+                try:
+                    import browser_host
+                    log.warning("Job %s: browser was down; restarting and retrying once", ref)
+                    browser_host.restart()
+                    return self._process(job, ref, token, raw)
+                except Stop as stop:
+                    meta = {"worker": "railway", **stop.extra}
+                    if stop.action == "retry":
+                        meta["submission_attempted"] = False
+                    code, body = self.api.update(ref, token, stop.action, meta, stop.reason)
+                    log.warning("Job %s -> %s: %s (HTTP %s)", ref, stop.action, stop.reason, code)
+                    if stop.action in ("manual", "uncertain"):
+                        self._alert(ref, stop.action, stop.reason, raw)
+                    return {"status": stop.action, "ref": ref, "reason": stop.reason, "http": code}
+                except Exception as retry_exc:  # noqa: BLE001
+                    log.exception("Job %s retry after browser restart failed", ref)
+                    exc = retry_exc
+                    attempted = any((self.ledger.get(night_key(ref, v, n)) or {}).get("state")
+                                    for v, n in self._safe_nights(raw))
             action = "uncertain" if attempted else "manual"
             reason = f"Worker error ({type(exc).__name__}: {str(exc)[:300]}); not retried"
             self.api.update(ref, token, action, {"worker": "railway"}, reason)
@@ -772,6 +794,31 @@ def probe_speakeasy(listing_date=None):
             closable.close()
     report["seconds"] = round(time.time() - started)
     return report
+
+
+
+def browser_lost(exc):
+    """True when the failure is a dead/unreachable booking Chrome, not a booking rule."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(s in text for s in (
+        "econnrefused",
+        "connect_over_cdp",
+        "retrieving websocket url",
+        "browser has been closed",
+        "browser closed",
+        "target page, context or browser has been closed",
+        "connection refused",
+    ))
+
+
+def ensure_browser():
+    """Bring the plain Chrome back if it died between pickups. No-op when
+    the worker is not using AMY_BROWSER_LAUNCH=plain."""
+    try:
+        import browser_host
+        browser_host.ensure()
+    except Exception:  # noqa: BLE001
+        log.exception("Could not ensure the booking browser is running")
 
 
 # --- Entry point -------------------------------------------------------------

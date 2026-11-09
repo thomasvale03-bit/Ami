@@ -467,3 +467,87 @@ def test_run_now_file_runs_once_and_keeps_slot(tmp_path):
     with pytest.raises(KeyboardInterrupt):
         bw.live_loop(w, tmp_path, step=5, clock=clock, sleep=lambda s: None)
     assert w.calls == 1 and state.last() is None and not state.run_now_file.exists()
+
+def test_browser_lost_detects_cdp_refused():
+    assert bw.browser_lost(RuntimeError(
+        'BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9335'))
+    assert bw.browser_lost(ConnectionError('Connection refused'))
+    assert not bw.browser_lost(RuntimeError('list is closed'))
+    assert not bw.browser_lost(ValueError('bad date'))
+
+
+def test_ensure_is_noop_unless_plain_launch(monkeypatch):
+    import browser_host
+    monkeypatch.delenv('AMY_BROWSER_LAUNCH', raising=False)
+    monkeypatch.delenv('AMY_BROWSER_CDP_URL', raising=False)
+    assert browser_host.ensure() is None
+    assert browser_host.start() is None
+    assert browser_host.restart() is None
+
+
+def test_ensure_reuses_healthy_chrome_and_restarts_when_down(monkeypatch):
+    import browser_host
+    monkeypatch.setenv('AMY_BROWSER_LAUNCH', 'plain')
+    monkeypatch.setenv('AMY_BROWSER_CDP_URL', 'http://127.0.0.1:9335')
+    monkeypatch.setattr(browser_host, 'healthy', lambda url=None, timeout=2: True)
+    assert browser_host.ensure() == 'http://127.0.0.1:9335'
+    calls = []
+    monkeypatch.setattr(browser_host, 'healthy', lambda url=None, timeout=2: False)
+    monkeypatch.setattr(browser_host, 'restart', lambda: calls.append('restart') or 'http://127.0.0.1:9335')
+    assert browser_host.ensure() == 'http://127.0.0.1:9335' and calls == ['restart']
+
+
+def test_cdp_refused_restarts_browser_and_retries_job(tmp_path, monkeypatch):
+    calls = {'listings': 0, 'restarts': 0}
+
+    class Flaky(FakeTao):
+        def listing(self, venue, night):
+            calls['listings'] += 1
+            if calls['listings'] == 1:
+                raise RuntimeError(
+                    'BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9335\n'
+                    'Call log:\n  - <ws preparing> retrieving websocket url from http://127.0.0.1:9335')
+            return super().listing(venue, night)
+
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: calls.__setitem__('restarts', calls['restarts'] + 1))
+    s, api, worker = make(tmp_path, tao=Flaky())
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'done', result
+    assert calls['restarts'] == 1 and calls['listings'] == 2
+    assert s.get('a')['state'] == 'done'
+    assert api.updates[-1][1] == 'complete'
+
+
+def test_cdp_error_after_click_is_uncertain_not_retried(tmp_path, monkeypatch):
+    def boom(before_submit):
+        before_submit()
+        raise RuntimeError('BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9335')
+
+    restarts = []
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: restarts.append(1))
+    s, api, worker = make(tmp_path, tao=FakeTao(submit=boom))
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'uncertain', result
+    assert restarts == []
+    assert s.get('a')['state'] == 'submission_uncertain'
+
+
+def test_cdp_retry_goes_manual_if_browser_stays_down(tmp_path, monkeypatch):
+    class Down(FakeTao):
+        def listing(self, venue, night):
+            raise RuntimeError('BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9335')
+
+    restarts = []
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: restarts.append(1))
+    s, api, worker = make(tmp_path, tao=Down())
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'manual', result
+    assert restarts == [1]
+    assert 'not retried' in result['reason']
+    assert s.get('a')['state'] == 'manual'
