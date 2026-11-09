@@ -146,6 +146,28 @@ class Store:
                 ORDER BY updated DESC,ref LIMIT ?""", (limit,)).fetchall()
             return [self.decode(r) for r in rows]
 
+    def owner_requeue(self, ref, approval, now):
+        """Owner-approved: put ONE manual job back to queued. Only for a job
+        that was never submitted (no booking/submitting progress), so it can
+        never cause a rebook of completed work. The approval is recorded."""
+        approval = str(approval or '').strip()
+        if not approval:
+            raise Conflict('owner approval (message id) required')
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone()
+            if row is None:
+                raise Conflict('Unknown job')
+            if row['state'] != 'manual':
+                raise Conflict('Only a manual job can be requeued')
+            meta = json.loads(row['metadata'] or '{}')
+            progress = meta.get('progress') or {}
+            if progress.get('submitting') or progress.get('bookings') or meta.get('evidence'):
+                raise Conflict('Job has submission progress; manual review required')
+            meta['owner_requeue'] = {'approval': approval[:200], 'at': now, 'previous_reason': row['reason']}
+            db.execute("UPDATE queue_jobs SET state='queued',reason=?,metadata=?,updated=?,claim_token=NULL WHERE ref=?",
+                       ('Owner requeue ' + approval[:200], json.dumps(meta), now, ref))
+        return self.get(ref)
+
     def update(self, ref, token, action, metadata, now, reason=''):
         if not isinstance(metadata, dict):
             raise Conflict('metadata must be an object')

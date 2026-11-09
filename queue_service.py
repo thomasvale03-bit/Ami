@@ -235,6 +235,10 @@ def handle(method, url, headers, payload, *, s=None, now=None):
             jobs = s.claim(local.strftime('%Y-%m-%dT%H'), now, allow_new=local.minute < 10 and not paused,
                            limit=limit)
             return 200, {'jobs': jobs, 'pickup': 'hourly', 'execution': execution()}
+        if method == 'POST' and path.startswith('/queue/requeue/'):
+            if not isinstance(payload, dict):
+                raise Conflict('JSON object required')
+            return 200, s.owner_requeue(unquote(path[len('/queue/requeue/'):]), payload.get('owner_approval'), now)
         if method == 'POST' and path.startswith('/queue/jobs/'):
             if not isinstance(payload, dict):
                 raise Conflict('JSON object required')
