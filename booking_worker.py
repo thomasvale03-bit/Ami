@@ -521,6 +521,52 @@ class Worker:
                 log.exception("Exception alert email failed for %s", ref)
 
 
+# --- Connectivity probe (no secrets, no guest data, no submit) ---------------
+
+def probe():
+    """Open Playmaker's TAO promoter page from this host, report whether the
+    Cloudflare check showed/cleared, then open one live guest-list form and
+    list the fields found. Fills nothing and never clicks submit."""
+    import re
+    import tao_portal
+    from config.rules import TAO_PROMOTER_URL
+    from playwright.sync_api import sync_playwright
+    report = {"outbound_proxy": bool(tao_portal.browser_proxy()), "promoter_url": TAO_PROMOTER_URL}
+    started = time.time()
+    with sync_playwright() as p:
+        closable, page = tao_portal._browser_page(p)
+        try:
+            page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
+            tao_portal._settle(page)
+            report["challenge_on_first_load"] = tao_portal.is_security_check(page.title(), page.locator("body").inner_text())
+            try:
+                tao_portal._open_promoter_page(page)
+                report["promoter_page"] = "loaded"
+            except tao_portal.TaoBlocked as exc:
+                report["promoter_page"] = f"blocked: {exc}"
+                report["seconds"] = round(time.time() - started)
+                return report
+            links = page.locator("a").evaluate_all(
+                "els => els.map(a => ({text: (a.textContent || '').trim(), href: a.href}))")
+            passes = [l["href"] for l in links if re.fullmatch(r"passes?", l["text"], re.I) and tao_portal.is_safe_pass_url(l["href"])]
+            report["pass_links"] = len(passes)
+            if passes:
+                url = passes[0]
+                report["form_url"] = url
+                tao_portal._open_via_promoter(page, url)
+                body = page.locator("body").inner_text()
+                report["form_challenge"] = tao_portal.is_security_check(page.title(), body)
+                report["gender_selects"] = sorted(tao_portal._selects_by_gender(page))
+                report["fields_present"] = [sel for sel in ("#OrderEmail", "#OrderFirstName", "#OrderLastName",
+                                                            "#OrderPhone", "#OrderPostalCode")
+                                            if page.locator(sel).count()]
+                report["submit_button_present"] = bool(page.locator('button[type="submit"], input[type="submit"]').count())
+        finally:
+            closable.close()
+    report["seconds"] = round(time.time() - started)
+    return report
+
+
 # --- Entry point -------------------------------------------------------------
 
 def check_config(mode):
@@ -541,7 +587,21 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--loop", action="store_true", help="keep running")
     parser.add_argument("--mode", choices=("dry-run", "live"), default=None)
+    parser.add_argument("--probe", action="store_true",
+                        help="only check TAO reachability/Cloudflare from this host, then idle")
     args = parser.parse_args(argv)
+    if args.probe:
+        os.environ.setdefault("TAO_CHALLENGE_RETRIES", "15")
+        os.environ.setdefault("TAO_CHALLENGE_WAIT_SECONDS", "20")
+        try:
+            result = probe()
+        except Exception as exc:  # noqa: BLE001
+            result = {"error": f"{type(exc).__name__}: {str(exc)[:500]}"}
+        log.info("PROBE RESULT %s", json.dumps(result, default=str))
+        if args.loop:  # keep the container up so the log can be read; no further work
+            while True:
+                time.sleep(3600)
+        return result
     mode = args.mode or os.environ.get("AMY_WORKER_MODE", "dry-run")
     if mode not in ("dry-run", "live"):
         sys.exit("AMY_WORKER_MODE must be dry-run or live")
