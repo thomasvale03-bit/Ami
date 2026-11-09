@@ -1137,9 +1137,7 @@ def retry_pending_website(intake):
 def notify_team_website(service, clean, subject):
     """Also send the same notice to the team inbox (team@playmakerentertainment.com)
     via Amy's normal send path. Best effort: a failure here never breaks intake."""
-    import queue_service
-    if queue_service.enabled():
-        return False  # queued completion/exception digest replaces immediate team notices
+    # Always notify team@ immediately, even in queue mode (Thomas, Nov 9 2026).
     import gmail_client
     from config import rules
     tag = clean["ref"] or re.sub(r"[^\w-]", "", clean["email"])
