@@ -5,6 +5,8 @@
 #   kick   = ensure running, then ask for an immediate pickup if NOW is a scheduled
 #            pickup time (minute < 30). Idempotent: the worker records each hour it
 #            has run (data/last_slot) and ignores a kick for an hour already run.
+#   run-now = owner-requested pickup outside the schedule: works the whole queue
+#            (batches of 25, one guest at a time). Only when Thomas asks.
 # Secrets are read from files (never put on the command line):
 #   /home/box/agent-data/amy-queue-client/api-token      -> AMY_QUEUE_API_TOKEN
 #   /home/box/.config/amy_branded_send_token              -> BRANDED_SEND_TOKEN
@@ -69,11 +71,18 @@ kick() {
   fi
 }
 
+run_now() {
+  running || start >/dev/null
+  mkdir -p "$DATA" && touch "$DATA/run_now"
+  echo "worker pid $(cat "$PIDFILE"): off-schedule pickup of the whole queue requested (starts within 5 s)"
+}
+
 case "${1:-}" in
   start) start ;;
   kick) kick ;;
+  run-now) run_now ;;
   ensure) running && echo "running (pid $(cat "$PIDFILE"))" || start ;;
   stop) stop ;;
   status) running && echo "running (pid $(cat "$PIDFILE"))" || echo "not running"; tail -n 5 "$LOG" 2>/dev/null || true ;;
-  *) echo "usage: $0 start|stop|status|ensure|kick" >&2; exit 2 ;;
+  *) echo "usage: $0 start|stop|status|ensure|kick|run-now" >&2; exit 2 ;;
 esac

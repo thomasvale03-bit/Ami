@@ -284,6 +284,7 @@ class SlotState:
         self.dir = Path(work_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.last_file, self.kick_file = self.dir / "last_slot", self.dir / "kick"
+        self.run_now_file = self.dir / "run_now"
 
     def last(self):
         try:
@@ -295,6 +296,13 @@ class SlotState:
         tmp = self.last_file.with_suffix(".tmp")
         tmp.write_text(slot)
         os.replace(tmp, self.last_file)
+
+    def take_run_now(self):
+        try:
+            self.run_now_file.unlink()
+            return True
+        except FileNotFoundError:
+            return False
 
     def take_kick(self):
         try:
@@ -327,6 +335,28 @@ def pickup_step(worker, state, now, kicked=False):
     return slot, result
 
 
+def run_now(worker, max_batches=8):
+    """Owner-requested pickup outside the schedule: work through the whole
+    queue, one guest at a time, in batches of RUN_MAX_JOBS until a batch stops
+    early (queue empty, claim refused or error). Does not touch last_slot."""
+    log.info("Off-schedule pickup (run_now) starting")
+    batches = []
+    for _ in range(max_batches):
+        try:
+            result = worker.run_pickup()
+        except Exception:  # noqa: BLE001
+            log.exception("run_now batch failed")
+            result = {"status": "error", "handled": 0, "results": [{"status": "error"}]}
+        batches.append(result)
+        log.info("run_now batch %d: %s", len(batches), json.dumps(result, default=str)[:4000])
+        last = (result.get("results") or [{}])[-1].get("status")
+        if result.get("handled", 0) < RUN_MAX_JOBS or last in ("idle", "claim_refused", "error"):
+            break
+    total = sum(b.get("handled", 0) for b in batches)
+    log.info("Off-schedule pickup done: %d batch(es), %d job(s) handled", len(batches), total)
+    return {"status": "run_now_done", "batches": len(batches), "handled": total}
+
+
 def live_loop(worker, work_dir, loop=True, step=5, heartbeat=600, clock=time.time, sleep=time.sleep):
     """Short sleeps, recomputed from wall-clock time every step (the box VM can
     be paused mid-sleep), a kick file for an immediate pickup, a heartbeat."""
@@ -336,6 +366,9 @@ def live_loop(worker, work_dir, loop=True, step=5, heartbeat=600, clock=time.tim
     last_beat = 0.0
     while True:
         now = clock()
+        if state.take_run_now():
+            run_now(worker)
+            now = clock()
         slot, result = pickup_step(worker, state, now, kicked=state.take_kick())
         if not loop:
             return result or {"status": "not_scheduled", "next": next_slot_label(now)}
