@@ -194,7 +194,6 @@ def test_intake_no_browser_email_or_wake(raw, monkeypatch):
     email.assert_not_called()
     import amyi
     assert not amyi.notify('posh_guest', ref='mock')
-    assert not main.posh_webhook.notify_team_website(Mock(), {}, 'mock')
     assert main.posh_webhook.send_branded(Mock(), {})[0] == 400  # existing endpoint retained
 
 
@@ -377,3 +376,14 @@ def test_completed_or_existing_legacy_ref_never_blindly_migrates(raw):
         assert q.enqueue(ref, raw)['state'] == 'manual'
     assert job_tracker.snapshot_strict() == before
     assert all(not r.get('queue_owned') for r in job_tracker.snapshot_strict().values())
+
+
+def test_website_form_still_emails_team_in_queue_mode(monkeypatch):
+    import datetime, main
+    from config import rules
+    send = Mock(return_value=True)
+    monkeypatch.setattr(main.gmail_client, 'send_once', send)
+    monkeypatch.setattr(main.posh_webhook, 'to_website_text', Mock(return_value='body'))
+    clean = {'ref': 'r1', 'email': 'g@example.com', 'night': datetime.date(2026, 11, 20), 'source': 'playmaker'}
+    assert main.posh_webhook.notify_team_website(Mock(), clean, 'subj')
+    assert send.call_args[0][2] == rules.PLAYMAKER_EMAIL == 'team@playmakerentertainment.com'
