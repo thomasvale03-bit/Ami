@@ -251,10 +251,16 @@ THU_SUN_HOURS = frozenset({0, 10, 12, 14, 16, 18, 19, 20, 21, 22, 23})
 RUN_MAX_JOBS = 25
 
 
-def scheduled_slot(ts):
+# Minutes after a scheduled hour in which a run may still start. The box VM is
+# paused while no agent is active, so a wake a few minutes late must still
+# pick up (AMY_WORKER_RUN_WINDOW_MIN, default 30).
+RUN_WINDOW_MIN = int(os.environ.get("AMY_WORKER_RUN_WINDOW_MIN", "30"))
+
+
+def scheduled_slot(ts, window=None):
     """'YYYY-MM-DDTHH' when a pickup run may start at ts, else None."""
     local = datetime.fromtimestamp(ts, PHOENIX)
-    if local.minute >= 10:
+    if local.minute >= (RUN_WINDOW_MIN if window is None else window):
         return None
     hours = MON_WED_HOURS if local.weekday() <= 2 else THU_SUN_HOURS
     return local.strftime("%Y-%m-%dT%H") if local.hour in hours else None
@@ -268,6 +274,77 @@ def next_slot_label(ts):
             return datetime.fromtimestamp(t, PHOENIX).strftime("%a %b %d %I:%M %p MST")
         t += 600
     return "unknown"
+
+
+class SlotState:
+    """Persists the last pickup slot run (survives restarts) so a kick or a
+    restart never runs the same hour twice."""
+
+    def __init__(self, work_dir):
+        self.dir = Path(work_dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.last_file, self.kick_file = self.dir / "last_slot", self.dir / "kick"
+
+    def last(self):
+        try:
+            return self.last_file.read_text().strip() or None
+        except FileNotFoundError:
+            return None
+
+    def mark(self, slot):
+        tmp = self.last_file.with_suffix(".tmp")
+        tmp.write_text(slot)
+        os.replace(tmp, self.last_file)
+
+    def take_kick(self):
+        try:
+            self.kick_file.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+
+
+def pickup_step(worker, state, now, kicked=False):
+    """One wall-clock check. Runs a pickup when the current Phoenix time is in
+    a scheduled slot not yet run. Returns (slot, result) or (None, None)."""
+    slot = scheduled_slot(now)
+    if kicked and not slot:
+        log.info("kick ignored: %s is not a scheduled pickup time (next %s)",
+                 datetime.fromtimestamp(now, PHOENIX).strftime("%a %I:%M %p"), next_slot_label(now))
+    if not slot or slot == state.last():
+        if kicked and slot:
+            log.info("kick ignored: pickup %s already ran", slot)
+        return None, None
+    state.mark(slot)  # before running: a crash mid-run never re-runs the hour
+    log.info("Pickup run %s starting (%s)", slot, "kick" if kicked else "schedule")
+    try:
+        result = worker.run_pickup()
+    except Exception:  # noqa: BLE001
+        log.exception("Pickup run failed")
+        result = {"status": "error"}
+    log.info("run %s: %s", slot, json.dumps(result, default=str)[:4000])
+    log.info("next run %s", next_slot_label(time.time()))
+    return slot, result
+
+
+def live_loop(worker, work_dir, loop=True, step=5, heartbeat=600, clock=time.time, sleep=time.sleep):
+    """Short sleeps, recomputed from wall-clock time every step (the box VM can
+    be paused mid-sleep), a kick file for an immediate pickup, a heartbeat."""
+    state = SlotState(work_dir)
+    log.info("Pickup schedule (Phoenix): Mon-Wed %s; Thu-Sun %s; window :00-:%02d; next run %s",
+             sorted(MON_WED_HOURS), sorted(THU_SUN_HOURS), RUN_WINDOW_MIN - 1, next_slot_label(clock()))
+    last_beat = 0.0
+    while True:
+        now = clock()
+        slot, result = pickup_step(worker, state, now, kicked=state.take_kick())
+        if not loop:
+            return result or {"status": "not_scheduled", "next": next_slot_label(now)}
+        if now - last_beat >= heartbeat:
+            last_beat = now
+            log.info("heartbeat %s; last run %s; next run %s",
+                     datetime.fromtimestamp(now, PHOENIX).strftime("%a %b %d %I:%M %p MST"),
+                     state.last() or "none", next_slot_label(now))
+        sleep(step)
 
 
 def box_lock(ref):
@@ -724,26 +801,7 @@ def main(argv=None):
     idle = max(int(os.environ.get("AMY_WORKER_IDLE_SECONDS", "120")), 30)
     log.info("AMY booking worker started in %s mode", mode)
     if mode == "live":
-        last_slot = None
-        log.info("Pickup schedule (Phoenix): Mon-Wed %s; Thu-Sun %s; next run %s",
-                 sorted(MON_WED_HOURS), sorted(THU_SUN_HOURS), next_slot_label(time.time()))
-        while True:
-            slot = scheduled_slot(time.time())
-            if slot and slot != last_slot:
-                last_slot = slot
-                log.info("Pickup run %s starting", slot)
-                try:
-                    result = worker.run_pickup()
-                except Exception:  # noqa: BLE001
-                    log.exception("Pickup run failed")
-                    result = {"status": "error"}
-                log.info("run %s: %s", slot, json.dumps(result, default=str)[:4000])
-                log.info("next run %s", next_slot_label(time.time()))
-                if not args.loop:
-                    return result
-            elif not args.loop:
-                return {"status": "not_scheduled", "next": next_slot_label(time.time())}
-            time.sleep(30)
+        return live_loop(worker, work_dir, loop=args.loop)
     while True:
         try:
             result = worker.run_once()

@@ -361,9 +361,9 @@ def test_schedule_thu_sun(day):
     assert not any(bw.scheduled_slot(_ts(2026, 11, day, h, 0)) for h in range(1, 10))
 
 
-def test_schedule_only_first_ten_minutes():
+def test_schedule_window_and_legacy_ten_minute_option():
     assert bw.scheduled_slot(_ts(2026, 11, 9, 3, 9)) == '2026-11-09T03'
-    assert bw.scheduled_slot(_ts(2026, 11, 9, 3, 10)) is None
+    assert bw.scheduled_slot(_ts(2026, 11, 9, 3, 10), window=10) is None
     assert 'Mon Nov 09 03:00 AM' in bw.next_slot_label(_ts(2026, 11, 9, 1, 45))
 
 
@@ -383,3 +383,54 @@ def test_run_pickup_clears_queue_one_job_at_a_time(tmp_path):
     assert claims[:3] == [['j1'], ['j2'], ['j0']]  # soonest date first, one per claim
     assert all(s.get(r)['state'] == 'done' for r in ('j0', 'j1', 'j2'))
     assert len(api.sent) == 6
+
+
+def test_run_window_widened_to_thirty_minutes():
+    assert bw.scheduled_slot(_ts(2026, 11, 9, 6, 29)) == '2026-11-09T06'
+    assert bw.scheduled_slot(_ts(2026, 11, 9, 6, 30)) is None
+
+
+class CountingWorker:
+    def __init__(self):
+        self.runs = 0
+
+    def run_pickup(self):
+        self.runs += 1
+        return {'status': 'run_done', 'handled': 0}
+
+
+def test_pickup_step_once_per_hour_even_across_restart(tmp_path):
+    w = CountingWorker()
+    state = bw.SlotState(tmp_path)
+    t = _ts(2026, 11, 9, 6, 3)
+    assert bw.pickup_step(w, state, t)[0] == '2026-11-09T06'
+    assert bw.pickup_step(w, state, t + 60) == (None, None)
+    assert bw.pickup_step(w, bw.SlotState(tmp_path), t + 120, kicked=True) == (None, None)  # restart + kick
+    assert w.runs == 1
+    assert bw.pickup_step(w, state, _ts(2026, 11, 9, 7, 0), kicked=True) == (None, None)  # not scheduled
+    assert w.runs == 1
+
+
+def test_live_loop_uses_wall_clock_after_vm_pause(tmp_path):
+    """A paused VM resumes with wall time jumped ahead: the next short step
+    sees the new time and runs the slot (late but inside the window)."""
+    w = CountingWorker()
+    times = iter([_ts(2026, 11, 9, 2, 58), _ts(2026, 11, 9, 2, 59), _ts(2026, 11, 9, 3, 17), _ts(2026, 11, 9, 3, 18)])
+    calls = []
+
+    def clock():
+        try:
+            return next(times)
+        except StopIteration:
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        bw.live_loop(w, tmp_path, step=5, clock=clock, sleep=calls.append)
+    assert w.runs == 1 and calls == [5, 5, 5]  # startup log read the clock once
+
+
+def test_kick_file_triggers_run_in_window(tmp_path):
+    w = CountingWorker()
+    state = bw.SlotState(tmp_path)
+    state.kick_file.touch()
+    assert state.take_kick() and not state.take_kick()
