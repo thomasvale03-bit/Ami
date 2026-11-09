@@ -30,6 +30,41 @@ def store():
     return Store(Path(os.environ.get('AMY_QUEUE_DIR', '/data/queue')) / 'queue.sqlite3')
 
 
+def worker_claims():
+    """AMY_QUEUE_WORKER_CLAIMS=true: the Railway booking worker owns pickup and
+    may claim at any minute. Off by default (AMYI hourly desktop pickup)."""
+    return os.environ.get('AMY_QUEUE_WORKER_CLAIMS', '').lower() == 'true'
+
+
+def execution():
+    return 'railway-booking-worker' if worker_claims() else 'amyi-own-desktop-only'
+
+
+def exceptions_summary(s, limit=100):
+    """Everything a person must review, smallest useful projection first.
+
+    No claim tokens; includes the guest/venue/date needed to act and the saved
+    reason/progress (order IDs already booked, emails already sent)."""
+    rows = s.exceptions(limit)
+    items = []
+    for row in rows:
+        raw, meta = row.get('raw') or {}, row.get('metadata') or {}
+        items.append({
+            'ref': row['ref'], 'state': row['state'], 'reason': row.get('reason', ''),
+            'updated': row.get('updated'), 'attempts': row.get('attempts'),
+            'guest': raw.get('name') or ' '.join(x for x in (raw.get('first_name'), raw.get('last_name')) if x),
+            'email': raw.get('email', ''), 'venues': raw.get('venues', []),
+            'start_date': raw.get('start_date'), 'end_date': raw.get('end_date'),
+            'party': {'female_count': raw.get('female_count'), 'male_count': raw.get('male_count')},
+            'source': raw.get('source', ''),
+            'progress': meta.get('progress') or {}, 'resolution': meta.get('resolution') or {},
+        })
+    counts = {}
+    for item in items:
+        counts[item['state']] = counts.get(item['state'], 0) + 1
+    return {'count': len(items), 'by_state': counts, 'jobs': items}
+
+
 def source_policy(ref, raw, today):
     """Preserve source: never silently infer dates or choose a fallback venue."""
     from config import rules
@@ -156,9 +191,12 @@ def handle(method, url, headers, payload, *, s=None, now=None):
     try:
         if method == 'GET' and path == '/queue/status':
             legacy = legacy_backlog(s)
-            return 200, {**s.status(), 'claims_paused': os.environ.get('AMY_QUEUE_CLAIMS_PAUSED', '').lower() == 'true',
+            return 200, {**s.status(), 'execution': execution(), 'worker_claims': worker_claims(),
+                         'claims_paused': os.environ.get('AMY_QUEUE_CLAIMS_PAUSED', '').lower() == 'true',
                          'legacy_review_required': sum(r['review_required'] for r in legacy),
                          'intake_receipts': s.intake_listing()}
+        if method == 'GET' and path == '/queue/exceptions':
+            return 200, exceptions_summary(s)
         if method == 'GET' and path == '/queue/legacy':
             return 200, {'jobs': legacy_backlog(s), 'runnable': False}
         if method == 'GET' and path == '/queue/intake':
@@ -183,9 +221,16 @@ def handle(method, url, headers, payload, *, s=None, now=None):
             if any(row['review_required'] for row in legacy_backlog(s)):
                 raise Conflict('Legacy backlog review required; GET /queue/legacy before sole-queue pickup')
             local = datetime.fromtimestamp(now, PHOENIX)
-            jobs = s.claim(local.strftime('%Y-%m-%dT%H'), now, allow_new=local.minute < 10 and os.environ.get('AMY_QUEUE_CLAIMS_PAUSED', '').lower() != 'true',
-                           limit=max(1, min(int(payload.get('limit', 10)), 25)))
-            return 200, {'jobs': jobs, 'pickup': 'hourly', 'execution': 'amyi-own-desktop-only'}
+            paused = os.environ.get('AMY_QUEUE_CLAIMS_PAUSED', '').lower() == 'true'
+            limit = max(1, min(int(payload.get('limit', 10)), 25))
+            if worker_claims():
+                # Railway booking worker: claim whenever idle, no hourly window
+                # and no hourly batch record. Still one job lane at a time.
+                jobs = s.claim(None, now, allow_new=not paused, limit=limit)
+                return 200, {'jobs': jobs, 'pickup': 'continuous', 'execution': execution()}
+            jobs = s.claim(local.strftime('%Y-%m-%dT%H'), now, allow_new=local.minute < 10 and not paused,
+                           limit=limit)
+            return 200, {'jobs': jobs, 'pickup': 'hourly', 'execution': execution()}
         if method == 'POST' and path.startswith('/queue/jobs/'):
             if not isinstance(payload, dict):
                 raise Conflict('JSON object required')

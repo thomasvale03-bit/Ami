@@ -94,33 +94,57 @@ class Store:
                       updated=? WHERE state IN ('assigned','awaiting_human_verification') AND lease_until<=?""", (now, now))
 
     def claim(self, slot, now, *, allow_new, limit=10):
+        """Claim up to `limit` runnable jobs.
+
+        Candidates are ordered by soonest source event date (then arrival), so
+        tonight's guests are booked before next month's. Jobs that fail the
+        source policy (past date, held, JEWEL after Nov 21 ...) are moved to
+        manual on the way and do NOT use up the claim: the next runnable job is
+        handed out instead. `slot=None` (worker mode) records no hourly batch;
+        the single-lane active-job check still prevents double assignment.
+        """
         with self.connect() as db:
             self.expire(db, now)
-            # One desktop execution lane; a second caller gets the same in-flight jobs.
+            # One execution lane; a second caller gets the same in-flight jobs.
             active = db.execute("SELECT * FROM queue_jobs WHERE state IN ('assigned','awaiting_human_verification') ORDER BY created,ref").fetchall()
             if active:
                 return [self.decode(r, token=True) for r in active]
-            old = db.execute('SELECT refs FROM queue_batches WHERE slot=?', (slot,)).fetchone()
-            if old:
-                refs = json.loads(old['refs'])
-                return [self.decode(db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone(), token=True) for ref in refs]
+            if slot is not None:
+                old = db.execute('SELECT refs FROM queue_batches WHERE slot=?', (slot,)).fetchone()
+                if old:
+                    refs = json.loads(old['refs'])
+                    return [self.decode(db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone(), token=True) for ref in refs]
             if not allow_new:
                 raise Conflict('New jobs are claimed only in the hourly pickup window (:00 through :09 Phoenix)')
-            rows = db.execute("SELECT * FROM queue_jobs WHERE state IN ('queued','retry') AND due<=? ORDER BY created,ref LIMIT ?", (now, limit)).fetchall()
+            rows = db.execute("""SELECT * FROM queue_jobs WHERE state IN ('queued','retry') AND due<=?
+                ORDER BY COALESCE(json_extract(raw,'$.start_date'),'9999-12-31'),created,ref""", (now,)).fetchall()
+            from queue_service import source_policy, PHOENIX
+            from datetime import datetime
+            today = datetime.fromtimestamp(now, PHOENIX).date()
             refs = []
             for row in rows:
+                if len(refs) >= limit:
+                    break
                 ref = row['ref']
-                from queue_service import source_policy, PHOENIX
-                from datetime import datetime
-                reason = source_policy(ref, json.loads(row['raw']), datetime.fromtimestamp(now, PHOENIX).date())
+                reason = source_policy(ref, json.loads(row['raw']), today)
                 if reason:
                     db.execute("UPDATE queue_jobs SET state='manual',reason=?,updated=? WHERE ref=?", (reason, now, ref))
                     continue
                 refs.append(ref)
                 db.execute("""UPDATE queue_jobs SET state='assigned',claim_token=?,lease_until=?,
                               attempts=attempts+1,updated=? WHERE ref=?""", (secrets.token_urlsafe(32), now + 3600, now, ref))
-            db.execute('INSERT INTO queue_batches VALUES(?,?)', (slot, json.dumps(refs)))
+            if slot is not None:
+                db.execute('INSERT INTO queue_batches VALUES(?,?)', (slot, json.dumps(refs)))
             return [self.decode(db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone(), token=True) for ref in refs]
+
+    def exceptions(self, limit=100):
+        """Jobs a person must look at: manual, uncertain submits, and paused or
+        retry-pending work. Newest first. No claim tokens."""
+        with self.connect() as db:
+            rows = db.execute("""SELECT * FROM queue_jobs WHERE state IN
+                ('manual','submission_uncertain','awaiting_human_verification','retry')
+                ORDER BY updated DESC,ref LIMIT ?""", (limit,)).fetchall()
+            return [self.decode(r) for r in rows]
 
     def update(self, ref, token, action, metadata, now, reason=''):
         if not isinstance(metadata, dict):
@@ -160,6 +184,18 @@ class Store:
                 state = 'retry' if row['attempts'] < 3 else 'manual'
                 due = (int(now // 3600) + 1) * 3600
                 saved['last_retry'] = {'reason': reason, 'at': now}
+            elif action == 'progress':
+                # Worker checkpoint: record per-night bookings/sends as they
+                # happen so a crash or email failure never causes a rebook.
+                if state != 'assigned' or not isinstance(metadata.get('progress'), dict):
+                    raise Conflict('Progress requires an assigned job and a progress object')
+                merged = dict(saved.get('progress') or {})
+                for key, value in metadata['progress'].items():
+                    if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                        merged[key] = {**merged[key], **value}
+                    else:
+                        merged[key] = value
+                saved['progress'] = merged
             elif action in ('uncertain', 'manual'):
                 if not reason:
                     raise Conflict('Actionable reason required')

@@ -160,10 +160,38 @@ _catalog = None  # {(venue, date): url}, loaded once per run
 _snapshot = None  # cached live catalog (TicketSauce feed) per cycle
 
 
+def browser_proxy():
+    """Optional outbound proxy for the browser (AMY_BROWSER_PROXY, e.g.
+    http://user:pass@host:port). Used by the Railway booking worker when
+    datacenter IPs get stuck on TAO's security check. None when unset."""
+    from urllib.parse import urlparse as _parse
+    raw = os.environ.get("AMY_BROWSER_PROXY", "").strip()
+    if not raw:
+        return None
+    u = _parse(raw)
+    if not (u.scheme and u.hostname):
+        return None
+    proxy = {"server": f"{u.scheme}://{u.hostname}" + (f":{u.port}" if u.port else "")}
+    if u.username:
+        from urllib.parse import unquote as _unq
+        proxy["username"] = _unq(u.username)
+        proxy["password"] = _unq(u.password or "")
+    return proxy
+
+
+def _launch_opts():
+    opts = {"headless": os.environ.get("AMY_BROWSER_HEADLESS", "true").lower() != "false",
+            "executable_path": os.environ.get("CHROMIUM_PATH") or None}
+    proxy = browser_proxy()
+    if proxy:
+        opts["proxy"] = proxy
+    return opts
+
+
 def launch_browser(playwright):
     # CHROMIUM_PATH points at a preinstalled Chromium where Playwright's own
     # download isn't available; unset on a normal install.
-    return playwright.chromium.launch(headless=True, executable_path=os.environ.get("CHROMIUM_PATH") or None)
+    return playwright.chromium.launch(**_launch_opts())
 
 
 def access_headers():
@@ -183,11 +211,9 @@ def _browser_page(playwright):
     profile = os.environ.get("AMY_BROWSER_PROFILE", "").strip()
     opts = dict(locale="en-US", timezone_id="America/Los_Angeles",
                 extra_http_headers=access_headers())
-    exe = os.environ.get("CHROMIUM_PATH") or None
     if profile:
         os.makedirs(profile, exist_ok=True)
-        context = playwright.chromium.launch_persistent_context(
-            profile, headless=True, executable_path=exe, **opts)
+        context = playwright.chromium.launch_persistent_context(profile, **_launch_opts(), **opts)
         page = context.pages[0] if context.pages else context.new_page()
         page.set_default_timeout(15_000)
         return context, page
@@ -464,9 +490,26 @@ def _api_or_assisted(listing, guest, rehearse=False):
     return None
 
 
-def submit_registration(listing, guest, rehearse=False):
+def _shot(page, path):
+    """Best-effort full-page screenshot; returns the path or None."""
+    if not path:
+        return None
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        page.screenshot(path=path, full_page=True)
+        return path
+    except Exception:  # noqa: BLE001 - evidence capture must never change the outcome
+        return None
+
+
+def submit_registration(listing, guest, rehearse=False, screenshot_path=None, before_submit=None):
     """rehearse=True fills and checks the whole form, then stops before the
-    final click and returns {"rehearsal": True, ...}: nothing is ordered."""
+    final click and returns {"rehearsal": True, ...}: nothing is ordered.
+
+    screenshot_path: save a full-page screenshot of the confirmation page (or
+    of the filled form when rehearsing). before_submit: callable run right
+    before the final click (the worker writes its "submit started" marker
+    there, so a crash after the click can never lead to a second order)."""
     url = listing.get("listing_url", "")
     if not is_safe_pass_url(url):
         return {"confirmation_id": None, "verified": False, "reason": f"Refusing non-Guest-List URL: {url}"}
@@ -551,6 +594,7 @@ def submit_registration(listing, guest, rehearse=False):
 
             if rehearse:
                 return {"confirmation_id": None, "verified": False, "rehearsal": True,
+                        "screenshot": _shot(page, screenshot_path), "page_url": page.url,
                         "form": {sel: page.input_value(sel) for sel in
                                  ("#OrderEmail", "#OrderFirstName", "#OrderLastName", "#OrderPostalCode", "#OrderPhone")
                                  if page.locator(sel).count()},
@@ -558,6 +602,8 @@ def submit_registration(listing, guest, rehearse=False):
                         "checkboxes": page.locator('input[type="checkbox"]').evaluate_all(
                             "els => els.map(e => [e.id || e.name || '(unnamed)', e.checked])"),
                         "totals": totals, "submit_button": button.inner_text().strip()}
+            if before_submit is not None:
+                before_submit()
             button.click()
             # From here on the order may exist: never report a plain failure.
             try:
@@ -573,6 +619,7 @@ def submit_registration(listing, guest, rehearse=False):
             except Exception as exc:
                 raise SubmissionUncertain(f"Page failed after submit: {exc}") from exc
             order_id = order_id_from(page.url, body)
+            shot = _shot(page, screenshot_path)
             if not order_id:
                 if not (SUCCESS_TEXT.search(body) or re.search(r"confirmation|ordered=true", page.url, re.I)):
                     raise SubmissionUncertain("TAO did not show a success page after submit")
@@ -581,6 +628,7 @@ def submit_registration(listing, guest, rehearse=False):
                 "confirmation_id": order_id,
                 "verified": True,
                 "confirmation_url": page.url,
+                "screenshot": shot,
                 "event": listing.get("event"),
                 "arrival_text": _arrival_text(body) or listing.get("arrival_text", ""),
                 "authorization": TAO_AUTOMATION_AUTHORIZATION,
