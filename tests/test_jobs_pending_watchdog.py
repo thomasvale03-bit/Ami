@@ -206,3 +206,22 @@ class ScottsdaleSendCheck(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWatchdogAlertRecipient(unittest.TestCase):
+    def test_default_watchdog_alert_is_team_not_jarvis(self):
+        import os
+        from pathlib import Path
+        from config import rules
+        self.assertEqual(rules.PLAYMAKER_EMAIL, "team@playmakerentertainment.com")
+        self.assertEqual(
+            rules.WATCHDOG_ALERT_TO,
+            os.environ.get("WATCHDOG_ALERT_TO", rules.PLAYMAKER_EMAIL),
+        )
+        self.assertNotIn("infojarvis", rules.WATCHDOG_ALERT_TO.lower())
+        line = next(ln for ln in Path("config/rules.py").read_text().splitlines()
+                    if ln.startswith("WATCHDOG_ALERT_TO"))
+        self.assertIn("PLAYMAKER_EMAIL", line)
+        self.assertNotIn("infojarvis", line)
+        self.assertNotIn("mail.grokbot.com", line)
+
