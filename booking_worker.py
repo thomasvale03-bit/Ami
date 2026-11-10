@@ -9,8 +9,8 @@ Per job: claim one -> re-check source rules -> for each exact source
 venue/night: skip if already booked (worker ledger or saved progress), read the
 live TAO listing, fill the form through Playmaker's promoter link, submit once,
 read the order ID + screenshot -> save progress -> send guest + team emails via
-/send-branded -> mark complete with evidence. Drai's goes to SpeakeasyGo only
-(name + party, no emails).
+/send-branded -> mark complete with evidence. Drai's skips Speakeasy entirely
+and goes straight to the existing guest confirmation + team summary emails.
 
 Anything unclear stops the job as manual/uncertain with a reason. Nothing is
 retried in a loop and nothing is ever submitted twice:
@@ -510,7 +510,7 @@ class Worker:
             raise Stop("manual", f"Booked and emailed but completion refused (HTTP {code}: "
                        f"{(body or {}).get('error') if isinstance(body, dict) else body}); DO NOT rebook",
                        evidence=evidence)
-        log.info("Job %s complete: %s", ref, [b["record"].get("order_id") or b["record"].get("entry_id") for b in bookings])
+        log.info("Job %s complete: %s", ref, [b["record"].get("order_id") or b["record"].get("entry_id") or b["record"].get("system") for b in bookings])
         return {"status": "done", "ref": ref, "evidence": evidence}
 
     def _check_duplicates(self, ref, raw):
@@ -616,30 +616,17 @@ class Worker:
         return {"record": record, "meta": meta}
 
     def _book_drais(self, ref, venue, night, request, rehearse, token):
-        from datetime import timedelta
-        if os.environ.get("AMY_WORKER_DRAIS", "").lower() != "true":
-            raise Stop("manual", "Drai's: worker Speakeasy booking is off (AMY_WORKER_DRAIS); add on Speakeasy by hand")
-        offset = drais_offset()
-        if offset is None:
-            raise Stop("manual", "Drai's: DRAIS_SPEAKEASY_DAY_OFFSET is not a whole number; listing date would be a guess")
-        listing_date = (date.fromisoformat(night) + timedelta(days=offset)).isoformat()
+        """Email-only (Thomas, Nov 10 2026): never open Speakeasy, never write
+        before_submit/submitting ledger state. Confirmation emails are sent by
+        _send_emails after every night is recorded."""
         key = night_key(ref, venue, night)
-        first, last = request["first_name"].strip(), (request.get("last_name") or "").strip()
         male, female = int(request["male_count"]), int(request["female_count"])
-        shot = self._shot_path(ref, "drais", night, "rehearsal" if rehearse else "after")
-        result = self.drais.add(listing_date, first, last, male, female, rehearse=rehearse, screenshot_path=shot,
-                                before_submit=lambda: self._checkpoint(ref, token, key, {"state": "submitting"}))
         if rehearse:
-            return {"venue": venue, "date": night, "speakeasy_date": listing_date, "rehearsal": True,
-                    "screenshot": result.get("screenshot")}
-        record = {"verified": True, "venue": venue, "date": night, "system": "speakeasy",
-                  "entry_id": f"speakeasy:{listing_date}:{result['row']}",
-                  "party": {"male_count": male, "female_count": female},
-                  "submitted_fields": ["first_name", "last_name", "male_count", "female_count"]}
-        meta = {"speakeasy_date": listing_date, "screenshot": result.get("screenshot"),
-                "screenshot_sha256": _sha256(result.get("screenshot"))}
-        self._checkpoint(ref, token, key, {"state": "booked", "record": record, "meta": meta})
-        return {"record": record, "meta": meta}
+            return {"venue": venue, "date": night, "rehearsal": True, "email_only": True}
+        record = {"verified": True, "venue": venue, "date": night, "system": "email_only",
+                  "party": {"male_count": male, "female_count": female}}
+        self._checkpoint(ref, token, key, {"state": "email_only", "record": record, "meta": {}})
+        return {"record": record, "meta": {}}
 
     def _send_emails(self, job, ref, token, raw, bookings, drais=False):
         import worker_emails
