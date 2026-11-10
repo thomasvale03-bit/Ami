@@ -216,13 +216,6 @@ def test_duplicate_suspicion_goes_manual(tmp_path):
     assert len(worker.tao.submits) == 1
 
 
-def test_drais_off_by_default_manual(tmp_path):
-    s, api, worker = make(tmp_path)
-    s.enqueue('d', raw(venues=["Drai's"]), NOW)
-    result = worker.run_once()
-    assert result['status'] == 'manual' and 'AMY_WORKER_DRAIS' in result['reason']
-
-
 class FakeDrais:
     def __init__(self):
         self.calls = []
@@ -230,16 +223,15 @@ class FakeDrais:
     def add(self, listing_date, first, last, male, female, *, rehearse, screenshot_path, before_submit):
         self.calls.append(listing_date)
         before_submit()
-        return {'verified': True, 'row': f'{first} {last} {male + female} ({male}m, {female}f)'}
+        raise AssertionError("Drai's jobs must not call Speakeasy")
 
 
-def test_drais_same_night_by_default_and_sends_guest_and_team(tmp_path, monkeypatch):
-    monkeypatch.setenv('AMY_WORKER_DRAIS', 'true')
+def test_drais_skips_speakeasy_and_sends_guest_and_team(tmp_path):
     drais = FakeDrais()
     s, api, worker = make(tmp_path, drais=drais)
     s.enqueue('d', raw(venues=["Drai's"]), NOW)
     assert worker.run_once()['status'] == 'done'
-    assert drais.calls == ['2026-11-25']  # same night (Thomas, Nov 9 2026)
+    assert drais.calls == []  # Thomas, Nov 10 2026: never add on Speakeasy
     assert [p['to'] for p in api.sent] == ['guest@example.invalid', 'team@playmakerentertainment.com']
     guest, team = api.sent
     assert "Drai's After Hours" in guest['subject'] and 'PLAYMAKER ENTERTAINMENT' in guest['text']
@@ -247,27 +239,24 @@ def test_drais_same_night_by_default_and_sends_guest_and_team(tmp_path, monkeypa
     assert team['subject'].startswith('Signed up: Mock Guest - Drai') and ',' not in team['subject']
     assert 'AMY ref: d' in team['text']
     ev = s.get('d')['metadata']['evidence']
-    assert ev['bookings'][0]['system'] == 'speakeasy'
+    assert ev['bookings'][0]['system'] == 'email_only' and 'entry_id' not in ev['bookings'][0]
     assert {r['kind'] for r in ev['email_receipts']} == {'guest', 'team'}
     assert worker.tao.submits == []  # never TAO for Drai's
+    key = "d|Drai's|2026-11-25"
+    assert worker.ledger.get(key)['state'] == 'email_only'
 
 
-def test_drais_offset_override(tmp_path, monkeypatch):
-    monkeypatch.setenv('AMY_WORKER_DRAIS', 'true')
-    monkeypatch.setenv('DRAIS_SPEAKEASY_DAY_OFFSET', '1')
+def test_drais_email_only_ignores_speakeasy_flags(tmp_path, monkeypatch):
+    monkeypatch.setenv('AMY_WORKER_DRAIS', 'false')
+    monkeypatch.setenv('DRAIS_SPEAKEASY_DAY_OFFSET', 'tomorrow')
     drais = FakeDrais()
     s, api, worker = make(tmp_path, drais=drais)
     s.enqueue('d', raw(venues=["Drai's"]), NOW)
     assert worker.run_once()['status'] == 'done'
-    assert drais.calls == ['2026-11-26']
-
-
-def test_drais_bad_offset_is_manual(tmp_path, monkeypatch):
-    monkeypatch.setenv('AMY_WORKER_DRAIS', 'true')
-    monkeypatch.setenv('DRAIS_SPEAKEASY_DAY_OFFSET', 'tomorrow')
-    s, api, worker = make(tmp_path, drais=FakeDrais())
-    s.enqueue('d', raw(venues=["Drai's"]), NOW)
-    assert 'DRAIS_SPEAKEASY_DAY_OFFSET' in worker.run_once()['reason']
+    assert drais.calls == []
+    ev = s.get('d')['metadata']['evidence']
+    assert ev['bookings'][0]['system'] == 'email_only'
+    assert {r['kind'] for r in ev['email_receipts']} == {'guest', 'team'}
 
 
 def test_box_lock_busy_releases_job_for_retry(tmp_path, monkeypatch):

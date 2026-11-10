@@ -35,14 +35,11 @@ service's authenticated HTTPS API (`/queue/*`, `/send-branded`).
      `submitting` to the ledger, clicks Submit once, reads the order ID from
      `/orders/confirmation/<id>`, saves a screenshot + sha256, checkpoints
      `progress` on the server. No confirmation -> **uncertain**.
-   * Drai's: SpeakeasyGo only (never TAO), only when `AMY_WORKER_DRAIS=true`.
-     The entry goes on the SAME night as the Posh/request date
-     (`DRAIS_SPEAKEASY_DAY_OFFSET` default 0, Thomas's decision Nov 9 2026;
-     a non-integer value stops Drai's as manual). Skips a name already on the
-     list; verifies the row appears after saving. Then sends the same Drai's
-     guest confirmation ("You're on the list: Drai's After Hours …", door
-     details, Speakeasy Tickets & VIP link) and team@ "Signed up: … - Drai's AH …"
-     email AMYI sent by hand.
+   * Drai's (Thomas, Nov 10 2026): never sign up on Speakeasy and never write
+     `submitting` ledger state. Record the night as `email_only`, then send the
+     existing Drai's guest confirmation ("You're on the list: Drai's After Hours …",
+     door details, Speakeasy Tickets & VIP link) and team@ "Signed up: … - Drai's AH …"
+     email, and complete with those guest/team receipts. TAO venues are unchanged.
 5. Guest email ("You're on the Playmaker Entertainment guest list for <date>")
    and team email ("Signed up: <name> — <date>" to team@) via `/send-branded`
    (its 20/hour cap and resend guard stay). 429 -> waits up to
@@ -76,7 +73,7 @@ Unexpected errors -> uncertain if a submit had started, else manual. Never a ret
 | `AMY_WORKER_DIR` | `/data/worker` on a **volume** (ledger + screenshots) |
 | `AMY_BROWSER_PROFILE` | `/data/worker/profile` (keeps Cloudflare clearance cookies) |
 | `AMY_BROWSER_PROXY` | residential proxy URL if Cloudflare blocks Railway IPs |
-| `AMY_WORKER_DRAIS`, `SPEAKEASY_EMAIL`, `SPEAKEASY_PASSWORD` | Drai's only (`DRAIS_SPEAKEASY_DAY_OFFSET` optional, default 0) |
+| `AMY_WORKER_DRAIS`, `SPEAKEASY_EMAIL`, `SPEAKEASY_PASSWORD` | unused for booking (Drai's is email-only; Speakeasy probe still uses these) |
 | `AMY_BROWSER_LAUNCH` | `plain`: start a normal Chrome and attach over CDP (needed for Cloudflare) |
 | `AMY_WORKER_ALERTS` | `true` to email team@ (WATCHDOG_ALERT_TO) on each manual/uncertain stop |
 | `AMY_SIGNUP_MODE` | must be unset |

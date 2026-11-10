@@ -178,6 +178,20 @@ def test_drais_speakeasy_only_no_emails(raw):
     assert update(s, token, 'complete', good)[1]['state'] == 'done'
 
 
+def test_drais_email_receipts_complete_without_speakeasy_entry(raw):
+    raw['venues'] = ["Drai's After Hours"]
+    s, token = assigned(raw)
+    missing = {'evidence': {'verified': True, 'bookings': [dict(
+        venue="Drai's After Hours", date='2026-11-25', verified=True, system='email_only',
+        party={'male_count': 1, 'female_count': 2})]}}
+    assert update(s, token, 'complete', missing)[0] == 409
+    good = {'evidence': {**missing['evidence'], 'email_receipts': [
+        dict(kind='guest', id='MOCK-GUEST'), dict(kind='team', id='MOCK-TEAM')]}}
+    assert update(s, token, 'complete', good)[1]['state'] == 'done'
+    ev = s.get('mock')['metadata']['evidence']
+    assert ev['bookings'][0]['system'] == 'email_only' and 'entry_id' not in ev['bookings'][0]
+
+
 def test_intake_no_browser_email_or_wake(raw, monkeypatch):
     import main
     monkeypatch.setattr(main.gmail_client, 'get_plain_text_body', Mock(return_value=({}, 'mock-source')))
