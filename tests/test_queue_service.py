@@ -387,3 +387,22 @@ def test_website_form_still_emails_team_in_queue_mode(monkeypatch):
     clean = {'ref': 'r1', 'email': 'g@example.com', 'night': datetime.date(2026, 11, 20), 'source': 'playmaker'}
     assert main.posh_webhook.notify_team_website(Mock(), clean, 'subj')
     assert send.call_args[0][2] == rules.PLAYMAKER_EMAIL == 'team@playmakerentertainment.com'
+
+
+def test_stall_requeue_puts_assigned_job_back_on_queue(raw, monkeypatch):
+    monkeypatch.setenv('AMY_QUEUE_WORKER_CLAIMS', 'true')
+    s, token = assigned(raw)
+    assert s.get('mock')['state'] == 'assigned'
+    code, row = api(s, '/queue/stall-requeue/mock', {'reason': 'Stall watchdog: never submitted'})
+    assert code == 200
+    assert row['state'] == 'queued' and row['due'] == NOW
+    assert 'claim_token' not in row
+
+
+def test_stall_requeue_refuses_submitted_progress(raw, monkeypatch):
+    monkeypatch.setenv('AMY_QUEUE_WORKER_CLAIMS', 'true')
+    s, token = assigned(raw)
+    update(s, token, 'progress', {'progress': {'submitting': {'Marquee Nightclub|2026-11-25': True}}})
+    code, body = api(s, '/queue/stall-requeue/mock', {'reason': 'stall'})
+    assert code == 409
+    assert s.get('mock')['state'] == 'assigned'

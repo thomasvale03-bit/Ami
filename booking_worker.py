@@ -26,6 +26,7 @@ Modes (AMY_WORKER_MODE):
   live     claim, book, email, complete.
 """
 import argparse
+import stall_watchdog
 import hashlib
 import json
 import logging
@@ -96,6 +97,10 @@ class Api:
 
     def send_branded(self, payload):
         return self._call("POST", "/send-branded", payload, self.send_token)
+
+    def stall_requeue(self, ref, reason=""):
+        return self._call("POST", "/queue/stall-requeue/" + quote(ref, safe=""),
+                          {"reason": reason}, self.queue_token)
 
 
 # --- Local no-double-book ledger ---------------------------------------------
@@ -325,36 +330,45 @@ def pickup_step(worker, state, now, kicked=False):
         return None, None
     state.mark(slot)  # before running: a crash mid-run never re-runs the hour
     log.info("Pickup run %s starting (%s)", slot, "kick" if kicked else "schedule")
+    stall_watchdog.start_run(state.dir, slot)
     try:
-        result = worker.run_pickup()
-    except Exception:  # noqa: BLE001
-        log.exception("Pickup run failed")
-        result = {"status": "error"}
-    log.info("run %s: %s", slot, json.dumps(result, default=str)[:4000])
-    log.info("next run %s", next_slot_label(time.time()))
-    return slot, result
-
-
-def run_now(worker, max_batches=8):
-    """Owner-requested pickup outside the schedule: work through the whole
-    queue, one guest at a time, in batches of RUN_MAX_JOBS until a batch stops
-    early (queue empty, claim refused or error). Does not touch last_slot."""
-    log.info("Off-schedule pickup (run_now) starting")
-    batches = []
-    for _ in range(max_batches):
         try:
             result = worker.run_pickup()
         except Exception:  # noqa: BLE001
-            log.exception("run_now batch failed")
-            result = {"status": "error", "handled": 0, "results": [{"status": "error"}]}
-        batches.append(result)
-        log.info("run_now batch %d: %s", len(batches), json.dumps(result, default=str)[:4000])
-        last = (result.get("results") or [{}])[-1].get("status")
-        if result.get("handled", 0) < RUN_MAX_JOBS or last in ("idle", "claim_refused", "error"):
-            break
-    total = sum(b.get("handled", 0) for b in batches)
-    log.info("Off-schedule pickup done: %d batch(es), %d job(s) handled", len(batches), total)
-    return {"status": "run_now_done", "batches": len(batches), "handled": total}
+            log.exception("Pickup run failed")
+            result = {"status": "error"}
+        log.info("run %s: %s", slot, json.dumps(result, default=str)[:4000])
+        log.info("next run %s", next_slot_label(time.time()))
+        return slot, result
+    finally:
+        stall_watchdog.end_run(state.dir)
+
+
+def run_now(worker, max_batches=8, work_dir=None):
+    """Owner-requested pickup outside the schedule: work through the whole
+    queue, one guest at a time, in batches of RUN_MAX_JOBS until a batch stops
+    early (queue empty, claim refused or error). Does not touch last_slot."""
+    directory = Path(work_dir or os.environ.get("AMY_WORKER_DIR", "/data/worker"))
+    log.info("Off-schedule pickup (run_now) starting")
+    stall_watchdog.start_run(directory, "run_now")
+    try:
+        batches = []
+        for _ in range(max_batches):
+            try:
+                result = worker.run_pickup()
+            except Exception:  # noqa: BLE001
+                log.exception("run_now batch failed")
+                result = {"status": "error", "handled": 0, "results": [{"status": "error"}]}
+            batches.append(result)
+            log.info("run_now batch %d: %s", len(batches), json.dumps(result, default=str)[:4000])
+            last = (result.get("results") or [{}])[-1].get("status")
+            if result.get("handled", 0) < RUN_MAX_JOBS or last in ("idle", "claim_refused", "error"):
+                break
+        total = sum(b.get("handled", 0) for b in batches)
+        log.info("Off-schedule pickup done: %d batch(es), %d job(s) handled", len(batches), total)
+        return {"status": "run_now_done", "batches": len(batches), "handled": total}
+    finally:
+        stall_watchdog.end_run(directory)
 
 
 def live_loop(worker, work_dir, loop=True, step=5, heartbeat=600, clock=time.time, sleep=time.sleep):
@@ -367,7 +381,7 @@ def live_loop(worker, work_dir, loop=True, step=5, heartbeat=600, clock=time.tim
     while True:
         now = clock()
         if state.take_run_now():
-            run_now(worker)
+            run_now(worker, work_dir=state.dir)
             now = clock()
         slot, result = pickup_step(worker, state, now, kicked=state.take_kick())
         if not loop:
@@ -469,6 +483,7 @@ class Worker:
             except Exception as exc:  # noqa: BLE001 - lock timeout: nothing was touched yet
                 raise Stop("retry", f"Box browser busy (AMYI computerUse holds the TAO lock): {exc}")
             try:
+                stall_watchdog.mark_progress(self.evidence_dir.parent, ref)
                 return self._process(job, ref, token, raw)
             finally:
                 lock.__exit__(None, None, None)
@@ -590,6 +605,7 @@ class Worker:
 
     def _checkpoint(self, ref, token, key, entry):
         self.ledger.put(key, entry)
+        stall_watchdog.mark_progress(self.evidence_dir.parent, ref)
         if token:
             self.api.update(ref, token, "progress", {"progress": {"bookings": {key.split("|", 1)[1]: entry.get("record")}}}
                             if entry.get("record") else {"progress": {"submitting": {key.split("|", 1)[1]: True}}})

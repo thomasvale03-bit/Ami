@@ -54,6 +54,19 @@ service's authenticated HTTPS API (`/queue/*`, `/send-branded`).
 
 Unexpected errors -> uncertain if a submit had started, else manual. Never a retry loop.
 
+## Stall watchdog (box supervisor)
+
+If a pickup writes no heartbeat or ledger progress for 20 minutes
+(`AMY_WORKER_STALL_SECONDS`, default 1200), `stall_watchdog.py --supervise`
+kills the hung worker, releases a *worker-held* TAO lock, requeues claimed
+jobs that were never submitted, finishes emails for jobs the ledger already
+shows as booked (and never resubmits them), logs a `STALL_RESTART` line, and
+appends one JSON object to `$AMY_WORKER_DIR/stall_events.jsonl`. It then
+touches `run_now` so the skipped work runs immediately instead of waiting for
+the next scheduled slot. A long healthy run that keeps making progress is
+not treated as a stall.
+
+
 ## Server changes in this PR
 * Claims hand out the **soonest event date first**; past-dated/policy-failing jobs
   are moved to manual during the claim and **no longer use up the claim**

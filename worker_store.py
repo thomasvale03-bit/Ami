@@ -146,6 +146,28 @@ class Store:
                 ORDER BY updated DESC,ref LIMIT ?""", (limit,)).fetchall()
             return [self.decode(r) for r in rows]
 
+    def stall_requeue(self, ref, now, reason=''):
+        """Watchdog: put an in-flight or manual job that was never submitted
+        back on the queue, due immediately, so a catch-up run can claim it.
+        Jobs with any submitting/booking/evidence progress are refused."""
+        reason = (reason or 'Stall watchdog: never submitted')[:1000]
+        with self.connect() as db:
+            self.expire(db, now)
+            row = db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone()
+            if row is None:
+                raise Conflict('Unknown job')
+            if row['state'] not in ('assigned', 'manual', 'awaiting_human_verification'):
+                raise Conflict('Only an in-flight or manual job can be stall-requeued')
+            meta = json.loads(row['metadata'] or '{}')
+            progress = meta.get('progress') or {}
+            if progress.get('submitting') or progress.get('bookings') or meta.get('evidence'):
+                raise Conflict('Job has submission progress; manual review required')
+            meta['stall_requeue'] = {'at': now, 'previous_reason': row['reason'], 'previous_state': row['state']}
+            db.execute(
+                "UPDATE queue_jobs SET state='queued',reason=?,metadata=?,updated=?,due=?,claim_token=NULL,lease_until=NULL WHERE ref=?",
+                (reason, json.dumps(meta), now, now, ref))
+        return self.get(ref)
+
     def update(self, ref, token, action, metadata, now, reason=''):
         if not isinstance(metadata, dict):
             raise Conflict('metadata must be an object')

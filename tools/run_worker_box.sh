@@ -40,8 +40,10 @@ start() {
     set +a
     unset DISPLAY                                  # private Xvfb; never draws on a desktop
     cd "$REPO"
-    # Supervisor: restart the worker if it exits, at most once a minute.
-    nohup bash -c 'while true; do python3 booking_worker.py --loop; echo "worker exited $? at $(date)"; sleep 60; done' \
+    # Supervisor: stall watchdog runs the worker and restarts it if a pickup
+    # writes no progress for AMY_WORKER_STALL_SECONDS (default 20 min). If the
+    # watchdog itself exits, bash restarts it at most once a minute.
+    nohup bash -c 'while true; do python3 stall_watchdog.py --supervise; echo "worker exited $? at $(date)"; sleep 60; done' \
       >> "$LOG" 2>&1 &
     echo $! > "$PIDFILE"
   )
