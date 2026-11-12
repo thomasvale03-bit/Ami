@@ -194,14 +194,14 @@ VENUE_SCHEDULE = {
         "doors": "10:30 PM",
         "closes": "4:00 AM",
     },
-    # Official FAQ: "open Friday, Saturday and Monday from 10:30PM-close.
-    # Typically closing time is around 4AM."
+    # Owner (Nov 12, 2026): JEWEL is open Friday and Saturday only.
+    # (Official FAQ still lists Monday; owner overrides.)
     # https://taogroup.com/venues/jewel-nightclub-las-vegas/faqs/
     # Last night Saturday Nov 21, 2026 (owner). tickets.taogroup.com lists
     # JEWEL only through that date. Ledger confirms Fri/Sat 10:30 PM.
     "JEWEL Nightclub": {
         "status": "verified",
-        "days": ["Monday", "Friday", "Saturday"],
+        "days": ["Friday", "Saturday"],
         "doors": "10:30 PM",
         "closes": "4:00 AM",
         "until": JEWEL_LAST_NIGHT,
