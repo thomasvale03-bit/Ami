@@ -207,13 +207,25 @@ def test_stops_are_terminal_with_reasons(tmp_path, tao, expected, state):
 
 
 def test_duplicate_suspicion_goes_manual(tmp_path):
-    s, api, worker = make(tmp_path)
+    s, api, worker = make(tmp_path, duplicate_check=True)
     s.enqueue('first', raw(), NOW - 5)
     assert worker.run_once()['status'] == 'done'
     s.enqueue('again', raw(source_message_id='again'), NOW)
     result = worker.run_once()
     assert result['status'] == 'manual' and 'Duplicate suspicion' in result['reason']
     assert len(worker.tao.submits) == 1
+
+
+def test_duplicate_check_off_by_default_books_second_signup(tmp_path):
+    s, api, worker = make(tmp_path)
+    assert worker.duplicate_check is False
+    s.enqueue('first', raw(), NOW - 5)
+    assert worker.run_once()['status'] == 'done'
+    s.enqueue('again', raw(source_message_id='again'), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'done', result
+    assert len(worker.tao.submits) == 2
+    assert s.get('again')['state'] == 'done'
 
 
 def test_drais_off_by_default_manual(tmp_path):

@@ -401,7 +401,11 @@ class Worker:
         self.now, self.sleep = now or time.time, sleep
         self.email_wait = (int(os.environ.get("AMY_WORKER_EMAIL_WAIT_SECONDS", "900"))
                            if email_wait_seconds is None else email_wait_seconds)
-        self.duplicate_check = (os.environ.get("AMY_WORKER_DUPLICATE_CHECK", "true").lower() == "true"
+        # Thomas, Nov 11 2026: off by default so additional sign-ups with the
+        # same email/venue/night are booked. The per-job ledger still skips a
+        # night already submitted for this job. Set AMY_WORKER_DUPLICATE_CHECK=true
+        # to restore the old same-email manual stop.
+        self.duplicate_check = (os.environ.get("AMY_WORKER_DUPLICATE_CHECK", "false").lower() == "true"
                                 if duplicate_check is None else duplicate_check)
         self.alerts = (os.environ.get("AMY_WORKER_ALERTS", "").lower() == "true" if alerts is None else alerts)
 

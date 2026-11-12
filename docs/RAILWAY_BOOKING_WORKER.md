@@ -23,8 +23,10 @@ service's authenticated HTTPS API (`/queue/*`, `/send-branded`).
 2. Re-checks the source rules (`queue_service.source_policy`: past dates, held
    Shanequa/Ashley refs, JEWEL after Nov 21, same-day OMNIA Fri/Sat, mixed
    Drai's, >14 nights, missing consent/party) -> manual.
-3. Duplicate suspicion: same email + venue + night already `done` in the queue -> manual
-   (`AMY_WORKER_DUPLICATE_CHECK=false` turns this off).
+3. Same-email sign-ups are booked (Thomas, Nov 11 2026). The per-job ledger
+   still skips a venue/night already booked for this job, so a crash/retry never
+   resubmits the same order. `AMY_WORKER_DUPLICATE_CHECK=true` restores the old
+   "duplicate suspicion" manual stop.
 4. For each exact source venue x night:
    * already booked (worker ledger or server `progress`) -> reuse, never resubmit;
    * ledger says `submitting` with no order -> **uncertain**, never resubmitted;

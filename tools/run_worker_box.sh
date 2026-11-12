@@ -36,6 +36,7 @@ start() {
     CHROMIUM_PATH="${CHROMIUM_PATH:-/usr/bin/google-chrome}"
     AMY_WORKER_DIR="${AMY_WORKER_DIR:-$RUN/data}"
     AMY_WORKER_BOX_LOCK=true                       # share /workspace/.tao_browser.lock with AMYI
+    AMY_WORKER_DUPLICATE_CHECK="${AMY_WORKER_DUPLICATE_CHECK:-false}"  # book same-email sign-ups; ledger still blocks resubmits
     set +a
     unset DISPLAY                                  # private Xvfb; never draws on a desktop
     cd "$REPO"
