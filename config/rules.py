@@ -25,6 +25,18 @@ DAYLIFE_VENUES = [
 
 PAUSED_VENUES = {"Drai's"}  # never submit unless explicitly reactivated
 
+# Human-only clubs (Thomas): the worker never books these.
+MANUAL_VENUES = {
+    "LIV Nightclub",
+    "XS Nightclub",
+    "LIV Beach",
+    "LIV Dayclub",
+    "Encore Beach Club",
+}
+
+# Last night JEWEL may be booked automatically (owner: no JEWEL after Nov 21, 2026).
+JEWEL_LAST_NIGHT = "2026-11-21"
+
 
 def is_drais(name):
     """Drai's has no TAO portal: guests get the Drai's After Hours guest-list
@@ -78,6 +90,15 @@ VENUE_ALIASES = {
     "palm tree beach": "Palm Tree Beach Club",
     "lavo party brunch": "LAVO Party Brunch",
     "lavo": "LAVO Party Brunch",
+    "liv": "LIV Nightclub",
+    "liv nightclub": "LIV Nightclub",
+    "xs": "XS Nightclub",
+    "xs nightclub": "XS Nightclub",
+    "liv beach": "LIV Beach",
+    "liv dayclub": "LIV Dayclub",
+    "encore beach club": "Encore Beach Club",
+    "encore beach": "Encore Beach Club",
+    "ebc": "Encore Beach Club",
     "drai's": "Drai's",
     "drais": "Drai's",
     "drai’s": "Drai's",
@@ -129,7 +150,20 @@ def is_scottsdale(name):
 
 
 def is_known_vegas_venue(name):
-    return name in ALL_AUTHORIZED_VENUES or is_drais(name)
+    return name in ALL_AUTHORIZED_VENUES or is_drais(name) or is_manual_venue(name)
+
+
+def is_manual_venue(name):
+    """LIV, XS, LIV Beach and EBC stay manual (never auto-booked)."""
+    key = (name or "").strip()
+    canonical = VENUE_ALIASES.get(key.lower(), key)
+    return canonical in MANUAL_VENUES
+
+
+def jewel_allowed_on(date_obj):
+    """JEWEL may be booked on this date; after JEWEL_LAST_NIGHT, route to fallback."""
+    day = date_obj.isoformat() if hasattr(date_obj, "isoformat") else str(date_obj)
+    return day <= JEWEL_LAST_NIGHT
 
 
 def normalize_venue_name(name):

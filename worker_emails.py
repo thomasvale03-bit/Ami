@@ -95,7 +95,6 @@ def team_email(ref, raw, request, bookings):
         "— Guest details —",
         f"Name: {name}",
         f"Email: {request['email']}",
-        f"Phone: {raw.get('phone') or '(none)'}",
         f"Party: {_party(request['female_count'], request['male_count'])} (free)",
         f"Promoter: {request.get('promoter') or 'Not provided'}",
         f"Source: {source}",

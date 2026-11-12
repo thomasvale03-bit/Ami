@@ -139,14 +139,15 @@ def test_operating_venue_unposted_still_retries(tmp_path):
     assert api.sent == []
 
 
-def test_operating_venue_unposted_stays_manual_when_other_nights_booked(tmp_path):
-    # Hakkasan operates Wed and Thu. Wed is posted, Thu is not → existing manual path.
+def test_operating_venue_unposted_retries_when_other_nights_booked(tmp_path):
+    # Hakkasan operates Wed and Thu. Wed is posted, Thu is not → retry, never park manual.
     tao = MapTao({("Hakkasan Nightclub", "2026-11-25")})
     s, api, worker = make(tmp_path, tao=tao)
     s.enqueue("h", raw(venues=["Hakkasan Nightclub"], start_date="2026-11-25", end_date="2026-11-26"), NOW)
     result = worker.run_once()
-    assert result["status"] == "manual", result
-    assert "other nights already booked" in result["reason"]
+    assert result["status"] == "retry", result
+    assert "guest list not posted" in result["reason"]
+    assert "other nights already booked" not in (result.get("reason") or "")
     assert api.sent == []
     assert len(worker.tao.submits) == 1
 
@@ -193,3 +194,129 @@ def test_worker_guest_email_notice_only_on_fallback_nights():
     assert NOTICE not in payload["text"].split("Sunday November 15", 1)[0]
     assert "Oh No, You Did Not Meet" in payload["html"]
     assert "Sun, Nov 15" in payload["html"]
+
+
+def test_closed_requested_falls_back_to_omnia(tmp_path):
+    # Friday lists are up but JEWEL is closed; OMNIA is top priority fallback.
+    class ClosedJewel(MapTao):
+        def listing(self, venue, night):
+            if venue == "JEWEL Nightclub":
+                return None
+            return super().listing(venue, night)
+
+        def posted(self, venue, night):
+            return True
+
+    s, api, worker = make(tmp_path, tao=ClosedJewel({("OMNIA Nightclub", "2026-11-13")}))
+    # posted() is overridden to True for all, listing None for JEWEL, super listing for others
+    worker.tao.open_nights.add(("OMNIA Nightclub", "2026-11-13"))
+    s.enqueue("f", raw(venues=["JEWEL Nightclub"], start_date="2026-11-13", end_date="2026-11-13"), NOW)
+    result = worker.run_once()
+    assert result["status"] == "done", result
+    bookings = s.get("f")["metadata"]["evidence"]["bookings"]
+    assert bookings[0]["venue"] == "OMNIA Nightclub" and bookings[0].get("fallback") is True
+    assert NOTICE in api.sent[0]["text"]
+    assert api.sent[0]["to"] == "guest@example.invalid"
+    assert api.sent[1]["to"] == "team@playmakerentertainment.com"
+    assert "Phone:" not in api.sent[1]["text"]
+
+
+def test_access_code_falls_back(tmp_path):
+    class CodeThenTao(FakeTao):
+        def posted(self, venue, night):
+            return True
+
+        def listing(self, venue, night):
+            base = super().listing(venue, night)
+            if venue == "OMNIA Nightclub":
+                return {**base, "access_code_required": True}
+            return base
+
+    s, api, worker = make(tmp_path, tao=CodeThenTao())
+    s.enqueue("s", raw(venues=["OMNIA Nightclub"], start_date="2026-11-15", end_date="2026-11-15"), NOW)
+    result = worker.run_once()
+    assert result["status"] == "done", result
+    bookings = s.get("s")["metadata"]["evidence"]["bookings"]
+    assert bookings[0]["venue"] == "TAO Nightclub" and bookings[0].get("fallback") is True
+    assert NOTICE in api.sent[0]["text"]
+
+
+def test_jewel_after_nov_21_routes_to_fallback(tmp_path):
+    # Sunday Nov 22, 2026: JEWEL is past the cutoff; OMNIA is posted.
+    tao = MapTao({("OMNIA Nightclub", "2026-11-22")})
+    s, api, worker = make(tmp_path, tao=tao)
+    s.enqueue("j", raw(venues=["JEWEL Nightclub"], start_date="2026-11-22", end_date="2026-11-22"), NOW)
+    result = worker.run_once()
+    assert result["status"] == "done", result
+    bookings = s.get("j")["metadata"]["evidence"]["bookings"]
+    assert bookings[0]["venue"] == "OMNIA Nightclub" and bookings[0]["date"] == "2026-11-22"
+    assert bookings[0].get("fallback") is True
+
+
+def test_marquee_dayclub_added_when_open(tmp_path):
+    tao = MapTao({
+        ("Marquee Nightclub", "2026-11-25"),
+        ("Marquee Dayclub", "2026-11-25"),
+    })
+    s, api, worker = make(tmp_path, tao=tao)
+    s.enqueue("m", raw(venues=["Marquee Nightclub"], start_date="2026-11-25", end_date="2026-11-25"), NOW)
+    result = worker.run_once()
+    assert result["status"] == "done", result
+    bookings = s.get("m")["metadata"]["evidence"]["bookings"]
+    venues = sorted((b["venue"], b["date"]) for b in bookings)
+    assert venues == [
+        ("Marquee Dayclub", "2026-11-25"),
+        ("Marquee Nightclub", "2026-11-25"),
+    ]
+    assert "Marquee Dayclub" in api.sent[0]["text"]
+
+
+def test_marquee_dayclub_skipped_when_not_posted(tmp_path):
+    tao = MapTao({("Marquee Nightclub", "2026-11-25")})
+    s, api, worker = make(tmp_path, tao=tao)
+    s.enqueue("m", raw(venues=["Marquee Nightclub"], start_date="2026-11-25", end_date="2026-11-25"), NOW)
+    result = worker.run_once()
+    assert result["status"] == "done", result
+    bookings = s.get("m")["metadata"]["evidence"]["bookings"]
+    assert [b["venue"] for b in bookings] == ["Marquee Nightclub"]
+
+
+def test_lavo_requested_is_booked(tmp_path):
+    tao = MapTao({("LAVO Party Brunch", "2026-11-14")})
+    s, api, worker = make(tmp_path, tao=tao)
+    s.enqueue("l", raw(venues=["LAVO Party Brunch"], start_date="2026-11-14", end_date="2026-11-14"), NOW)
+    result = worker.run_once()
+    assert result["status"] == "done", result
+    assert s.get("l")["metadata"]["evidence"]["bookings"][0]["venue"] == "LAVO Party Brunch"
+    assert len(worker.tao.submits) == 1  # no nightclub fallback
+
+
+def test_source_policy_manual_clubs_and_omnia_jewel_rules():
+    import queue_service as q
+    today = date(2026, 11, 13)  # Friday
+    liv = raw(venues=["LIV"], start_date="2026-11-14", end_date="2026-11-14")
+    assert "LIV" in q.source_policy("r", liv, today) or "manual" in q.source_policy("r", liv, today).lower()
+    xs = raw(venues=["XS Nightclub"], start_date="2026-11-14", end_date="2026-11-14")
+    assert q.source_policy("r", xs, today)
+    ebc = raw(venues=["EBC"], start_date="2026-11-14", end_date="2026-11-14")
+    assert q.source_policy("r", ebc, today)
+    # OMNIA same-day Friday is not treated as closed.
+    omnia = raw(venues=["OMNIA Nightclub"], start_date="2026-11-13", end_date="2026-11-13")
+    assert q.source_policy("r", omnia, today) == ""
+    # JEWEL after Nov 21 is no longer parked at intake; the worker falls back.
+    jewel = raw(venues=["JEWEL Nightclub"], start_date="2026-11-22", end_date="2026-11-22")
+    assert q.source_policy("r", jewel, today) == ""
+
+
+def test_fallback_venues_put_omnia_first_and_skip_jewel_after_cutoff():
+    from rules_engine import fallback_venues_for
+    friday = fallback_venues_for(date(2026, 11, 13))
+    assert friday[0] == "OMNIA Nightclub"
+    assert "JEWEL Nightclub" in friday
+    after = fallback_venues_for(date(2026, 11, 22))
+    assert after[0] == "OMNIA Nightclub"
+    assert "JEWEL Nightclub" not in after
+    # No two nights in a row: OMNIA last night moves it to the end.
+    after_omnia = fallback_venues_for(date(2026, 11, 15), previous_night_venue="OMNIA Nightclub")
+    assert after_omnia[0] != "OMNIA Nightclub"
+    assert after_omnia[-1] == "OMNIA Nightclub"

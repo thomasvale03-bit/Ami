@@ -63,14 +63,17 @@ class InProcessApi:
 
 
 class FakeTao:
-    def __init__(self, posted=True, listing=True, submit=None):
+    def __init__(self, posted=True, listing=True, submit=None, dayclubs=False):
         self.posted_value, self.listing_value, self.submit_fn = posted, listing, submit
+        self.dayclubs = dayclubs
         self.submits = []
 
     def reset(self):
         pass
 
     def posted(self, venue, night):
+        if venue == "Marquee Dayclub":
+            return bool(self.dayclubs)
         return self.posted_value
 
     def listing(self, venue, night):
@@ -103,7 +106,7 @@ def make(tmp_path, tao=None, drais=None, **kw):
 
 
 def test_full_cycle_books_emails_and_completes(tmp_path):
-    s, api, worker = make(tmp_path)
+    s, api, worker = make(tmp_path, tao=FakeTao(dayclubs=True))
     s.enqueue('a', raw(venues=['Hakkasan Nightclub', 'Marquee Dayclub']), NOW)
     result = worker.run_once()
     assert result['status'] == 'done', result
@@ -190,7 +193,7 @@ def test_duplicate_send_response_is_manual_not_fabricated(tmp_path):
 
 
 @pytest.mark.parametrize('tao,expected,state', [
-    (FakeTao(listing=False), 'manual', 'manual'),
+    (FakeTao(listing=False), 'retry', 'retry'),
     (FakeTao(listing=tao_portal.TaoBlocked('Cloudflare did not clear')), 'manual', 'manual'),
     (FakeTao(posted=False), 'retry', 'retry'),
     (FakeTao(submit=lambda b: (_ for _ in ()).throw(tao_portal.SubmissionUncertain('spinner'))), 'uncertain',
@@ -228,13 +231,6 @@ def test_duplicate_check_off_by_default_books_second_signup(tmp_path):
     assert s.get('again')['state'] == 'done'
 
 
-def test_drais_off_by_default_manual(tmp_path):
-    s, api, worker = make(tmp_path)
-    s.enqueue('d', raw(venues=["Drai's"]), NOW)
-    result = worker.run_once()
-    assert result['status'] == 'manual' and 'AMY_WORKER_DRAIS' in result['reason']
-
-
 class FakeDrais:
     def __init__(self):
         self.calls = []
@@ -242,16 +238,15 @@ class FakeDrais:
     def add(self, listing_date, first, last, male, female, *, rehearse, screenshot_path, before_submit):
         self.calls.append(listing_date)
         before_submit()
-        return {'verified': True, 'row': f'{first} {last} {male + female} ({male}m, {female}f)'}
+        raise AssertionError("Drai's jobs must not call Speakeasy")
 
 
-def test_drais_same_night_by_default_and_sends_guest_and_team(tmp_path, monkeypatch):
-    monkeypatch.setenv('AMY_WORKER_DRAIS', 'true')
+def test_drais_skips_speakeasy_and_sends_guest_and_team(tmp_path):
     drais = FakeDrais()
     s, api, worker = make(tmp_path, drais=drais)
     s.enqueue('d', raw(venues=["Drai's"]), NOW)
     assert worker.run_once()['status'] == 'done'
-    assert drais.calls == ['2026-11-25']  # same night (Thomas, Nov 9 2026)
+    assert drais.calls == []  # Thomas, Nov 10 2026: never add on Speakeasy
     assert [p['to'] for p in api.sent] == ['guest@example.invalid', 'team@playmakerentertainment.com']
     guest, team = api.sent
     assert "Drai's After Hours" in guest['subject'] and 'PLAYMAKER ENTERTAINMENT' in guest['text']
@@ -259,27 +254,24 @@ def test_drais_same_night_by_default_and_sends_guest_and_team(tmp_path, monkeypa
     assert team['subject'].startswith('Signed up: Mock Guest - Drai') and ',' not in team['subject']
     assert 'AMY ref: d' in team['text']
     ev = s.get('d')['metadata']['evidence']
-    assert ev['bookings'][0]['system'] == 'speakeasy'
+    assert ev['bookings'][0]['system'] == 'email_only' and 'entry_id' not in ev['bookings'][0]
     assert {r['kind'] for r in ev['email_receipts']} == {'guest', 'team'}
     assert worker.tao.submits == []  # never TAO for Drai's
+    key = "d|Drai's|2026-11-25"
+    assert worker.ledger.get(key)['state'] == 'email_only'
 
 
-def test_drais_offset_override(tmp_path, monkeypatch):
-    monkeypatch.setenv('AMY_WORKER_DRAIS', 'true')
-    monkeypatch.setenv('DRAIS_SPEAKEASY_DAY_OFFSET', '1')
+def test_drais_email_only_ignores_speakeasy_flags(tmp_path, monkeypatch):
+    monkeypatch.setenv('AMY_WORKER_DRAIS', 'false')
+    monkeypatch.setenv('DRAIS_SPEAKEASY_DAY_OFFSET', 'tomorrow')
     drais = FakeDrais()
     s, api, worker = make(tmp_path, drais=drais)
     s.enqueue('d', raw(venues=["Drai's"]), NOW)
     assert worker.run_once()['status'] == 'done'
-    assert drais.calls == ['2026-11-26']
-
-
-def test_drais_bad_offset_is_manual(tmp_path, monkeypatch):
-    monkeypatch.setenv('AMY_WORKER_DRAIS', 'true')
-    monkeypatch.setenv('DRAIS_SPEAKEASY_DAY_OFFSET', 'tomorrow')
-    s, api, worker = make(tmp_path, drais=FakeDrais())
-    s.enqueue('d', raw(venues=["Drai's"]), NOW)
-    assert 'DRAIS_SPEAKEASY_DAY_OFFSET' in worker.run_once()['reason']
+    assert drais.calls == []
+    ev = s.get('d')['metadata']['evidence']
+    assert ev['bookings'][0]['system'] == 'email_only'
+    assert {r['kind'] for r in ev['email_receipts']} == {'guest', 'team'}
 
 
 def test_box_lock_busy_releases_job_for_retry(tmp_path, monkeypatch):
@@ -322,7 +314,7 @@ def test_dry_run_never_claims_or_sends(tmp_path):
 
 
 def test_exceptions_endpoint_lists_review_work(tmp_path):
-    s, api, worker = make(tmp_path, tao=FakeTao(listing=False))
+    s, api, worker = make(tmp_path, tao=FakeTao(listing=tao_portal.TaoBlocked('Cloudflare did not clear')))
     s.enqueue('a', raw(), NOW)
     s.enqueue('held', raw(start_date='2026-11-01', end_date='2026-11-01'), NOW)
     worker.run_once()

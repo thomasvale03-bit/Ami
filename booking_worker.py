@@ -9,8 +9,8 @@ Per job: claim one -> re-check source rules -> for each exact source
 venue/night: skip if already booked (worker ledger or saved progress), read the
 live TAO listing, fill the form through Playmaker's promoter link, submit once,
 read the order ID + screenshot -> save progress -> send guest + team emails via
-/send-branded -> mark complete with evidence. Drai's goes to SpeakeasyGo only
-(name + party, no emails).
+/send-branded -> mark complete with evidence. Drai's skips Speakeasy entirely
+and goes straight to the existing guest confirmation + team summary emails.
 
 Anything unclear stops the job as manual/uncertain with a reason. Nothing is
 retried in a loop and nothing is ever submitted twice:
@@ -551,7 +551,7 @@ class Worker:
             raise Stop("manual", f"Booked and emailed but completion refused (HTTP {code}: "
                        f"{(body or {}).get('error') if isinstance(body, dict) else body}); DO NOT rebook",
                        evidence=evidence)
-        log.info("Job %s complete: %s", ref, [b["record"].get("order_id") or b["record"].get("entry_id") for b in bookings])
+        log.info("Job %s complete: %s", ref, [b["record"].get("order_id") or b["record"].get("entry_id") or b["record"].get("system") for b in bookings])
         return {"status": "done", "ref": ref, "evidence": evidence}
 
     def _check_duplicates(self, ref, raw):
@@ -599,13 +599,46 @@ class Worker:
                 if existing and (existing.get("record") or {}).get("venue") in rules.NIGHTCLUBS:
                     out.append(existing)
                     continue
+            if any(rules.is_manual_venue(v) for v in (raw.get("venues") or [])):
+                raise Stop("manual", "LIV, XS, LIV Beach and EBC stay manual")
             if rules.is_drais(venue):
                 item = self._book_drais(job["ref"], venue, night, request, rehearse, token)
             else:
                 item = self._book_requested_or_fallback(
                     job["ref"], venue, night, request, rehearse, token, partial=bool(out), booked=out)
             out.append(item)
+        self._add_marquee_dayclub(job["ref"], nights, request, rehearse, token, out)
         return out
+
+    def _add_marquee_dayclub(self, ref, nights, request, rehearse, token, out):
+        """Add Marquee Dayclub on each itinerary date it is open, through 2027-03-31."""
+        from config import rules
+        if nights and all(rules.is_drais(v) for v, _ in nights):
+            return
+        dates = []
+        for _, night in nights:
+            if night not in dates:
+                dates.append(night)
+        for night in dates:
+            if night > rules.MARQUEE_DAYCLUB_PUSH_END:
+                continue
+            key = night_key(ref, "Marquee Dayclub", night)
+            saved = (self.ledger.get(key) or {}).get("record") or {}
+            if saved.get("verified") and saved.get("order_id"):
+                if not any((i.get("record") or {}).get("venue") == "Marquee Dayclub"
+                           and (i.get("record") or {}).get("date") == night for i in out):
+                    out.append({"record": saved, "meta": (self.ledger.get(key) or {}).get("meta") or {}})
+                continue
+            if any((i.get("record") or {}).get("venue") == "Marquee Dayclub"
+                   and (i.get("record") or {}).get("date") == night for i in out):
+                continue
+            try:
+                item = self._book_tao(ref, "Marquee Dayclub", night, request, rehearse, token, partial=False)
+            except Stop as stop:
+                if stop.extra.get("kind") in ("unposted", "unavailable", "access_code"):
+                    continue  # not open that day; skip
+                raise
+            out.append(item)
 
     def _existing_night_booking(self, ref, night, booked):
         """Reuse a verified nightclub booking already made for this job on this
@@ -634,25 +667,30 @@ class Worker:
         return None
 
     def _book_requested_or_fallback(self, ref, venue, night, request, rehearse, token, partial, booked):
-        """Book the requested nightclub, or fall through DEFAULT_ROUTING when
-        that venue has no event that night (e.g. JEWEL on Sunday). Lists not
-        yet posted on a night the venue does operate still retry or go manual
-        the way they used to."""
+        """Book the requested venue first. If it is closed, needs a code, or
+        is not operating that night, fall through DEFAULT_ROUTING (OMNIA first)
+        rather than parking the night as manual. Lists not yet posted on a
+        night the venue does operate still retry."""
+        FALLBACK_KINDS = ("unposted", "unavailable", "access_code")
         try:
             return self._book_tao(ref, venue, night, request, rehearse, token, partial)
         except Stop as stop:
-            if stop.extra.get("kind") not in ("unposted", "unavailable"):
+            if stop.extra.get("kind") not in FALLBACK_KINDS:
                 raise
             from config import rules
-            from rules_engine import candidate_venues, venue_operates_that_night
+            from rules_engine import fallback_venues_for, venue_operates_that_night
             night_date = date.fromisoformat(night)
-            if venue not in rules.NIGHTCLUBS or venue_operates_that_night(venue, night_date):
+            # Non-nightclubs (e.g. LAVO): keep retry for an unposted list.
+            if venue not in rules.NIGHTCLUBS:
+                if stop.extra.get("kind") == "unposted":
+                    raise Stop("retry", stop.reason, kind="unposted")
                 raise
+            if stop.extra.get("kind") == "unposted" and venue_operates_that_night(venue, night_date):
+                raise Stop("retry", f"{venue} {night}: guest list not posted on TAO yet; nothing submitted",
+                           kind="unposted")
             prev = self._previous_nightclub(night, booked)
             last_stop = stop
-            for alt in candidate_venues(request, night_date, prev):
-                if alt == venue:
-                    continue
+            for alt in fallback_venues_for(night_date, prev, skip={venue}):
                 alt_key = night_key(ref, alt, night)
                 alt_entry = self.ledger.get(alt_key) or {}
                 saved = alt_entry.get("record") or {}
@@ -665,7 +703,7 @@ class Worker:
                     item = self._book_tao(ref, alt, night, request, rehearse, token, partial=False)
                 except Stop as alt_stop:
                     last_stop = alt_stop
-                    if alt_stop.extra.get("kind") in ("unposted", "unavailable"):
+                    if alt_stop.extra.get("kind") in FALLBACK_KINDS:
                         continue
                     raise
                 item.setdefault("meta", {})["fallback"] = True
@@ -678,8 +716,8 @@ class Worker:
                 return item
             if last_stop.action == "uncertain":
                 raise last_stop
-            raise Stop("retry", f"{venue} {night}: no event that night; "
-                       "DEFAULT_ROUTING fallbacks also not posted yet; nothing submitted")
+            raise Stop("retry", f"{venue} {night}: closed, access-code or not operating; "
+                       "DEFAULT_ROUTING fallbacks also not bookable yet; nothing submitted")
 
     def _shot_path(self, ref, venue, night, suffix):
         safe = "".join(c if c.isalnum() else "-" for c in venue)
@@ -698,14 +736,14 @@ class Worker:
         night_date = date.fromisoformat(night)
         posted = self.tao.posted(venue, night_date)
         if posted is False:
-            if partial or rehearse:
-                raise Stop("manual", f"{venue} {night}: no guest list posted on TAO yet (other nights already booked)",
-                           kind="unposted")
             raise Stop("retry", f"{venue} {night}: guest list not posted on TAO yet; nothing submitted", kind="unposted")
         try:
             listing = self.tao.listing(venue, night_date)
         except tao_portal.TaoBlocked as exc:
             raise Stop("manual", f"{venue} {night}: {exc}; nothing submitted (waited for Cloudflare to clear)")
+        if listing and listing.get("access_code_required"):
+            raise Stop("retry", f"{venue} {night}: listing requires an access code; nothing submitted",
+                       kind="access_code")
         if not listing:
             raise Stop("manual", f"{venue} {night}: no live free guest list (closed, sold out or not free); nothing submitted",
                        kind="unavailable")
@@ -733,7 +771,9 @@ class Worker:
         if result.get("assisted_job"):
             raise Stop("manual", f"{venue} {night}: assisted mode is on; worker never hands off. Nothing submitted")
         if not result.get("verified") or not result.get("confirmation_id"):
-            raise Stop("manual", f"{venue} {night}: not submitted — {result.get('reason', 'could not be verified')}")
+            reason = result.get("reason", "could not be verified")
+            kind = "access_code" if "access code" in reason.lower() else None
+            raise Stop("manual", f"{venue} {night}: not submitted — {reason}", **({"kind": kind} if kind else {}))
         record = {"verified": True, "venue": venue, "date": night, "order_id": result["confirmation_id"], "party": party}
         meta = {"event": result.get("event") or listing.get("event"), "event_time": listing.get("event_time"),
                 "confirmation_url": result.get("confirmation_url"), "screenshot": result.get("screenshot"),
@@ -742,30 +782,17 @@ class Worker:
         return {"record": record, "meta": meta}
 
     def _book_drais(self, ref, venue, night, request, rehearse, token):
-        from datetime import timedelta
-        if os.environ.get("AMY_WORKER_DRAIS", "").lower() != "true":
-            raise Stop("manual", "Drai's: worker Speakeasy booking is off (AMY_WORKER_DRAIS); add on Speakeasy by hand")
-        offset = drais_offset()
-        if offset is None:
-            raise Stop("manual", "Drai's: DRAIS_SPEAKEASY_DAY_OFFSET is not a whole number; listing date would be a guess")
-        listing_date = (date.fromisoformat(night) + timedelta(days=offset)).isoformat()
+        """Email-only (Thomas, Nov 10 2026): never open Speakeasy, never write
+        before_submit/submitting ledger state. Confirmation emails are sent by
+        _send_emails after every night is recorded."""
         key = night_key(ref, venue, night)
-        first, last = request["first_name"].strip(), (request.get("last_name") or "").strip()
         male, female = int(request["male_count"]), int(request["female_count"])
-        shot = self._shot_path(ref, "drais", night, "rehearsal" if rehearse else "after")
-        result = self.drais.add(listing_date, first, last, male, female, rehearse=rehearse, screenshot_path=shot,
-                                before_submit=lambda: self._checkpoint(ref, token, key, {"state": "submitting"}))
         if rehearse:
-            return {"venue": venue, "date": night, "speakeasy_date": listing_date, "rehearsal": True,
-                    "screenshot": result.get("screenshot")}
-        record = {"verified": True, "venue": venue, "date": night, "system": "speakeasy",
-                  "entry_id": f"speakeasy:{listing_date}:{result['row']}",
-                  "party": {"male_count": male, "female_count": female},
-                  "submitted_fields": ["first_name", "last_name", "male_count", "female_count"]}
-        meta = {"speakeasy_date": listing_date, "screenshot": result.get("screenshot"),
-                "screenshot_sha256": _sha256(result.get("screenshot"))}
-        self._checkpoint(ref, token, key, {"state": "booked", "record": record, "meta": meta})
-        return {"record": record, "meta": meta}
+            return {"venue": venue, "date": night, "rehearsal": True, "email_only": True}
+        record = {"verified": True, "venue": venue, "date": night, "system": "email_only",
+                  "party": {"male_count": male, "female_count": female}}
+        self._checkpoint(ref, token, key, {"state": "email_only", "record": record, "meta": {}})
+        return {"record": record, "meta": {}}
 
     def _send_emails(self, job, ref, token, raw, bookings, drais=False):
         import worker_emails

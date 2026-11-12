@@ -59,6 +59,13 @@ VENUE_SLUGS = {
 }
 
 UNAVAILABLE_TEXT = re.compile(r"\b(sold out|guest list closed|passes unavailable|event unavailable)\b", re.I)
+ACCESS_CODE_TEXT = re.compile(
+    r"\b(access code|guest(?:\s|-)?list code|enter(?:\s+the)? code|password required|code required)\b", re.I)
+ACCESS_CODE_INPUTS = (
+    "#AccessCode", 'input[name="AccessCode"]', 'input[name="access_code"]',
+    'input[id*="AccessCode" i]', 'input[name*="accesscode" i]',
+    'input[name*="guestcode" i]', 'input[name*="guest-list-code" i]',
+)
 SUCCESS_TEXT = re.compile(
     r"order confirmation|registration confirmed|you(?:'|’)re on the guest list|thank you for your order", re.I)
 MARKETING_TEXT = re.compile(r"marketing|promotional|newsletter|offers|email updates|text messages|sms", re.I)
@@ -454,6 +461,21 @@ def catalog_snapshot():
     return _snapshot
 
 
+def requires_access_code(page):
+    """True when the live listing is gated by an access code (never submit)."""
+    for sel in ACCESS_CODE_INPUTS:
+        try:
+            if page.locator(sel).count():
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    try:
+        body = page.locator("body").inner_text()
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(ACCESS_CODE_TEXT.search(body or ""))
+
+
 def check_availability(venue, date_obj):
     entry = _load_catalog().get((venue, date_obj))
     if not entry:
@@ -467,6 +489,16 @@ def check_availability(venue, date_obj):
             if not _open_via_promoter(page, url):
                 return None
             body = page.locator("body").inner_text()
+            if requires_access_code(page):
+                title = (page.locator("h1, h2").first.text_content() or "").strip()
+                return {
+                    "event": entry.get("event") or title or f"{venue} Guest List",
+                    "event_time": entry.get("event_time"),
+                    "listing_type": "Passes",
+                    "price": 0,
+                    "listing_url": url,
+                    "access_code_required": True,
+                }
             if UNAVAILABLE_TEXT.search(body):
                 return None
             selects = _selects_by_gender(page)
@@ -558,6 +590,8 @@ def submit_registration(listing, guest, rehearse=False, screenshot_path=None, be
         try:
             if not _open_via_promoter(page, url):
                 return stop("Pass link is no longer on the Playmaker promoter page")
+            if requires_access_code(page):
+                return stop("listing requires an access code")
             selects = _selects_by_gender(page)
             for gender, count in (("female", guest["female_count"]), ("male", guest["male_count"])):
                 if count == 0:

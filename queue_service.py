@@ -87,15 +87,13 @@ def source_policy(ref, raw, today):
         if int(raw.get('male_count') or 0) + int(raw.get('female_count') or 0) < 1:
             return 'Party size missing; manual review required'
         venues = [rules.normalize_venue_name(v) for v in raw.get('venues', [])]
-        if not venues or any(not rules.is_known_vegas_venue(v) for v in venues):
+        if any(rules.is_manual_venue(v) for v in venues):
+            return 'LIV, XS, LIV Beach and EBC stay manual'
+        if not venues or any(not rules.is_known_vegas_venue(v) and not rules.is_manual_venue(v) for v in venues):
             return 'Unspecified/unsupported venue; reviewed routing required'
         drais = [v for v in venues if rules.is_drais(v)]
         if drais and len(venues) != 1:
             return "Drai's is Speakeasy-only; mixed TAO/Drai's request requires review"
-        if 'JEWEL Nightclub' in venues and end >= date(2026, 11, 22):
-            return 'JEWEL after Nov 21 not allowed; no automatic fallback'
-        if ('OMNIA Nightclub' in venues and start == today and today.weekday() in (4, 5)):
-            return 'Same-day OMNIA Friday/Saturday closed; no automatic fallback'
     except (KeyError, TypeError, ValueError):
         return 'Exact source date/venue missing or malformed; reviewed routing required'
     return ''
@@ -158,6 +156,12 @@ def validate_completion(raw, metadata):
                 for v, n in expected:
                     if n == night and v in rules.NIGHTCLUBS:
                         covered.add((v, n))
+            elif (venue == "Marquee Dayclub"
+                  and start.isoformat() <= night <= end.isoformat()
+                  and night <= rules.MARQUEE_DAYCLUB_PUSH_END
+                  and record.get('order_id')):
+                # Auto-added when Marquee Dayclub is open; not a source venue.
+                pass
             else:
                 raise Conflict('Receipt must match exact source date/venue')
             party = record.get('party')
@@ -168,18 +172,25 @@ def validate_completion(raw, metadata):
             if record.get('closed') or record.get('access_code_required'):
                 raise Conflict('Closed/access-code lists cannot be marked booked')
             if drais:
-                if not rules.is_drais(venue) or not record.get('entry_id') or record.get('system') != 'speakeasy':
-                    raise Conflict("Drai's requires actual Speakeasy entry ID, never TAO")
-                # Drai's: either no emails at all, or (Thomas, Nov 9 2026) the
-                # guest confirmation + team@ receipts, checked below.
+                if not rules.is_drais(venue):
+                    raise Conflict("Drai's receipt must be a Drai's venue, never TAO")
+                # Drai's (Thomas, Nov 10 2026): guest confirmation + team@
+                # receipts with no Speakeasy add. The older Speakeasy entry-ID
+                # path (no emails, or emails plus an entry) remains accepted.
                 if evidence.get('no_guest_or_team_email') is True and evidence.get('email_receipts'):
                     raise Conflict("Drai's: no_guest_or_team_email conflicts with email receipts")
-                if evidence.get('no_guest_or_team_email') is not True and not evidence.get('email_receipts'):
-                    raise Conflict("Drai's: guest/team receipts or no_guest_or_team_email required")
-                fields = record.get('submitted_fields')
-                allowed = {'first_name', 'last_name', 'male_count', 'female_count', 'name', 'party_size'}
-                if not isinstance(fields, list) or not fields or not set(fields) <= allowed:
-                    raise Conflict("Drai's permits only name+party fields")
+                if evidence.get('email_receipts'):
+                    if record.get('system') not in (None, 'email_only', 'speakeasy'):
+                        raise Conflict("Drai's email-receipt completion cannot use a non-Drai's system")
+                else:
+                    if evidence.get('no_guest_or_team_email') is not True:
+                        raise Conflict("Drai's: guest/team receipts or no_guest_or_team_email required")
+                    if not record.get('entry_id') or record.get('system') != 'speakeasy':
+                        raise Conflict("Drai's requires actual Speakeasy entry ID, never TAO")
+                    fields = record.get('submitted_fields')
+                    allowed = {'first_name', 'last_name', 'male_count', 'female_count', 'name', 'party_size'}
+                    if not isinstance(fields, list) or not fields or not set(fields) <= allowed:
+                        raise Conflict("Drai's permits only name+party fields")
             elif not record.get('order_id'):
                 raise Conflict('Actual order ID required')
         if covered != expected:

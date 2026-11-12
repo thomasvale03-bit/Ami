@@ -155,7 +155,7 @@ def test_held_exceptions_not_claimed(raw, ref):
 
 @pytest.mark.parametrize('change', [
     {'start_date': '2026-11-09'}, {'venues': []}, {'venues': ['Unknown']},
-    {'venues': ['JEWEL Nightclub']}, {'venues': ["Drai's After Hours", 'TAO Nightclub']},
+    {'venues': ['LIV Nightclub']}, {'venues': ["Drai's After Hours", 'TAO Nightclub']},
     {'_action_needed': ['ambiguous date', 'review']},
 ])
 def test_source_constraints_preserve_payload(raw, change):
@@ -176,6 +176,20 @@ def test_drais_speakeasy_only_no_emails(raw):
     bad = {'evidence': {**good['evidence'], 'email_receipts': [{'id': 'not-allowed'}]}}
     assert update(s, token, 'complete', bad)[0] == 409
     assert update(s, token, 'complete', good)[1]['state'] == 'done'
+
+
+def test_drais_email_receipts_complete_without_speakeasy_entry(raw):
+    raw['venues'] = ["Drai's After Hours"]
+    s, token = assigned(raw)
+    missing = {'evidence': {'verified': True, 'bookings': [dict(
+        venue="Drai's After Hours", date='2026-11-25', verified=True, system='email_only',
+        party={'male_count': 1, 'female_count': 2})]}}
+    assert update(s, token, 'complete', missing)[0] == 409
+    good = {'evidence': {**missing['evidence'], 'email_receipts': [
+        dict(kind='guest', id='MOCK-GUEST'), dict(kind='team', id='MOCK-TEAM')]}}
+    assert update(s, token, 'complete', good)[1]['state'] == 'done'
+    ev = s.get('mock')['metadata']['evidence']
+    assert ev['bookings'][0]['system'] == 'email_only' and 'entry_id' not in ev['bookings'][0]
 
 
 def test_intake_no_browser_email_or_wake(raw, monkeypatch):
