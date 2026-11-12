@@ -126,7 +126,9 @@ def validate_completion(raw, metadata):
 
     The queue cannot observe a click or independently prove a receipt. It checks
     consistency and saves evidence; it NEVER claims these checks performed booking.
-    No fallback mapping is changed here. Unclear routing remains manual.
+    A record marked fallback=True may cover a requested nightclub date
+    when that venue was dark and DEFAULT_ROUTING booked a different club.
+    Unclear routing remains manual.
     """
     from config import rules
     evidence = metadata.get('evidence')
@@ -139,13 +141,24 @@ def validate_completion(raw, metadata):
         venues = {rules.normalize_venue_name(v) for v in raw['venues']}
         start, end = date.fromisoformat(raw['start_date']), date.fromisoformat(raw['end_date'])
         expected = {(v, date.fromordinal(day).isoformat()) for v in venues for day in range(start.toordinal(), end.toordinal() + 1)}
-        actual = set()
+        covered = set()
         drais = any(rules.is_drais(v) for v in venues)
         for record in records:
             if not isinstance(record, dict):
                 raise Conflict('Invalid booking record')
             venue, night = rules.normalize_venue_name(record['venue']), record['date']
-            if (venue, night) not in expected or record.get('verified') is not True:
+            if record.get('verified') is not True:
+                raise Conflict('Receipt must match exact source date/venue')
+            if (venue, night) in expected:
+                covered.add((venue, night))
+            elif record.get('fallback') is True and venue in rules.NIGHTCLUBS and any(
+                    n == night and v in rules.NIGHTCLUBS for v, n in expected):
+                # Requested nightclub was dark that date; a weekday-routing
+                # fallback covers that nightclub slot only (not a dayclub).
+                for v, n in expected:
+                    if n == night and v in rules.NIGHTCLUBS:
+                        covered.add((v, n))
+            else:
                 raise Conflict('Receipt must match exact source date/venue')
             party = record.get('party')
             expected_party = {'male_count': int(raw.get('male_count') or 0),
@@ -169,8 +182,7 @@ def validate_completion(raw, metadata):
                     raise Conflict("Drai's permits only name+party fields")
             elif not record.get('order_id'):
                 raise Conflict('Actual order ID required')
-            actual.add((venue, night))
-        if actual != expected:
+        if covered != expected:
             raise Conflict('All exact source venue/date records required; incomplete jobs stay active/manual')
         if not drais or evidence.get('email_receipts'):
             receipts = evidence.get('email_receipts')

@@ -35,7 +35,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -592,12 +592,94 @@ class Worker:
             if not rehearse and (self.ledger.get(key) or {}).get("state") == "submitting":
                 raise Stop("uncertain", f"{venue} {night}: a submit started earlier with no confirmed result; "
                            "check TAO/Speakeasy before any resubmit")
+            # A nightclub already booked this date (requested or fallback)
+            # fills that nightclub slot; a dayclub on the same date is separate.
+            if venue in rules.NIGHTCLUBS:
+                existing = self._existing_night_booking(job["ref"], night, out)
+                if existing and (existing.get("record") or {}).get("venue") in rules.NIGHTCLUBS:
+                    out.append(existing)
+                    continue
             if rules.is_drais(venue):
                 item = self._book_drais(job["ref"], venue, night, request, rehearse, token)
             else:
-                item = self._book_tao(job["ref"], venue, night, request, rehearse, token, partial=bool(out))
+                item = self._book_requested_or_fallback(
+                    job["ref"], venue, night, request, rehearse, token, partial=bool(out), booked=out)
             out.append(item)
         return out
+
+    def _existing_night_booking(self, ref, night, booked):
+        """Reuse a verified nightclub booking already made for this job on this
+        date (requested venue or a fallback), so a later pass does not resubmit."""
+        from config import rules
+        for item in booked:
+            rec = item.get("record") or {}
+            if rec.get("verified") and rec.get("date") == night and rec.get("venue") in rules.NIGHTCLUBS and (
+                    rec.get("order_id") or rec.get("system")):
+                return item
+        prefix, suffix = f"{ref}|", f"|{night}"
+        for key, entry in (self.ledger._load() or {}).items():
+            rec = (entry or {}).get("record") or {}
+            if key.startswith(prefix) and key.endswith(suffix) and rec.get("venue") in rules.NIGHTCLUBS and rec.get("verified") and (
+                    rec.get("order_id") or rec.get("system")):
+                return {"record": rec, "meta": (entry or {}).get("meta") or {}}
+        return None
+
+    def _previous_nightclub(self, night, booked):
+        prev = (date.fromisoformat(night) - timedelta(days=1)).isoformat()
+        from config import rules
+        for item in booked:
+            rec = item.get("record") or {}
+            if rec.get("date") == prev and rec.get("venue") in rules.NIGHTCLUBS:
+                return rec["venue"]
+        return None
+
+    def _book_requested_or_fallback(self, ref, venue, night, request, rehearse, token, partial, booked):
+        """Book the requested nightclub, or fall through DEFAULT_ROUTING when
+        that venue has no event that night (e.g. JEWEL on Sunday). Lists not
+        yet posted on a night the venue does operate still retry or go manual
+        the way they used to."""
+        try:
+            return self._book_tao(ref, venue, night, request, rehearse, token, partial)
+        except Stop as stop:
+            if stop.extra.get("kind") not in ("unposted", "unavailable"):
+                raise
+            from config import rules
+            from rules_engine import candidate_venues, venue_operates_that_night
+            night_date = date.fromisoformat(night)
+            if venue not in rules.NIGHTCLUBS or venue_operates_that_night(venue, night_date):
+                raise
+            prev = self._previous_nightclub(night, booked)
+            last_stop = stop
+            for alt in candidate_venues(request, night_date, prev):
+                if alt == venue:
+                    continue
+                alt_key = night_key(ref, alt, night)
+                alt_entry = self.ledger.get(alt_key) or {}
+                saved = alt_entry.get("record") or {}
+                if saved.get("verified") and saved.get("order_id"):
+                    return {"record": saved, "meta": alt_entry.get("meta") or {}}
+                if not rehearse and alt_entry.get("state") == "submitting":
+                    raise Stop("uncertain", f"{alt} {night}: a submit started earlier with no confirmed result; "
+                               "check TAO/Speakeasy before any resubmit")
+                try:
+                    item = self._book_tao(ref, alt, night, request, rehearse, token, partial=False)
+                except Stop as alt_stop:
+                    last_stop = alt_stop
+                    if alt_stop.extra.get("kind") in ("unposted", "unavailable"):
+                        continue
+                    raise
+                item.setdefault("meta", {})["fallback"] = True
+                item["meta"]["fallback_from"] = venue
+                if item.get("record"):
+                    item["record"]["fallback"] = True
+                if not rehearse and item.get("record"):
+                    self._checkpoint(ref, token, alt_key,
+                                     {"state": "booked", "record": item["record"], "meta": item["meta"]})
+                return item
+            if last_stop.action == "uncertain":
+                raise last_stop
+            raise Stop("retry", f"{venue} {night}: no event that night; "
+                       "DEFAULT_ROUTING fallbacks also not posted yet; nothing submitted")
 
     def _shot_path(self, ref, venue, night, suffix):
         safe = "".join(c if c.isalnum() else "-" for c in venue)
@@ -617,16 +699,18 @@ class Worker:
         posted = self.tao.posted(venue, night_date)
         if posted is False:
             if partial or rehearse:
-                raise Stop("manual", f"{venue} {night}: no guest list posted on TAO yet (other nights already booked)")
-            raise Stop("retry", f"{venue} {night}: guest list not posted on TAO yet; nothing submitted")
+                raise Stop("manual", f"{venue} {night}: no guest list posted on TAO yet (other nights already booked)",
+                           kind="unposted")
+            raise Stop("retry", f"{venue} {night}: guest list not posted on TAO yet; nothing submitted", kind="unposted")
         try:
             listing = self.tao.listing(venue, night_date)
         except tao_portal.TaoBlocked as exc:
             raise Stop("manual", f"{venue} {night}: {exc}; nothing submitted (waited for Cloudflare to clear)")
         if not listing:
-            raise Stop("manual", f"{venue} {night}: no live free guest list (closed, sold out or not free); nothing submitted")
+            raise Stop("manual", f"{venue} {night}: no live free guest list (closed, sold out or not free); nothing submitted",
+                       kind="unavailable")
         if listing.get("listing_type") != "Passes" or listing.get("price", 0) != 0:
-            raise Stop("manual", f"{venue} {night}: listing is not a free guest-list pass")
+            raise Stop("manual", f"{venue} {night}: listing is not a free guest-list pass", kind="unavailable")
         party = {"male_count": int(request["male_count"]), "female_count": int(request["female_count"])}
         shot = self._shot_path(ref, venue, night, "rehearsal" if rehearse else "confirmation")
 

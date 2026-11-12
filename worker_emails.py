@@ -48,11 +48,14 @@ def guest_email(request, bookings):
     """bookings: [{venue, date, event, event_time, order_id}] (TAO only)."""
     first = request.get("first_name") or "there"
     label = date_label(request["start_date"], request["end_date"])
+    notice = html_emails.FALLBACK_NOTICE
     lines = []
     for b in sorted(bookings, key=lambda b: (b["date"], b["venue"])):
         event = (b.get("event") or "").strip()
         inner = f"{event} — Order ID {b['order_id']}" if event else f"Order ID {b['order_id']}"
         lines.append(f"{_long(b['date'])} - {b['venue']} ({inner})")
+        if b.get("fallback"):
+            lines.append(notice)
     text = "\n\n".join([
         f"Hi {first},",
         "You're on the Playmaker Entertainment guest list. Here's what you're set for:\n" + "\n".join(lines),
@@ -63,8 +66,10 @@ def guest_email(request, bookings):
     ])
     rows = [(html_emails._short_date(b["date"]), b["venue"], b.get("event"))
             for b in sorted(bookings, key=lambda b: (b["date"], b["venue"]))]
+    fallback_nights = [html_emails._short_date(b["date"]) for b in bookings if b.get("fallback")]
     html = html_emails.render_confirmation(
-        first, rows, html_emails.party_size(request["female_count"], request["male_count"]))
+        first, rows, html_emails.party_size(request["female_count"], request["male_count"]),
+        fallback_nights=fallback_nights or None)
     subject = f"You're on the Playmaker Entertainment guest list for {label}"
     return {"to": request["email"], "subject": subject, "text": text, "html": html,
             "dedupe_query": f'to:{request["email"]} subject:"{subject}"'}

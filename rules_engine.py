@@ -118,6 +118,27 @@ def default_route_for_date(date_obj):
     return rules.DEFAULT_ROUTING[date_obj.strftime("%A")]
 
 
+def scheduled_venues_for(date_obj):
+    """Primary and named fallbacks from DEFAULT_ROUTING for this weekday."""
+    route = default_route_for_date(date_obj)
+    fb = route["fallback"] if isinstance(route["fallback"], list) else [route["fallback"]]
+    return [v for v in [route["primary"], *fb] if v and v != "best_available"]
+
+
+def venue_operates_that_night(venue, date_obj):
+    """True when we should wait for this venue's own list (retry) rather than
+    treat the night as dark and fall through DEFAULT_ROUTING.
+
+    A venue operates if it is on that weekday's DEFAULT_ROUTING. Friday and
+    Saturday also count the main TAO nightclubs, which regularly post lists
+    even when they are not that day's primary."""
+    if venue in scheduled_venues_for(date_obj):
+        return True
+    if date_obj.weekday() in (4, 5) and venue in rules.NIGHTCLUBS:
+        return True
+    return False
+
+
 def omnia_closed_for_same_day(date_obj, today):
     """OMNIA's Friday and Saturday guest lists close, so a signup made on that
     same day can't be honored. Requested in advance, OMNIA stays open. Only
