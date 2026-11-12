@@ -129,10 +129,15 @@ def venue_operates_that_night(venue, date_obj):
     """True when we should wait for this venue's own list (retry) rather than
     treat the night as dark and fall through DEFAULT_ROUTING.
 
-    A venue operates if it is on that weekday's DEFAULT_ROUTING. Friday and
-    Saturday also count the main TAO nightclubs, which regularly post lists
-    even when they are not that day's primary. JEWEL after Nov 21, 2026 does
-    not operate: route those nights to fallback."""
+    A verified VENUE_SCHEDULE is authoritative: a night the venue does not
+    operate is never retried. A tbd or unknown venue is never treated as
+    closed; those still use weekday routing (and Fri/Sat main-club) heuristics.
+    JEWEL after Nov 21, 2026 does not operate."""
+    scheduled = rules.venue_open_on(venue, date_obj)
+    if scheduled is False:
+        return False
+    if scheduled is True:
+        return True
     if venue == "JEWEL Nightclub" and not rules.jewel_allowed_on(date_obj):
         return False
     if venue in scheduled_venues_for(date_obj):
@@ -162,6 +167,8 @@ def fallback_venues_for(date_obj, previous_night_venue=None, skip=None):
         if v == "best_available" or v in rules.PAUSED_VENUES or v in skip or v in seen:
             continue
         if v == "JEWEL Nightclub" and not rules.jewel_allowed_on(date_obj):
+            continue
+        if rules.venue_open_on(v, date_obj) is False:
             continue
         seen.add(v)
         result.append(v)

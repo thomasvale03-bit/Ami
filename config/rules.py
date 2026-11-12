@@ -166,6 +166,156 @@ def jewel_allowed_on(date_obj):
     return day <= JEWEL_LAST_NIGHT
 
 
+# Days and door/close times used by routing. status "verified" means the days
+# were taken from an official source cited in the comment; "tbd" is an empty
+# schedule Thomas will fill in. A tbd venue is never treated as closed.
+#
+# Closing times marked typical are the official "around 4AM / late" figures
+# (management may change them night to night).
+VENUE_SCHEDULE = {
+    # Official FAQ: "open Tuesday, and Thursday through Sunday from 10:30PM-close.
+    # Typically closing time is around 4AM."
+    # https://taogroup.com/venues/omnia-nightclub-las-vegas/faqs/
+    # Confirmed by tickets.taogroup.com guest lists and the worker ledger
+    # (Tue/Thu/Fri/Sat/Sun, 10:30 PM). One-off Wed 2026-12-30 (Deorro) omitted.
+    "OMNIA Nightclub": {
+        "status": "verified",
+        "days": ["Tuesday", "Thursday", "Friday", "Saturday", "Sunday"],
+        "doors": "10:30 PM",
+        "closes": "4:00 AM",
+    },
+    # Official FAQ: "open Wednesday through Saturday from 10:30PM-close.
+    # Typically closing time is around 4AM."
+    # https://taogroup.com/venues/hakkasan-nightclub-las-vegas/faqs/
+    # Confirmed by tickets.taogroup.com and the worker ledger (Wed-Sat, 10:30 PM).
+    "Hakkasan Nightclub": {
+        "status": "verified",
+        "days": ["Wednesday", "Thursday", "Friday", "Saturday"],
+        "doors": "10:30 PM",
+        "closes": "4:00 AM",
+    },
+    # Official FAQ: "open Friday, Saturday and Monday from 10:30PM-close.
+    # Typically closing time is around 4AM."
+    # https://taogroup.com/venues/jewel-nightclub-las-vegas/faqs/
+    # Last night Saturday Nov 21, 2026 (owner). tickets.taogroup.com lists
+    # JEWEL only through that date. Ledger confirms Fri/Sat 10:30 PM.
+    "JEWEL Nightclub": {
+        "status": "verified",
+        "days": ["Monday", "Friday", "Saturday"],
+        "doors": "10:30 PM",
+        "closes": "4:00 AM",
+        "until": JEWEL_LAST_NIGHT,
+    },
+    # Official contact Hours of Operation: "Monday, Wednesday, Friday – Saturday
+    # | 10:30pm – Close." https://taogroup.com/venues/marquee-nightclub-las-vegas/contact/
+    # tickets.taogroup.com listings (e.g. Sat Nov 14 2026 10:30 PM–4:00 AM) and
+    # the worker ledger match Mon/Wed/Fri/Sat. The FAQ also mentions Sunday
+    # "Drenched"; no Sunday night is on the live TAO calendar, so Sunday is not
+    # recorded until verified.
+    "Marquee Nightclub": {
+        "status": "verified",
+        "days": ["Monday", "Wednesday", "Friday", "Saturday"],
+        "doors": "10:30 PM",
+        "closes": "4:00 AM",
+    },
+    # Official venue Hours of Operation: "Thursday – Sunday 10:30PM-Late."
+    # https://taogroup.com/venues/tao-nightclub-las-vegas/
+    # Also on the TAO Beach contact page. Confirmed by tickets.taogroup.com
+    # (Thu-Sun, 10:30 PM) and Ritual Sundays on the official site.
+    "TAO Nightclub": {
+        "status": "verified",
+        "days": ["Thursday", "Friday", "Saturday", "Sunday"],
+        "doors": "10:30 PM",
+        "closes": "4:00 AM",
+    },
+    # Official contact: "Monday – Sunday | 11am – Close" and FAQ
+    # "Monday – Sunday 11:00AM-6:00PM."
+    # https://taogroup.com/venues/marquee-nightclub-las-vegas/contact/
+    # tickets.taogroup.com and the worker ledger show 11:00 AM (Thu-Sun posted
+    # at the time of writing; official hours still include Mon-Wed).
+    "Marquee Dayclub": {
+        "status": "verified",
+        "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+        "doors": "11:00 AM",
+        "closes": "6:00 PM",
+    },
+    # Official Party Brunch page: "Every Saturday, 12PM – 4PM" from October
+    # through March. 12PM terrace / 1PM main room.
+    # https://taogroup.com/venues/lavo-italian-restaurant-las-vegas/party-brunch/
+    # tickets.taogroup.com lists Saturday 12:00 PM events through mid-March 2027.
+    "LAVO Party Brunch": {
+        "status": "verified",
+        "days": ["Saturday"],
+        "doors": "12:00 PM",
+        "closes": "4:00 PM",
+        "season": {"start_month": 10, "end_month": 3},
+    },
+    # Official After Hours FAQ: "typically open Thursday - Sunday starting at
+    # 1:00AM" and "typically closes at 6:00AM."
+    # https://www.draisgroup.com/faq
+    # Matches the worker's confirmation wording (doors at 1 AM).
+    "Drai's After Hours": {
+        "status": "verified",
+        "days": ["Thursday", "Friday", "Saturday", "Sunday"],
+        "doors": "1:00 AM",
+        "closes": "6:00 AM",
+    },
+    # Official contact pages only say "Closed for the Season" and do not list
+    # in-season days. Thomas will supply these (t922u).
+    "TAO Beach Dayclub": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    "OMNIA Dayclub": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    "Palm Tree Beach Club": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    # Official FAQ lists Wed-Sun 11:00AM-close (typically 5PM) but the contact
+    # page currently says "Closed for the Season" with no published season
+    # window, so Liquid stays tbd for routing until Thomas confirms dates.
+    # https://taogroup.com/venues/liquid-pool-lounge-las-vegas/faqs/
+    "Liquid Pool Lounge": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    # Thomas will supply days and times (t922u). Never treat as closed.
+    "XS Nightclub": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    "LIV Nightclub": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    "LIV Beach": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    "LIV Dayclub": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    "Encore Beach Club": {"status": "tbd", "days": [], "doors": None, "closes": None},
+}
+
+
+def _schedule_key(name):
+    canonical = normalize_venue_name(name or "")
+    if is_drais(canonical):
+        return "Drai's After Hours"
+    return canonical
+
+
+def venue_schedule(name):
+    return VENUE_SCHEDULE.get(_schedule_key(name))
+
+
+def _in_season(date_obj, season):
+    if not season:
+        return True
+    month = date_obj.month
+    start, end = season["start_month"], season["end_month"]
+    if start <= end:
+        return start <= month <= end
+    return month >= start or month <= end
+
+
+def venue_open_on(venue, date_obj):
+    """True or False when the venue has a verified schedule; None when tbd
+    or unknown. None must never be treated as closed."""
+    entry = venue_schedule(venue)
+    if not entry or entry.get("status") != "verified" or not entry.get("days"):
+        return None
+    day = date_obj.isoformat() if hasattr(date_obj, "isoformat") else str(date_obj)
+    until = entry.get("until")
+    if until and day > until:
+        return False
+    if entry.get("season") and not _in_season(date_obj, entry["season"]):
+        return False
+    weekday = date_obj.strftime("%A") if hasattr(date_obj, "strftime") else None
+    return weekday in entry["days"]
+
+
 def normalize_venue_name(name):
     key = name.strip().lower()
     return VENUE_ALIASES.get(key, name.strip())

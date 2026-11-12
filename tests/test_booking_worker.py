@@ -244,7 +244,7 @@ class FakeDrais:
 def test_drais_skips_speakeasy_and_sends_guest_and_team(tmp_path):
     drais = FakeDrais()
     s, api, worker = make(tmp_path, drais=drais)
-    s.enqueue('d', raw(venues=["Drai's"]), NOW)
+    s.enqueue('d', raw(venues=["Drai's"], start_date='2026-11-26', end_date='2026-11-26'), NOW)
     assert worker.run_once()['status'] == 'done'
     assert drais.calls == []  # Thomas, Nov 10 2026: never add on Speakeasy
     assert [p['to'] for p in api.sent] == ['guest@example.invalid', 'team@playmakerentertainment.com']
@@ -257,7 +257,7 @@ def test_drais_skips_speakeasy_and_sends_guest_and_team(tmp_path):
     assert ev['bookings'][0]['system'] == 'email_only' and 'entry_id' not in ev['bookings'][0]
     assert {r['kind'] for r in ev['email_receipts']} == {'guest', 'team'}
     assert worker.tao.submits == []  # never TAO for Drai's
-    key = "d|Drai's|2026-11-25"
+    key = "d|Drai's|2026-11-26"
     assert worker.ledger.get(key)['state'] == 'email_only'
 
 
@@ -266,7 +266,7 @@ def test_drais_email_only_ignores_speakeasy_flags(tmp_path, monkeypatch):
     monkeypatch.setenv('DRAIS_SPEAKEASY_DAY_OFFSET', 'tomorrow')
     drais = FakeDrais()
     s, api, worker = make(tmp_path, drais=drais)
-    s.enqueue('d', raw(venues=["Drai's"]), NOW)
+    s.enqueue('d', raw(venues=["Drai's"], start_date='2026-11-26', end_date='2026-11-26'), NOW)
     assert worker.run_once()['status'] == 'done'
     assert drais.calls == []
     ev = s.get('d')['metadata']['evidence']

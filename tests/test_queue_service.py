@@ -169,9 +169,10 @@ def test_source_constraints_preserve_payload(raw, change):
 
 def test_drais_speakeasy_only_no_emails(raw):
     raw['venues'] = ["Drai's After Hours"]
+    raw['start_date'] = raw['end_date'] = '2026-11-26'
     s, token = assigned(raw)
     good = {'evidence': {'verified': True, 'no_guest_or_team_email': True, 'bookings': [dict(
-        venue="Drai's After Hours", date='2026-11-25', verified=True, system='speakeasy', entry_id='MOCK-ENTRY', party={'male_count': 1, 'female_count': 2},
+        venue="Drai's After Hours", date='2026-11-26', verified=True, system='speakeasy', entry_id='MOCK-ENTRY', party={'male_count': 1, 'female_count': 2},
         submitted_fields=['first_name', 'last_name', 'male_count', 'female_count'])]}}
     bad = {'evidence': {**good['evidence'], 'email_receipts': [{'id': 'not-allowed'}]}}
     assert update(s, token, 'complete', bad)[0] == 409
@@ -180,9 +181,10 @@ def test_drais_speakeasy_only_no_emails(raw):
 
 def test_drais_email_receipts_complete_without_speakeasy_entry(raw):
     raw['venues'] = ["Drai's After Hours"]
+    raw['start_date'] = raw['end_date'] = '2026-11-26'
     s, token = assigned(raw)
     missing = {'evidence': {'verified': True, 'bookings': [dict(
-        venue="Drai's After Hours", date='2026-11-25', verified=True, system='email_only',
+        venue="Drai's After Hours", date='2026-11-26', verified=True, system='email_only',
         party={'male_count': 1, 'female_count': 2})]}}
     assert update(s, token, 'complete', missing)[0] == 409
     good = {'evidence': {**missing['evidence'], 'email_receipts': [

@@ -138,7 +138,9 @@ def validate_completion(raw, metadata):
     try:
         venues = {rules.normalize_venue_name(v) for v in raw['venues']}
         start, end = date.fromisoformat(raw['start_date']), date.fromisoformat(raw['end_date'])
-        expected = {(v, date.fromordinal(day).isoformat()) for v in venues for day in range(start.toordinal(), end.toordinal() + 1)}
+        expected = {(v, date.fromordinal(day).isoformat())
+                    for v in venues for day in range(start.toordinal(), end.toordinal() + 1)
+                    if v in rules.NIGHTCLUBS or rules.venue_open_on(v, date.fromordinal(day)) is not False}
         covered = set()
         drais = any(rules.is_drais(v) for v in venues)
         for record in records:

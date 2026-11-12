@@ -29,10 +29,12 @@ class MapTao(FakeTao):
     """posted() / listing() vary by (venue, date). Dates may be date or iso str."""
 
     def __init__(self, open_nights):
-        super().__init__()
+        super().__init__(dayclubs=True)
         self.open_nights = {(v, _iso(n)) for v, n in open_nights}
+        self.lookups = []
 
     def posted(self, venue, night):
+        getattr(self, "lookups", []).append((venue, _iso(night)))
         return (venue, _iso(night)) in self.open_nights
 
     def listing(self, venue, night):
@@ -320,3 +322,46 @@ def test_fallback_venues_put_omnia_first_and_skip_jewel_after_cutoff():
     after_omnia = fallback_venues_for(date(2026, 11, 15), previous_night_venue="OMNIA Nightclub")
     assert after_omnia[0] != "OMNIA Nightclub"
     assert after_omnia[-1] == "OMNIA Nightclub"
+
+
+
+def test_dark_venue_skips_tao_lookup(tmp_path):
+    """JEWEL is not open Sunday; do not look it up on TAO, book OMNIA instead."""
+    tao = MapTao({("OMNIA Nightclub", "2026-11-15")})
+    s, api, worker = make(tmp_path, tao=tao)
+    s.enqueue("s", raw(venues=["JEWEL Nightclub"], start_date="2026-11-15", end_date="2026-11-15"), NOW)
+    result = worker.run_once()
+    assert result["status"] == "done", result
+    assert ("JEWEL Nightclub", "2026-11-15") not in worker.tao.lookups
+    assert ("OMNIA Nightclub", "2026-11-15") in worker.tao.lookups
+    bookings = s.get("s")["metadata"]["evidence"]["bookings"]
+    assert bookings[0]["venue"] == "OMNIA Nightclub" and bookings[0].get("fallback") is True
+
+
+def test_operating_unposted_still_retries_without_fallback(tmp_path):
+    """Hakkasan operates Wednesday; an unposted list retries and does not jump to fallback."""
+    tao = MapTao({("OMNIA Nightclub", "2026-11-25")})
+    s, api, worker = make(tmp_path, tao=tao)
+    s.enqueue("h", raw(venues=["Hakkasan Nightclub"], start_date="2026-11-25", end_date="2026-11-25"), NOW)
+    result = worker.run_once()
+    assert result["status"] == "retry", result
+    assert "guest list not posted" in result["reason"]
+    assert worker.tao.submits == []
+    assert ("Hakkasan Nightclub", "2026-11-25") in worker.tao.lookups
+
+
+def test_lavo_on_a_dark_day_is_skipped_without_lookup(tmp_path):
+    """LAVO is Saturday-only; Friday in a range is skipped with no TAO lookup."""
+    tao = MapTao({
+        ("LAVO Party Brunch", "2026-11-14"),
+        ("Marquee Dayclub", "2026-11-13"),
+        ("Marquee Dayclub", "2026-11-14"),
+    })
+    s, api, worker = make(tmp_path, tao=tao)
+    s.enqueue("l", raw(venues=["LAVO Party Brunch"], start_date="2026-11-13", end_date="2026-11-14"), NOW)
+    result = worker.run_once()
+    assert result["status"] == "done", result
+    assert ("LAVO Party Brunch", "2026-11-13") not in worker.tao.lookups
+    venues = sorted((b["venue"], b["date"]) for b in s.get("l")["metadata"]["evidence"]["bookings"])
+    assert ("LAVO Party Brunch", "2026-11-14") in venues
+    assert ("LAVO Party Brunch", "2026-11-13") not in venues
