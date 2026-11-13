@@ -12,7 +12,7 @@ class OnePingPerJob(unittest.TestCase):
         self.env.start()
         self.posts = []
         self.p1 = mock.patch.object(amyi, "disabled", return_value=False)
-        self.p2 = mock.patch.object(amyi, "_post", side_effect=self.posts.append)
+        self.p2 = mock.patch.object(amyi, "_post", side_effect=lambda pl: (self.posts.append(pl), amyi.record_sent(pl)))
         self.p1.start(); self.p2.start()
 
     def tearDown(self):
@@ -32,9 +32,9 @@ class OnePingPerJob(unittest.TestCase):
             amyi.defer_contact_form(name="Ana B", email="a@gmail.com", ref="r2")
             amyi.end_message()
         import time; time.sleep(0.2)
-        self.assertEqual([p["type"] for p in self.posts], ["contact_form"])
+        self.assertEqual([p["type"] for p in self.posts], ["contact_form", "contact_form"])
 
     def test_posh_then_job_same_guest_dates(self):
         amyi.notify("posh_guest", name="Ana B", email="a@gmail.com", venue="X", dates="2026-11-06", ref="o1", wait=True)
         amyi.notify("signup_job", name="Ana B", email="a@gmail.com", venue=["Y"], dates=["2026-11-06"], ref="m1", wait=True)
-        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(len(self.posts), 2)

@@ -21,7 +21,7 @@ class DefaultTests(unittest.TestCase):
             self.assertEqual(rules.phone_or_default(""), "4802649387")
             self.assertEqual(rules.phone_or_default("   "), "4802649387")
             self.assertEqual(rules.phone_or_default(None), "4802649387")
-            self.assertEqual(rules.zip_or_default(""), "85311")
+            self.assertEqual(rules.zip_or_default(""), "85281")
             self.assertEqual(rules.phone_or_default("7025550100"), "7025550100")
             self.assertEqual(rules.zip_or_default("89109"), "89109")
 
@@ -33,10 +33,10 @@ class DefaultTests(unittest.TestCase):
     def test_assisted_job_and_old_token(self):
         with mock.patch.dict(os.environ, CLEAN):
             job = assisted_jobs.make_job(URL, dict(GUEST, phone="", billing_zip=None))
-            self.assertEqual((job["phone"], job["billing_zip"]), ("4802649387", "85311"))
+            self.assertEqual((job["phone"], job["billing_zip"]), ("4802649387", "85281"))
             raw = dict(job, phone="", billing_zip="")
             back = assisted_jobs.decode(assisted_jobs.encode(raw))
-            self.assertEqual((back["phone"], back["billing_zip"]), ("4802649387", "85311"))
+            self.assertEqual((back["phone"], back["billing_zip"]), ("4802649387", "85281"))
             kept = assisted_jobs.make_job(URL, dict(GUEST, phone="7025550100", billing_zip="89109"))
             self.assertEqual((kept["phone"], kept["billing_zip"]), ("7025550100", "89109"))
 
@@ -53,7 +53,7 @@ class DefaultTests(unittest.TestCase):
                 req = normalize_guest_request(raw)
             except Exception as exc:  # consent/other gates are not what this test is about
                 self.skipTest(f"normalize gate: {exc}")
-        self.assertEqual((req["phone"], req["billing_zip"]), ("4802649387", "85311"))
+        self.assertEqual((req["phone"], req["billing_zip"]), ("4802649387", "85281"))
 
 
 if __name__ == "__main__":

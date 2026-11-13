@@ -47,11 +47,23 @@ def _login(page):
     """Log into the SpeakeasyGo manager with the operator's own credentials.
     Selectors are finalised against the real login page."""
     page.goto(LOGIN_URL, wait_until="domcontentloaded")
-    page.wait_for_timeout(1500)
-    # Real login form: #email, #password, "Sign In with Email" (no CAPTCHA).
+    # The login app hydrates slowly; AMYI's working box runs waited ~8 s
+    # after each navigation. Filling earlier leaves "Continue" disabled.
+    page.wait_for_timeout(int(os.environ.get("SPEAKEASY_LOAD_WAIT_MS", "8000")))
+    if "/login" not in page.url and page.locator("#email").count() == 0:
+        return  # saved session (persistent profile): already signed in
+    # Login is two-step now: email + "Continue", then the password page.
+    # Still handles the old one-page form (#email + #password together).
     page.fill("#email", EMAIL)
+    if page.locator("#password").count() == 0:
+        button = page.locator("button:has-text('Continue'), button[type=submit]").first
+        if button.is_disabled():
+            page.locator("#email").press_sequentially(" ")  # nudge the form's change handler
+            page.locator("#email").press("Backspace")
+        button.click()
+        page.wait_for_selector("#password", timeout=20000)
     page.fill("#password", PASSWORD)
-    page.click("button:has-text('Sign In with Email')")
+    page.locator("button:has-text('Sign In'), button[type=submit]").first.click()
     page.wait_for_load_state("networkidle", timeout=30000)
     page.wait_for_timeout(1500)
 

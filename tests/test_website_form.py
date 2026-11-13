@@ -177,7 +177,7 @@ class ServerToServerAndBrandedFallback(unittest.TestCase):
             "lastName": "Lee",
             "email": "gia@example.com",
             "phone": "4802875168",
-            "zip": "85311",
+            "zip": "85281",
             "females": 3,
             "males": 1,
             "venues": "Priority: OMNIA (Fri 10/30). Fri 10/30 OMNIA, Sat 10/31 JEWEL, open to other venues",
@@ -193,7 +193,7 @@ class ServerToServerAndBrandedFallback(unittest.TestCase):
         self.assertEqual(clean["end"].isoformat(), d1)
         self.assertEqual((clean["women"], clean["men"]), (3, 1))
         self.assertEqual(clean["promoter_name"], "Tom - Grok")
-        self.assertIn("ZIP: 85311", clean["notes"])
+        self.assertIn("ZIP: 85281", clean["notes"])
 
         # PartyEveryDay Airo-shaped payload with Scottsdale open-to-all preference & single-word name
         clean2, err2 = pw.validate_website({

@@ -138,7 +138,27 @@ def date_from_custom_fields(custom_fields, reference):
     return None
 
 
-def posh_night(event_start, date_purchased=None, event_end=None, custom_fields=None):
+LATE_NIGHT_RE = re.compile(r"after[\s-]*hours|late[\s-]*night|afterhours", re.I)
+
+
+def late_night_event(event_name):
+    return bool(LATE_NIGHT_RE.search(event_name or ""))
+
+
+def _utc_to_vegas(value):
+    """A 'Z'/offset timestamp converted to naive America/Los_Angeles time."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(VEGAS).replace(tzinfo=None)
+
+
+def posh_night(event_start, date_purchased=None, event_end=None, custom_fields=None, event_name=None):
     """(night, how) - the Las Vegas night this order is for.
 
     1. A date answer in custom_fields (prompt mentions date/night/day) wins.
@@ -160,6 +180,17 @@ def posh_night(event_start, date_purchased=None, event_end=None, custom_fields=N
         return None, "no_event_start"
     if bought is None or start >= bought:
         return _night(start), "event_start"
+    if late_night_event(event_name) and start < bought:
+        # After-hours / late-night series (e.g. Drai's After Hours, nightly):
+        # Posh's event_start is the series anchor. Convert it from UTC to
+        # Vegas time; if that anchor's night is already over at purchase,
+        # the order is for the purchase's own Vegas night (purchases before
+        # the 6 AM rollover belong to the previous night).
+        anchor = _utc_to_vegas(event_start) or start
+        anchor_night, bought_night = _night(anchor), _night(bought)
+        if anchor_night < bought_night:
+            return bought_night, "late_night_purchase_night"
+        return anchor_night, "late_night_event_start"
     end = _wall_clock(event_end)
     length = (end - start) if end and end > start and end - start < timedelta(days=1) else timedelta(hours=6)
     weeks = max(0, (bought - (start + length)).days // 7)
@@ -206,7 +237,8 @@ def resolve_night(payload, lookup=None):
         local = start.astimezone(VEGAS).replace(tzinfo=None)
         return _night(local), "posh_page", local
     night, how = posh_night(payload.get("event_start"), payload.get("date_purchased"),
-                            payload.get("event_end"), payload.get("custom_fields"))
+                            payload.get("event_end"), payload.get("custom_fields"),
+                            event_name=payload.get("event_name"))
     if how == "recurring_next_occurrence":
         how = REVIEW_RULE
     return night, how, None
@@ -214,6 +246,24 @@ def resolve_night(payload, lookup=None):
 
 def needs_review(body):
     return f"Night Rule: {REVIEW_RULE}" in (body or "")
+
+
+# --- orders already booked outside AMY (hand recon) -------------------------
+
+_HANDLED_FILES = (os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "posh_handled_orders.txt"),
+                  "/data/posh_handled_orders.txt")
+
+
+def handled_orders():
+    """Posh order numbers booked by hand / reconciliation: never turn into jobs."""
+    out = {x.strip() for x in os.environ.get("POSH_HANDLED_ORDERS", "").replace(";", ",").split(",") if x.strip()}
+    for path in _HANDLED_FILES:
+        try:
+            with open(path) as fh:
+                out |= {ln.split("#")[0].strip() for ln in fh if ln.split("#")[0].strip()}
+        except OSError:
+            pass
+    return out
 
 
 # --- payload -> request -----------------------------------------------------
@@ -297,8 +347,9 @@ class Intake:
     """Puts orders into the intake inbox. One Gmail client per instance
     (kept off the main loop's client: googleapiclient isn't thread-safe)."""
 
-    def __init__(self, service_factory, intake_email, dry_run=False, lookup=None):
+    def __init__(self, service_factory, intake_email, dry_run=False, lookup=None, on_accept=None):
         self.lookup = lookup
+        self.on_accept = on_accept
         self._factory, self._service, self.intake_email, self.dry_run = service_factory, None, intake_email, dry_run
         self._seen = set()
         self._lock = threading.Lock()
@@ -320,6 +371,9 @@ class Intake:
         reason = should_ignore(payload)
         if reason:
             return 200, f"ignored: {reason}"
+        if str(payload.get("order_number") or "").strip() in handled_orders():
+            log.info("Posh order %s already handled (posh_handled_orders); skipping", payload.get("order_number"))
+            return 200, "duplicate (already handled)"
         key = (payload.get("order_number") or "", payload.get("event_id") or "",
                (payload.get("account_email") or "").lower())
         night, how, start_local = resolve_night(payload, self.lookup)
@@ -349,7 +403,17 @@ class Intake:
                 userId="me", body={"raw": raw, "labelIds": ["INBOX", "UNREAD"]}).execute()
             self._seen.add(key)
         log.info("Posh order %s for %s -> night %s (%s)", key[0], key[2], night, how)
-        _ping_amyi(payload, key, night)
+        event_name = payload.get("event_name") or ""
+        from config import rules as _rules
+        import speakeasy as _speakeasy
+        if (os.environ.get("AMYI_RAW_POSH_PING", "").strip().lower() in ("1", "true", "yes")
+                or (_rules.is_drais(event_name) and not _speakeasy.auto_on())):
+            _ping_amyi(payload, key, night)
+        if callable(getattr(self, "on_accept", None)):
+            try:
+                self.on_accept()
+            except Exception:
+                log.exception("on_accept callback failed")
         return 200, "queued"
 
 
@@ -376,7 +440,8 @@ def _ping_amyi(payload, key, night):
         venue = ""
     return amyi.notify("posh_guest", name=name, email=key[2], phone=payload.get("account_phone") or "",
                        event=event, venue=venue or event, dates=str(night or ""),
-                       party=party_size(payload), source="posh", ref=key[0] or key[1])
+                       party=party_size(payload), source="posh", ref=key[0] or key[1],
+                       order=payload.get("order_number") or "")
 
 
 # --- Branded send (POST /send-branded) -------------------------------------
@@ -944,6 +1009,11 @@ def _deliver_website(intake, clean):
     except OSError:
         log.exception("Website form: could not record delivered %s", key)
     notify_team_website(intake.service(), clean, msg["Subject"])
+    if callable(getattr(intake, "on_accept", None)):
+        try:
+            intake.on_accept()
+        except Exception:
+            log.exception("on_accept callback failed")
 
 
 def accept_website(intake, payload, _sleep=None):
@@ -953,26 +1023,35 @@ def accept_website(intake, payload, _sleep=None):
     clean, err = validate_website(payload)
     if err:
         return 400, err
+    import queue_service
+    receipt = None
+    if queue_service.enabled() and not intake.dry_run:
+        receipt = queue_service.persist_intake("website", payload)
+
+    def _result(code, text):
+        if receipt:
+            queue_service.finish_intake(receipt, code, text)
+        return code, text
     key = _website_key(clean)
     with intake._lock:
         if key in intake._seen:
-            return 200, "duplicate (this run)"
+            return _result(200, "duplicate (this run)")
         if intake.dry_run:
             intake._seen.add(key)
             log.info("[dry run] would add website signup %s:\n%s", key, to_website_text(clean))
-            return 200, "dry run"
+            return _result(200, "dry run")
         if _delivered(key):
             intake._seen.add(key)
-            return 200, "duplicate"
+            return _result(200, "duplicate")
         path = os.path.join(pending_dir(), _pending_name(key))
         if os.path.exists(path):
-            return 200, "queued (pending)"
+            return _result(200, "queued (pending)")
         for i, delay in enumerate((0.0,) + WEBSITE_RETRY_DELAYS):
             if delay:
                 _sleep(delay)
             try:
                 _deliver_website(intake, clean)
-                return 200, "queued"
+                return _result(200, "queued")
             except Exception as e:
                 if not gmail_client.is_rate_limited(e):
                     raise
@@ -981,7 +1060,30 @@ def accept_website(intake, payload, _sleep=None):
             json.dump({"key": list(key), "payload": payload, "saved": datetime.now(timezone.utc).isoformat()}, fh)
         os.replace(path + ".tmp", path)
         log.warning("Website form: saved %s for retry (Gmail rate limited)", key)
-        return 200, "queued (pending)"
+        return _result(200, "queued (pending)")
+
+NON_PENDING_FILES = {"jobs.json"}
+_warned_pending = set()
+
+
+def _restore_jobs_ledger(d):
+    """One-time repair: build 36d3def moved the job ledger to jobs.json.bad.
+    Merge it back into jobs.json (rows written since then win)."""
+    bad = os.path.join(d, "jobs.json.bad")
+    if not os.path.exists(bad):
+        return
+    try:
+        import job_tracker
+        with open(bad) as fh:
+            old = json.load(fh)
+        with job_tracker._lock:
+            rows = job_tracker._load()
+            merged = dict(old if isinstance(old, dict) else {}, **rows)
+            job_tracker._save(merged)
+        os.remove(bad)
+        log.warning("Job ledger: restored %d row(s) from jobs.json.bad", len(merged))
+    except Exception:
+        log.exception("Job ledger: restore from jobs.json.bad failed")
 
 
 def retry_pending_website(intake):
@@ -991,15 +1093,26 @@ def retry_pending_website(intake):
     import gmail_client
     done = left = 0
     d = pending_dir()
+    _restore_jobs_ledger(d)
     for name in sorted(os.listdir(d)):
-        if not name.endswith(".json"):
+        # jobs.json is job_tracker's ledger, not a pending sign-up: it was the
+        # source of the every-minute KeyError 'payload'.
+        if not name.endswith(".json") or name in NON_PENDING_FILES:
             continue
         path = os.path.join(d, name)
         with intake._lock:
             try:
                 with open(path) as fh:
                     item = json.load(fh)
-                clean, err = validate_website(item["payload"])
+                raw = item.get("payload") if isinstance(item, dict) else None
+                if not isinstance(raw, dict):
+                    # Not a pending sign-up (no "payload"): log once per file and
+                    # skip it, leaving it in place.
+                    if name not in _warned_pending:
+                        _warned_pending.add(name)
+                        log.warning("Website form: %s in pending dir has no 'payload'; skipping", name)
+                    continue
+                clean, err = validate_website(raw)
                 if err:
                     log.error("Website form: dropping invalid pending %s: %s", name, err)
                     os.remove(path)
@@ -1024,6 +1137,7 @@ def retry_pending_website(intake):
 def notify_team_website(service, clean, subject):
     """Also send the same notice to the team inbox (team@playmakerentertainment.com)
     via Amy's normal send path. Best effort: a failure here never breaks intake."""
+    # Always notify team@ immediately, even in queue mode (Thomas, Nov 9 2026).
     import gmail_client
     from config import rules
     tag = clean["ref"] or re.sub(r"[^\w-]", "", clean["email"])
@@ -1093,6 +1207,10 @@ def make_handler(intake, store=None):
 
         def do_GET(self):
             path = urlparse(self.path).path.rstrip("/")
+            if path.startswith("/queue/"):
+                import queue_service
+                code, result = queue_service.handle("GET", self.path, self.headers, None)
+                return self._send(code, "application/json", json.dumps(result).encode())
             if path == "/healthz":
                 return self._reply(200, "ok")
             if path == "/newsletter/optin":
@@ -1207,7 +1325,37 @@ def make_handler(intake, store=None):
             self.end_headers()
             self.wfile.write(data)
 
+        def _job_done(self, ref):
+            headers = {k.lower(): v for k, v in self.headers.items()}
+            if not branded_token_ok(headers):
+                return self._reply(401, "unauthorized")
+            import job_tracker
+            from urllib.parse import unquote
+            ref = unquote(ref)
+            if not ref or job_tracker.get(ref) is None:
+                return self._reply(404, {"done": False, "error": "unknown ref"})
+            if job_tracker.get(ref).get("queue_owned"):
+                return self._reply(409, "Worker jobs require verified worker receipts; not manually completed here")
+            row = job_tracker.mark_done(ref)
+            return self._reply(200, {"done": True, "ref": ref, "done_at": (row or {}).get("done_at")})
+
         def do_POST(self):
+            if urlparse(self.path).path.startswith("/queue/"):
+                import queue_service
+                if not queue_service.authorized(self.headers.get("Authorization", "")):
+                    return self._reply(401, "unauthorized")
+                try:
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < size <= 65536:
+                        return self._reply(400, "invalid body size")
+                    payload = json.loads(self.rfile.read(size))
+                    code, result = queue_service.handle("POST", self.path, self.headers, payload)
+                except (ValueError, TypeError):
+                    return self._reply(400, "invalid JSON body")
+                return self._send(code, "application/json", json.dumps(result).encode())
+            _p = urlparse(self.path).path.rstrip("/")
+            if _p.startswith("/jobs/") and _p.endswith("/done") and _p.count("/") == 3:
+                return self._job_done(_p[len("/jobs/"):-len("/done")])
             if urlparse(self.path).path.rstrip("/") == "/webhooks/website":
                 return self._website()
             if urlparse(self.path).path.rstrip("/") == "/send-branded":
@@ -1231,12 +1379,36 @@ def make_handler(intake, store=None):
                     raise ValueError("not an object")
             except ValueError:
                 return self._reply(400, "bad json")
-            try:
-                code, text = intake.accept(payload)
-            except Exception:
-                log.exception("Posh webhook failed")
-                return self._reply(500, "error")
-            self._reply(code, text)
+            import queue_service
+            receipt = None
+            if queue_service.enabled() and not intake.dry_run:
+                try:
+                    receipt = queue_service.persist_intake("posh", payload)
+                except Exception:
+                    log.exception("Posh durable receipt failed; refusing acknowledgement")
+                    return self._reply(503, "durable intake unavailable")
+            # Posh times out webhooks at ~10 s (HTTP 499) and backs off / drops
+            # deliveries after repeated timeouts; the child-event page lookup can
+            # take far longer. Ack at once and process on a background thread.
+            def _run(p=payload):
+                try:
+                    code, text = intake.accept(p)
+                    if receipt:
+                        queue_service.finish_intake(receipt, code, text)
+                    log.info("Posh webhook order %s processed: %s %s", p.get("order_number"), code, text)
+                except Exception:
+                    log.exception("Posh webhook failed (order %s)", p.get("order_number"))
+            if os.environ.get("POSH_WEBHOOK_SYNC", "").strip().lower() in ("1", "true", "yes"):
+                try:
+                    code, text = intake.accept(payload)
+                    if receipt:
+                        queue_service.finish_intake(receipt, code, text)
+                except Exception:
+                    log.exception("Posh webhook failed")
+                    return self._reply(500, "error")
+                return self._reply(code, text)
+            threading.Thread(target=_run, name="posh-accept", daemon=True).start()
+            self._reply(200, "accepted")
     return Handler
 
 

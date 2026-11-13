@@ -692,7 +692,7 @@ class ChallengeRetryTests(unittest.TestCase):
 
 
 class ConciergeTests(unittest.TestCase):
-    """AMY_CONCIERGE: guest confirmation (no link) + Jose sign-up; no needs-attention."""
+    """AMY_CONCIERGE: guest confirmation (no link) + AMYI jobs/pending notice; no needs-attention."""
 
     catalog = {}  # default: master link unreadable (rules-only fallback)
     guest_confirmation = "true"  # these tests read the immediate guest email
@@ -712,7 +712,7 @@ class ConciergeTests(unittest.TestCase):
             out = main.handle_message(svc, "m1", dry_run=False, labels={})
         return out, sent, submit
 
-    def test_two_emails_guest_confirmation_and_jose(self):
+    def test_two_emails_guest_confirmation_and_pending_notice(self):
         out, sent, submit = self._handle()
         self.assertEqual(out, gmail_client.PROCESSED_LABEL)
         submit.assert_not_called()
@@ -720,10 +720,12 @@ class ConciergeTests(unittest.TestCase):
         guest = next(a for a, k in sent if a[2] == "jane.sample@example.com")
         self.assertEqual(guest[3], "You're on the list — Playmaker Entertainment")
         self.assertNotIn("tickets.taogroup.com", guest[4])  # no signup/promoter link in the guest email
-        jose = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)
-        self.assertIn("Jose", jose[4])
-        self.assertIn("Ref: m1", jose[4])
-        self.assertIn("Promoter:", jose[4])  # promoter name carried to the sign-up email
+        team = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)
+        self.assertTrue(team[3].startswith("Pending: Jane Sample — "))
+        self.assertIn("(event not posted on TAO yet; AMYI will book when live)", team[3])
+        self.assertNotIn("Jose", team[3] + team[4])
+        self.assertIn("Ref: m1", team[4])
+        self.assertIn("Promoter:", team[4])
 
     def _nights(self, year, month, day):
         """Run concierge with a fixed 'today' and return the parsed guest email body."""
@@ -771,8 +773,8 @@ class ConciergeTests(unittest.TestCase):
     def test_unverified_note_when_master_link_unreadable(self):
         self.catalog = {}
         out, sent, submit = self._handle()
-        jose = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)[4]
-        self.assertIn("couldn't read the master link", jose)
+        team = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)[4]
+        self.assertIn("couldn't read the master link", team)
 
     def test_drais_auto_add_reported_in_team_email(self):
         text = FIXTURE.replace("Requested venues: Omnia Nightclub", "Requested venues: Drai's Nightclub")
@@ -781,27 +783,24 @@ class ConciergeTests(unittest.TestCase):
                                return_value=[{"name": "Jane Sample", "ok": True, "error": None}]) as add:
             out, sent, submit = self._handle(text)
         self.assertTrue(add.called)  # Amy added the guest to SpeakeasyGo herself
-        jose = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)[4]
-        self.assertIn("added to SpeakeasyGo", jose)  # result reported to the team
+        team = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)[4]
+        self.assertIn("added to SpeakeasyGo", team)  # result reported to the team
 
-    def test_jose_email_has_tap_signup_links_when_live(self):
+    def test_live_links_become_amyi_jobs_not_manual_email(self):
         from datetime import date
         self.catalog = {
-            ("JEWEL Nightclub", date(2026, 10, 30)): {"url": "https://tickets.taogroup.com/e/jewel-30"},
-            ("Marquee Dayclub", date(2026, 10, 30)): {"url": "https://tickets.taogroup.com/e/marquee-dc-30"},
-            ("OMNIA Nightclub", date(2026, 10, 31)): {"url": "https://tickets.taogroup.com/e/omnia-31"},
+            ("JEWEL Nightclub", date(2026, 10, 30)): {"url": "https://tickets.taogroup.com/e/guest-list-jewel-30"},
+            ("Marquee Dayclub", date(2026, 10, 30)): {"url": "https://tickets.taogroup.com/e/guest-list-marquee-dc-30"},
+            ("OMNIA Nightclub", date(2026, 10, 31)): {"url": "https://tickets.taogroup.com/e/guest-list-omnia-31"},
         }
         try:
             out, sent, submit = self._handle()
         finally:
             self.catalog = {}
-        jose = next(a for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL)[4]
-        submit.assert_not_called()  # Amy never submits; Jose taps and clears the check
-        self.assertIn("https://tickets.taogroup.com/e/jewel-30", jose)      # nightclub tap link
-        self.assertIn("https://tickets.taogroup.com/e/marquee-dc-30", jose) # dayclub tap link
-        self.assertIn("https://tickets.taogroup.com/e/omnia-31", jose)
-        self.assertIn("utm_source=promoter", jose)  # links credit Playmaker
-        self.assertIn("Email: jane.sample@example.com", jose)  # copy-paste details present
+        submit.assert_not_called()
+        bodies = [a[3] + a[4] for a, k in sent if a[2] == main.rules.PLAYMAKER_EMAIL]
+        self.assertFalse(any("Jose" in b or "Pending:" in b for b in bodies))  # all nights live: no pending notice
+        self.assertTrue(any(b.startswith("Amy sign-up: Jane Sample (3 nights)") for b in bodies))
 
     def test_needs_attention_is_suppressed(self):
         # A request missing its email would normally trigger a team alert.
@@ -1152,10 +1151,10 @@ class TicketSauceFeedTests(unittest.TestCase):
 class HeadlinerTests(unittest.TestCase):
     """Flyer-derived headliners are added to the confirmation and sign-up."""
 
-    def test_headliner_in_confirmation_and_jose(self):
+    def test_headliner_in_confirmation_and_pending(self):
         from datetime import date
         import headliners
-        from templates.emails import guest_confirmation, jose_signup_order
+        from templates.emails import guest_confirmation, pending_signup_email
         with mock.patch.object(headliners, "_cache",
                                {"2026-10-09": {"OMNIA Nightclub": "Steve Aoki"}}):
             hl = headliners.headliner("OMNIA Nightclub", date(2026, 10, 9))
@@ -1165,7 +1164,7 @@ class HeadlinerTests(unittest.TestCase):
         req = {"first_name": "Mia", "last_name": "R", "email": "m@x.com", "phone": "1",
                "female_count": 1, "male_count": 0, "start_date": "2026-10-09",
                "end_date": "2026-10-09", "promoter": None}
-        self.assertIn("OMNIA Nightclub (Steve Aoki)", jose_signup_order(req, nights)[1])
+        self.assertIn("OMNIA Nightclub (Steve Aoki)", pending_signup_email(req, nights)[1])
 
     def test_missing_headliner_is_silent(self):
         from templates.emails import guest_confirmation

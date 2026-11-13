@@ -229,7 +229,13 @@ class ServerTests(unittest.TestCase):
     def test_accepts_and_logs_signature_header_name(self):
         with self.assertLogs("amy.posh_webhook", "INFO") as logs:
             code, body = self.post("/webhooks/posh?token=tok", order(), {"X-Posh-Signature": "VALUE123"})
-        self.assertEqual((code, body["result"]), (200, "queued"))
+            import time as _t
+            for _ in range(50):
+                if self.gmail.inserted:
+                    break
+                _t.sleep(0.05)
+        self.assertEqual((code, body["result"]), (200, "accepted"))
+        self.assertEqual(len(self.gmail.inserted), 1)  # processed in the background
         text = "\n".join(logs.output)
         self.assertIn("x-posh-signature", text)
         self.assertNotIn("VALUE123", text)
@@ -244,3 +250,22 @@ class ServerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HandledOrdersTests(unittest.TestCase):
+    def test_hand_booked_order_is_not_a_new_job(self):
+        import posh_webhook as pw
+        import os as _os
+        _os.environ["POSH_HANDLED_ORDERS"] = "39832433"
+        try:
+            intake = pw.Intake(lambda: None, "x@example.com", lookup=lambda *a, **k: None)
+            p = order()
+            p["order_number"] = "39832433"
+            self.assertEqual(intake.accept(p), (200, "duplicate (already handled)"))
+        finally:
+            del _os.environ["POSH_HANDLED_ORDERS"]
+
+    def test_recon_orders_file_is_loaded(self):
+        import posh_webhook as pw
+        self.assertIn("39913558", pw.handled_orders())
+        self.assertIn("39804961", pw.handled_orders())

@@ -305,57 +305,44 @@ def guest_confirmation(first_name, nights, drais=None):
     return "You're on the list — Playmaker Entertainment", "\n\n".join(parts)
 
 
-def jose_signup_order(request, nights, drais_nights=()):
-    """Team email telling the admin (Jose) exactly who to sign up on TAO.
-
-    For each night the chosen venue's direct sign-up link is included when it's
-    live on the feed, so Jose just taps it, clears the quick check himself, and
-    submits — the guest's details are right here to drop in. The link opens the
-    official TAO/TicketSauce page through the promoter link, so it credits
-    Playmaker."""
+def pending_signup_email(request, nights, drais_nights=()):
+    """Team notice for nights whose TAO event isn't posted yet. AMY has
+    recorded a pending job and alerted AMYI, which books it once it's live.
+    Nobody on the team has to do anything."""
     name = f"{request['first_name']} {request['last_name']}".strip()
     party = party_phrase(request['female_count'], request['male_count'])
-    phone = request.get('phone') or '(none)'
+    dates = [n["date"] for n in nights] or list(drais_nights)
+    date_lbl = ", ".join(_long_date(d) for d in dates)
+    if nights:
+        subject = f"Pending: {name} — {date_lbl} (event not posted on TAO yet; AMYI will book when live)"
+    else:
+        subject = f"Drai's: {name} — {date_lbl}"
     lines = [
-        "Jose — tap each night's link below, clear the quick check, and submit. "
-        "The guest's details to drop in are right here. Mark done after.", "",
-        "— Copy-paste details —",
-        f"Name: {name}", f"Email: {request['email']}", f"Phone: {phone}",
+        f"Name: {name}", f"Email: {request['email']}", f"Phone: {request.get('phone') or '(none)'}",
         f"Party: {party}",
         f"Promoter: {request['promoter']}" if request.get("promoter") else "Promoter: (none given)",
         "",
-        "— Nights —",
     ]
     for n in nights:
         line = f"{_long_date(n['date'])} — {n['venue']}"
         if n.get("headliner"):
             line += f" ({n['headliner']})"
-        lines.append(line)
-        if n.get("signup_url"):
-            lines.append(f"    👉 Sign up: {n['signup_url']}")
-        else:
-            lines.append("    (no direct link on the feed — open your promoter dashboard for this one.)")
+        lines.append(line + " — pending (event not posted on TAO yet; AMYI will book when live)")
         if n.get("backups"):
-            lines.append(f"    backups if full: {', '.join(n['backups'])}")
+            lines.append(f"    backups: {', '.join(n['backups'])}")
         if n.get("dayclub"):
-            lines.append(f"    + dayclub: {n['dayclub']} (daytime — add it too)")
-            if n.get("dayclub_url"):
-                lines.append(f"      👉 Sign up: {n['dayclub_url']}")
+            lines.append(f"    + dayclub: {n['dayclub']}")
         if n.get("rerouted_from"):
             lines.append(f"    note: {n['rerouted_from']} skipped — its guest list is closed for "
                          f"same-day sign-ups on Fri/Sat.")
         if n.get("none_live"):
-            lines.append("    note: none of the usual clubs show a live guest list tonight on the "
-                         "master link — check it for what's open.")
+            lines.append("    note: none of the usual clubs show a live guest list on the master link yet.")
         elif n.get("unverified"):
-            lines.append("    note: couldn't read the master link just now — confirm this night "
-                         "is open before signing up.")
+            lines.append("    note: couldn't read the master link just now; AMYI will check it.")
         lines.append("")
     if drais_nights:
         lines += ["Drai’s After Hours: no signup needed — the guest’s "
                   "confirmation carries the door text.", ""]
-    subject = f"Sign up — {name}, {request['start_date']}" + (
-        f" to {request['end_date']}" if request['end_date'] != request['start_date'] else "")
     return subject, "\n".join(lines).rstrip() + "\n"
 
 

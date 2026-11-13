@@ -25,6 +25,18 @@ DAYLIFE_VENUES = [
 
 PAUSED_VENUES = {"Drai's"}  # never submit unless explicitly reactivated
 
+# Human-only clubs (Thomas): the worker never books these.
+MANUAL_VENUES = {
+    "LIV Nightclub",
+    "XS Nightclub",
+    "LIV Beach",
+    "LIV Dayclub",
+    "Encore Beach Club",
+}
+
+# Last night JEWEL may be booked automatically (owner: no JEWEL after Nov 21, 2026).
+JEWEL_LAST_NIGHT = "2026-11-21"
+
 
 def is_drais(name):
     """Drai's has no TAO portal: guests get the Drai's After Hours guest-list
@@ -37,6 +49,8 @@ ALL_AUTHORIZED_VENUES = set(NIGHTCLUBS) | set(DAYLIFE_VENUES)
 
 INTAKE_EMAIL = "valeconsultingaz@gmail.com"
 PLAYMAKER_EMAIL = "team@playmakerentertainment.com"
+# 5-min "AMYI job not done" and 15-min ESCALATED watchdog alerts
+WATCHDOG_ALERT_TO = __import__("os").environ.get("WATCHDOG_ALERT_TO", PLAYMAKER_EMAIL)
 # Wednesday "This Week in Vegas" newsletter list (override with WEEKLY_LINEUP_TO).
 NEWSLETTER_EMAIL = "newsletter@playmakerentertainment.com"
 
@@ -76,6 +90,15 @@ VENUE_ALIASES = {
     "palm tree beach": "Palm Tree Beach Club",
     "lavo party brunch": "LAVO Party Brunch",
     "lavo": "LAVO Party Brunch",
+    "liv": "LIV Nightclub",
+    "liv nightclub": "LIV Nightclub",
+    "xs": "XS Nightclub",
+    "xs nightclub": "XS Nightclub",
+    "liv beach": "LIV Beach",
+    "liv dayclub": "LIV Dayclub",
+    "encore beach club": "Encore Beach Club",
+    "encore beach": "Encore Beach Club",
+    "ebc": "Encore Beach Club",
     "drai's": "Drai's",
     "drais": "Drai's",
     "drai’s": "Drai's",
@@ -127,7 +150,170 @@ def is_scottsdale(name):
 
 
 def is_known_vegas_venue(name):
-    return name in ALL_AUTHORIZED_VENUES or is_drais(name)
+    return name in ALL_AUTHORIZED_VENUES or is_drais(name) or is_manual_venue(name)
+
+
+def is_manual_venue(name):
+    """LIV, XS, LIV Beach and EBC stay manual (never auto-booked)."""
+    key = (name or "").strip()
+    canonical = VENUE_ALIASES.get(key.lower(), key)
+    return canonical in MANUAL_VENUES
+
+
+def jewel_allowed_on(date_obj):
+    """JEWEL may be booked on this date; after JEWEL_LAST_NIGHT, route to fallback."""
+    day = date_obj.isoformat() if hasattr(date_obj, "isoformat") else str(date_obj)
+    return day <= JEWEL_LAST_NIGHT
+
+
+# Days and door/close times used by routing. status "verified" means the days
+# were taken from an official source cited in the comment; "tbd" is an empty
+# schedule Thomas will fill in. A tbd venue is never treated as closed.
+#
+# Closing times marked typical are the official "around 4AM / late" figures
+# (management may change them night to night).
+VENUE_SCHEDULE = {
+    # Official FAQ: "open Tuesday, and Thursday through Sunday from 10:30PM-close.
+    # Typically closing time is around 4AM."
+    # https://taogroup.com/venues/omnia-nightclub-las-vegas/faqs/
+    # Confirmed by tickets.taogroup.com guest lists and the worker ledger
+    # (Tue/Thu/Fri/Sat/Sun, 10:30 PM). One-off Wed 2026-12-30 (Deorro) omitted.
+    "OMNIA Nightclub": {
+        "status": "verified",
+        "days": ["Tuesday", "Thursday", "Friday", "Saturday", "Sunday"],
+        "doors": "10:30 PM",
+        "closes": "4:00 AM",
+    },
+    # Official FAQ: "open Wednesday through Saturday from 10:30PM-close.
+    # Typically closing time is around 4AM."
+    # https://taogroup.com/venues/hakkasan-nightclub-las-vegas/faqs/
+    # Confirmed by tickets.taogroup.com and the worker ledger (Wed-Sat, 10:30 PM).
+    "Hakkasan Nightclub": {
+        "status": "verified",
+        "days": ["Wednesday", "Thursday", "Friday", "Saturday"],
+        "doors": "10:30 PM",
+        "closes": "4:00 AM",
+    },
+    # Owner (Nov 12, 2026): JEWEL is open Friday and Saturday only.
+    # (Official FAQ still lists Monday; owner overrides.)
+    # https://taogroup.com/venues/jewel-nightclub-las-vegas/faqs/
+    # Last night Saturday Nov 21, 2026 (owner). tickets.taogroup.com lists
+    # JEWEL only through that date. Ledger confirms Fri/Sat 10:30 PM.
+    "JEWEL Nightclub": {
+        "status": "verified",
+        "days": ["Friday", "Saturday"],
+        "doors": "10:30 PM",
+        "closes": "4:00 AM",
+        "until": JEWEL_LAST_NIGHT,
+    },
+    # Official contact Hours of Operation: "Monday, Wednesday, Friday – Saturday
+    # | 10:30pm – Close." https://taogroup.com/venues/marquee-nightclub-las-vegas/contact/
+    # tickets.taogroup.com listings (e.g. Sat Nov 14 2026 10:30 PM–4:00 AM) and
+    # the worker ledger match Mon/Wed/Fri/Sat. The FAQ also mentions Sunday
+    # "Drenched"; no Sunday night is on the live TAO calendar, so Sunday is not
+    # recorded until verified.
+    "Marquee Nightclub": {
+        "status": "verified",
+        "days": ["Monday", "Wednesday", "Friday", "Saturday"],
+        "doors": "10:30 PM",
+        "closes": "4:00 AM",
+    },
+    # Official venue Hours of Operation: "Thursday – Sunday 10:30PM-Late."
+    # https://taogroup.com/venues/tao-nightclub-las-vegas/
+    # Also on the TAO Beach contact page. Confirmed by tickets.taogroup.com
+    # (Thu-Sun, 10:30 PM) and Ritual Sundays on the official site.
+    "TAO Nightclub": {
+        "status": "verified",
+        "days": ["Thursday", "Friday", "Saturday", "Sunday"],
+        "doors": "10:30 PM",
+        "closes": "4:00 AM",
+    },
+    # Official contact: "Monday – Sunday | 11am – Close" and FAQ
+    # "Monday – Sunday 11:00AM-6:00PM."
+    # https://taogroup.com/venues/marquee-nightclub-las-vegas/contact/
+    # tickets.taogroup.com and the worker ledger show 11:00 AM (Thu-Sun posted
+    # at the time of writing; official hours still include Mon-Wed).
+    "Marquee Dayclub": {
+        "status": "verified",
+        "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+        "doors": "11:00 AM",
+        "closes": "6:00 PM",
+    },
+    # Official Party Brunch page: "Every Saturday, 12PM – 4PM" from October
+    # through March. 12PM terrace / 1PM main room.
+    # https://taogroup.com/venues/lavo-italian-restaurant-las-vegas/party-brunch/
+    # tickets.taogroup.com lists Saturday 12:00 PM events through mid-March 2027.
+    "LAVO Party Brunch": {
+        "status": "verified",
+        "days": ["Saturday"],
+        "doors": "12:00 PM",
+        "closes": "4:00 PM",
+        "season": {"start_month": 10, "end_month": 3},
+    },
+    # Official After Hours FAQ: "typically open Thursday - Sunday starting at
+    # 1:00AM" and "typically closes at 6:00AM."
+    # https://www.draisgroup.com/faq
+    # Matches the worker's confirmation wording (doors at 1 AM).
+    "Drai's After Hours": {
+        "status": "verified",
+        "days": ["Thursday", "Friday", "Saturday", "Sunday"],
+        "doors": "1:00 AM",
+        "closes": "6:00 AM",
+    },
+    # Official contact pages only say "Closed for the Season" and do not list
+    # in-season days. Thomas will supply these (t922u).
+    "TAO Beach Dayclub": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    "OMNIA Dayclub": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    "Palm Tree Beach Club": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    # Official FAQ lists Wed-Sun 11:00AM-close (typically 5PM) but the contact
+    # page currently says "Closed for the Season" with no published season
+    # window, so Liquid stays tbd for routing until Thomas confirms dates.
+    # https://taogroup.com/venues/liquid-pool-lounge-las-vegas/faqs/
+    "Liquid Pool Lounge": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    # Thomas will supply days and times (t922u). Never treat as closed.
+    "XS Nightclub": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    "LIV Nightclub": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    "LIV Beach": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    "LIV Dayclub": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    "Encore Beach Club": {"status": "tbd", "days": [], "doors": None, "closes": None},
+}
+
+
+def _schedule_key(name):
+    canonical = normalize_venue_name(name or "")
+    if is_drais(canonical):
+        return "Drai's After Hours"
+    return canonical
+
+
+def venue_schedule(name):
+    return VENUE_SCHEDULE.get(_schedule_key(name))
+
+
+def _in_season(date_obj, season):
+    if not season:
+        return True
+    month = date_obj.month
+    start, end = season["start_month"], season["end_month"]
+    if start <= end:
+        return start <= month <= end
+    return month >= start or month <= end
+
+
+def venue_open_on(venue, date_obj):
+    """True or False when the venue has a verified schedule; None when tbd
+    or unknown. None must never be treated as closed."""
+    entry = venue_schedule(venue)
+    if not entry or entry.get("status") != "verified" or not entry.get("days"):
+        return None
+    day = date_obj.isoformat() if hasattr(date_obj, "isoformat") else str(date_obj)
+    until = entry.get("until")
+    if until and day > until:
+        return False
+    if entry.get("season") and not _in_season(date_obj, entry["season"]):
+        return False
+    weekday = date_obj.strftime("%A") if hasattr(date_obj, "strftime") else None
+    return weekday in entry["days"]
 
 
 def normalize_venue_name(name):
@@ -139,7 +325,7 @@ def normalize_venue_name(name):
 # form, Posh webhook, assisted sign-up jobs). Override in Railway with
 # DEFAULT_GUEST_PHONE / DEFAULT_BILLING_ZIP.
 FALLBACK_PHONE = "4802649387"
-FALLBACK_BILLING_ZIP = "85311"
+FALLBACK_BILLING_ZIP = "85281"
 
 
 def fallback_phone():
@@ -278,6 +464,15 @@ TAO_AUTOMATION_AUTHORIZATION = (
 POSH_SERIES_SEEDS = {
     "6a682ff9374ee034d5": ("guest-list-hakkasan", ("11-30", "12-30")),
     "6a80e79648e2b4a133": ("guestlist-tao-nc", ("8-30", "9-30")),
+    "6acab072b53cd5b9c2": ("guestlist-omnia", ("8-0", "9-0")),
+    "6aae53d9c6a734a4ef": ("deseo-omnia", ("8-30", "9-30", "11-30", "12-30")),
+    "6a68319ec56e69cb61": ("guest-list-marquee-night-club", ("8-30", "9-30")),
+    "6acab3e683cace41fb": ("guestlist-jewel-night-club", ("8-0", "9-0")),
+    "69733fedd067ffc440": ("lavo-brunch-party-guest-list", ("1-0", "2-0")),
+    "6a4050b0457303250e": ("guest-list-riot-house", ("9-0",)),
+    "6acbefeaa241f32320": ("almost-famous", ("6-0",)),
+    "6a6be293c3e496d3a4": ("guestlist-drias-after-hours", ("11-0-1", "12-0-1", "11-0", "12-0")),
+    "6a3b6d417796d0f726": ("guestlist-drias-after-hours", ("11-0", "12-0", "11-0-1", "12-0-1")),
 }
 
 # Scottsdale venues (handled via custom confirmations / table partner routing,
@@ -298,6 +493,12 @@ def scottsdale_venue(venues):
     for v in venues or ():
         vl = (v or "").lower()
         for sv in SCOTTSDALE_VENUES:
-            if sv.lower() in vl or (sv == "Riot House" and "riothouse" in vl):
+            if (sv.lower() in vl
+                    or (sv == "Riot House" and "riothouse" in vl)
+                    or (sv == "El Hefe" and "elhefe" in vl)
+                    or (sv == "Cake Nightclub" and "cake" in vl)
+                    or (sv == "Maya Dayclub" and "maya" in vl)):
                 return sv
+        if "scottsdale" in vl:
+            return "Almost Famous"
     return None

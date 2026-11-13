@@ -31,6 +31,7 @@ has succeeded. main.py refuses --live until then.
 import logging
 import os
 import re
+import time
 from datetime import date
 from urllib.parse import urlparse
 
@@ -59,6 +60,13 @@ VENUE_SLUGS = {
 }
 
 UNAVAILABLE_TEXT = re.compile(r"\b(sold out|guest list closed|passes unavailable|event unavailable)\b", re.I)
+ACCESS_CODE_TEXT = re.compile(
+    r"\b(access code|guest(?:\s|-)?list code|enter(?:\s+the)? code|password required|code required)\b", re.I)
+ACCESS_CODE_INPUTS = (
+    "#AccessCode", 'input[name="AccessCode"]', 'input[name="access_code"]',
+    'input[id*="AccessCode" i]', 'input[name*="accesscode" i]',
+    'input[name*="guestcode" i]', 'input[name*="guest-list-code" i]',
+)
 SUCCESS_TEXT = re.compile(
     r"order confirmation|registration confirmed|you(?:'|’)re on the guest list|thank you for your order", re.I)
 MARKETING_TEXT = re.compile(r"marketing|promotional|newsletter|offers|email updates|text messages|sms", re.I)
@@ -160,10 +168,43 @@ _catalog = None  # {(venue, date): url}, loaded once per run
 _snapshot = None  # cached live catalog (TicketSauce feed) per cycle
 
 
+def browser_proxy():
+    """Optional outbound proxy for the browser (AMY_BROWSER_PROXY, e.g.
+    http://user:pass@host:port). Used by the Railway booking worker when
+    datacenter IPs get stuck on TAO's security check. None when unset."""
+    from urllib.parse import urlparse as _parse
+    raw = os.environ.get("AMY_BROWSER_PROXY", "").strip()
+    if not raw:
+        return None
+    u = _parse(raw)
+    if not (u.scheme and u.hostname):
+        return None
+    proxy = {"server": f"{u.scheme}://{u.hostname}" + (f":{u.port}" if u.port else "")}
+    if u.username:
+        from urllib.parse import unquote as _unq
+        proxy["username"] = _unq(u.username)
+        proxy["password"] = _unq(u.password or "")
+    return proxy
+
+
+def _launch_opts():
+    opts = {"headless": os.environ.get("AMY_BROWSER_HEADLESS", "true").lower() != "false",
+            "executable_path": os.environ.get("CHROMIUM_PATH") or None}
+    proxy = browser_proxy()
+    if proxy:
+        opts["proxy"] = proxy
+    # Extra Chrome flags (e.g. --password-store=basic so a copied desktop
+    # profile can read its own saved cookies). Space-separated.
+    extra = os.environ.get("AMY_BROWSER_ARGS", "").split()
+    if extra:
+        opts["args"] = extra
+    return opts
+
+
 def launch_browser(playwright):
     # CHROMIUM_PATH points at a preinstalled Chromium where Playwright's own
     # download isn't available; unset on a normal install.
-    return playwright.chromium.launch(headless=True, executable_path=os.environ.get("CHROMIUM_PATH") or None)
+    return playwright.chromium.launch(**_launch_opts())
 
 
 def access_headers():
@@ -173,6 +214,19 @@ def access_headers():
     return {"X-Playmaker-Access": token} if token else {}
 
 
+class _TabOnly:
+    """close() closes just the tab we opened, never the attached Chrome."""
+
+    def __init__(self, page):
+        self.page = page
+
+    def close(self):
+        try:
+            self.page.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _browser_page(playwright):
     """Returns (closable, page). closable.close() shuts it down either way.
 
@@ -180,14 +234,23 @@ def _browser_page(playwright):
     profile, so once TAO's security check is cleared the pass (its cookie)
     carries over to later runs instead of being thrown away each time. Put
     that folder on a Railway volume so it also survives redeploys."""
+    cdp = os.environ.get("AMY_BROWSER_CDP_URL", "").strip()
+    if cdp:
+        # Attach to an already-running, normally launched Chrome (see
+        # browser_host.py). A Playwright-launched browser carries automation
+        # flags and is re-challenged by Cloudflare even after a human pass; a
+        # plain Chrome is not. Only our own tab is ever closed.
+        browser = playwright.chromium.connect_over_cdp(cdp)
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        page = context.new_page()
+        page.set_default_timeout(15_000)
+        return _TabOnly(page), page
     profile = os.environ.get("AMY_BROWSER_PROFILE", "").strip()
     opts = dict(locale="en-US", timezone_id="America/Los_Angeles",
                 extra_http_headers=access_headers())
-    exe = os.environ.get("CHROMIUM_PATH") or None
     if profile:
         os.makedirs(profile, exist_ok=True)
-        context = playwright.chromium.launch_persistent_context(
-            profile, headless=True, executable_path=exe, **opts)
+        context = playwright.chromium.launch_persistent_context(profile, **_launch_opts(), **opts)
         page = context.pages[0] if context.pages else context.new_page()
         page.set_default_timeout(15_000)
         return context, page
@@ -198,13 +261,78 @@ def _browser_page(playwright):
     return browser, page
 
 
+# Promoter and event pages are large and keep talking to analytics, so
+# networkidle often never comes. Give navigations a full minute, retry a
+# slow goto, and never fail a job just because a load state was late.
+PAGE_LOAD_TIMEOUT_MS = 60_000
+GOTO_RETRIES = 3
+
+
+def _dom_usable(page):
+    """True when the document is far enough along that Pass links can be read."""
+    try:
+        ready = page.evaluate("document.readyState")
+        if ready not in ("interactive", "complete"):
+            return False
+    except Exception:  # noqa: BLE001 - a broken evaluate does not decide this
+        pass
+    try:
+        return bool(page.locator("body").count())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _settle(page):
     """Give the (large) promoter page time to finish loading; its links are
-    usable before every background request finishes."""
+    usable before every background request finishes.
+
+    Never raises just because networkidle or load did not arrive. If the DOM
+    is already usable (as it was when load had fired but networkidle had not),
+    we continue. Later reads will fail on their own if the page is blank."""
     try:
-        page.wait_for_load_state("networkidle", timeout=45_000)
+        page.wait_for_load_state("networkidle", timeout=PAGE_LOAD_TIMEOUT_MS)
+        return
     except Exception:
-        page.wait_for_load_state("load")
+        log.info("TAO page did not reach networkidle; waiting for load")
+    try:
+        page.wait_for_load_state("load", timeout=PAGE_LOAD_TIMEOUT_MS)
+        return
+    except Exception:
+        log.info("TAO page did not reach load; continuing if the DOM is usable")
+    if _dom_usable(page):
+        log.info("TAO page DOM is usable without a finished load state")
+    else:
+        log.warning("TAO page load states did not arrive and the DOM may not be ready")
+
+
+def _goto_promoter(page, url=None):
+    """Open a URL (the promoter page by default) with a 60s timeout.
+
+    On failure, reload and back off, up to GOTO_RETRIES attempts, then raise
+    the last navigation error for the caller to handle."""
+    url = url or TAO_PROMOTER_URL
+    delay = 2
+    last = None
+    for attempt in range(1, GOTO_RETRIES + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
+            return
+        except Exception as exc:  # noqa: BLE001 - any navigation failure is retried here
+            last = exc
+            log.warning("TAO page.goto failed (%s: %s) attempt %d/%d",
+                        type(exc).__name__, str(exc)[:200], attempt, GOTO_RETRIES)
+            if attempt >= GOTO_RETRIES:
+                break
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
+                return
+            except Exception as reload_exc:  # noqa: BLE001
+                last = reload_exc
+                log.warning("TAO page.reload after failed goto also failed (%s: %s)",
+                            type(reload_exc).__name__, str(reload_exc)[:200])
+            time.sleep(delay)
+            delay *= 2
+    raise last
 
 
 def _open_promoter_page(page):
@@ -218,7 +346,7 @@ def _open_promoter_page(page):
     pause = max(int(os.environ.get("TAO_CHALLENGE_WAIT_SECONDS", "12")), 3)
     for attempt in range(waits):
         if attempt == 0:
-            page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
+            _goto_promoter(page)
         _settle(page)
         if not is_security_check(page.title(), page.locator("body").inner_text()):
             return
@@ -226,9 +354,9 @@ def _open_promoter_page(page):
                  pause, attempt + 1, waits)
         page.wait_for_timeout(pause * 1000)
         try:
-            page.reload(wait_until="domcontentloaded")
+            page.reload(wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
         except Exception:
-            page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
+            _goto_promoter(page)
     raise TaoBlocked("TAO's website kept showing a security check (Cloudflare) and it did not clear")
 
 
@@ -242,7 +370,7 @@ def _open_via_promoter(page, url):
         return False
     link = page.locator("a").nth(hrefs.index(url))
     link.evaluate("a => a.removeAttribute('target')")  # stay in this tab
-    with page.expect_navigation(wait_until="domcontentloaded"):
+    with page.expect_navigation(wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS):
         if link.is_visible():
             link.click()
         else:
@@ -399,6 +527,21 @@ def catalog_snapshot():
     return _snapshot
 
 
+def requires_access_code(page):
+    """True when the live listing is gated by an access code (never submit)."""
+    for sel in ACCESS_CODE_INPUTS:
+        try:
+            if page.locator(sel).count():
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    try:
+        body = page.locator("body").inner_text()
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(ACCESS_CODE_TEXT.search(body or ""))
+
+
 def check_availability(venue, date_obj):
     entry = _load_catalog().get((venue, date_obj))
     if not entry:
@@ -412,6 +555,16 @@ def check_availability(venue, date_obj):
             if not _open_via_promoter(page, url):
                 return None
             body = page.locator("body").inner_text()
+            if requires_access_code(page):
+                title = (page.locator("h1, h2").first.text_content() or "").strip()
+                return {
+                    "event": entry.get("event") or title or f"{venue} Guest List",
+                    "event_time": entry.get("event_time"),
+                    "listing_type": "Passes",
+                    "price": 0,
+                    "listing_url": url,
+                    "access_code_required": True,
+                }
             if UNAVAILABLE_TEXT.search(body):
                 return None
             selects = _selects_by_gender(page)
@@ -464,9 +617,26 @@ def _api_or_assisted(listing, guest, rehearse=False):
     return None
 
 
-def submit_registration(listing, guest, rehearse=False):
+def _shot(page, path):
+    """Best-effort full-page screenshot; returns the path or None."""
+    if not path:
+        return None
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        page.screenshot(path=path, full_page=True)
+        return path
+    except Exception:  # noqa: BLE001 - evidence capture must never change the outcome
+        return None
+
+
+def submit_registration(listing, guest, rehearse=False, screenshot_path=None, before_submit=None):
     """rehearse=True fills and checks the whole form, then stops before the
-    final click and returns {"rehearsal": True, ...}: nothing is ordered."""
+    final click and returns {"rehearsal": True, ...}: nothing is ordered.
+
+    screenshot_path: save a full-page screenshot of the confirmation page (or
+    of the filled form when rehearsing). before_submit: callable run right
+    before the final click (the worker writes its "submit started" marker
+    there, so a crash after the click can never lead to a second order)."""
     url = listing.get("listing_url", "")
     if not is_safe_pass_url(url):
         return {"confirmation_id": None, "verified": False, "reason": f"Refusing non-Guest-List URL: {url}"}
@@ -486,6 +656,8 @@ def submit_registration(listing, guest, rehearse=False):
         try:
             if not _open_via_promoter(page, url):
                 return stop("Pass link is no longer on the Playmaker promoter page")
+            if requires_access_code(page):
+                return stop("listing requires an access code")
             selects = _selects_by_gender(page)
             for gender, count in (("female", guest["female_count"]), ("male", guest["male_count"])):
                 if count == 0:
@@ -551,6 +723,7 @@ def submit_registration(listing, guest, rehearse=False):
 
             if rehearse:
                 return {"confirmation_id": None, "verified": False, "rehearsal": True,
+                        "screenshot": _shot(page, screenshot_path), "page_url": page.url,
                         "form": {sel: page.input_value(sel) for sel in
                                  ("#OrderEmail", "#OrderFirstName", "#OrderLastName", "#OrderPostalCode", "#OrderPhone")
                                  if page.locator(sel).count()},
@@ -558,6 +731,8 @@ def submit_registration(listing, guest, rehearse=False):
                         "checkboxes": page.locator('input[type="checkbox"]').evaluate_all(
                             "els => els.map(e => [e.id || e.name || '(unnamed)', e.checked])"),
                         "totals": totals, "submit_button": button.inner_text().strip()}
+            if before_submit is not None:
+                before_submit()
             button.click()
             # From here on the order may exist: never report a plain failure.
             try:
@@ -573,6 +748,7 @@ def submit_registration(listing, guest, rehearse=False):
             except Exception as exc:
                 raise SubmissionUncertain(f"Page failed after submit: {exc}") from exc
             order_id = order_id_from(page.url, body)
+            shot = _shot(page, screenshot_path)
             if not order_id:
                 if not (SUCCESS_TEXT.search(body) or re.search(r"confirmation|ordered=true", page.url, re.I)):
                     raise SubmissionUncertain("TAO did not show a success page after submit")
@@ -581,6 +757,7 @@ def submit_registration(listing, guest, rehearse=False):
                 "confirmation_id": order_id,
                 "verified": True,
                 "confirmation_url": page.url,
+                "screenshot": shot,
                 "event": listing.get("event"),
                 "arrival_text": _arrival_text(body) or listing.get("arrival_text", ""),
                 "authorization": TAO_AUTOMATION_AUTHORIZATION,
