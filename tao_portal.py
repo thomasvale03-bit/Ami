@@ -31,6 +31,7 @@ has succeeded. main.py refuses --live until then.
 import logging
 import os
 import re
+import time
 from datetime import date
 from urllib.parse import urlparse
 
@@ -260,13 +261,78 @@ def _browser_page(playwright):
     return browser, page
 
 
+# Promoter and event pages are large and keep talking to analytics, so
+# networkidle often never comes. Give navigations a full minute, retry a
+# slow goto, and never fail a job just because a load state was late.
+PAGE_LOAD_TIMEOUT_MS = 60_000
+GOTO_RETRIES = 3
+
+
+def _dom_usable(page):
+    """True when the document is far enough along that Pass links can be read."""
+    try:
+        ready = page.evaluate("document.readyState")
+        if ready not in ("interactive", "complete"):
+            return False
+    except Exception:  # noqa: BLE001 - a broken evaluate does not decide this
+        pass
+    try:
+        return bool(page.locator("body").count())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _settle(page):
     """Give the (large) promoter page time to finish loading; its links are
-    usable before every background request finishes."""
+    usable before every background request finishes.
+
+    Never raises just because networkidle or load did not arrive. If the DOM
+    is already usable (as it was when load had fired but networkidle had not),
+    we continue. Later reads will fail on their own if the page is blank."""
     try:
-        page.wait_for_load_state("networkidle", timeout=45_000)
+        page.wait_for_load_state("networkidle", timeout=PAGE_LOAD_TIMEOUT_MS)
+        return
     except Exception:
-        page.wait_for_load_state("load")
+        log.info("TAO page did not reach networkidle; waiting for load")
+    try:
+        page.wait_for_load_state("load", timeout=PAGE_LOAD_TIMEOUT_MS)
+        return
+    except Exception:
+        log.info("TAO page did not reach load; continuing if the DOM is usable")
+    if _dom_usable(page):
+        log.info("TAO page DOM is usable without a finished load state")
+    else:
+        log.warning("TAO page load states did not arrive and the DOM may not be ready")
+
+
+def _goto_promoter(page, url=None):
+    """Open a URL (the promoter page by default) with a 60s timeout.
+
+    On failure, reload and back off, up to GOTO_RETRIES attempts, then raise
+    the last navigation error for the caller to handle."""
+    url = url or TAO_PROMOTER_URL
+    delay = 2
+    last = None
+    for attempt in range(1, GOTO_RETRIES + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
+            return
+        except Exception as exc:  # noqa: BLE001 - any navigation failure is retried here
+            last = exc
+            log.warning("TAO page.goto failed (%s: %s) attempt %d/%d",
+                        type(exc).__name__, str(exc)[:200], attempt, GOTO_RETRIES)
+            if attempt >= GOTO_RETRIES:
+                break
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
+                return
+            except Exception as reload_exc:  # noqa: BLE001
+                last = reload_exc
+                log.warning("TAO page.reload after failed goto also failed (%s: %s)",
+                            type(reload_exc).__name__, str(reload_exc)[:200])
+            time.sleep(delay)
+            delay *= 2
+    raise last
 
 
 def _open_promoter_page(page):
@@ -280,7 +346,7 @@ def _open_promoter_page(page):
     pause = max(int(os.environ.get("TAO_CHALLENGE_WAIT_SECONDS", "12")), 3)
     for attempt in range(waits):
         if attempt == 0:
-            page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
+            _goto_promoter(page)
         _settle(page)
         if not is_security_check(page.title(), page.locator("body").inner_text()):
             return
@@ -288,9 +354,9 @@ def _open_promoter_page(page):
                  pause, attempt + 1, waits)
         page.wait_for_timeout(pause * 1000)
         try:
-            page.reload(wait_until="domcontentloaded")
+            page.reload(wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
         except Exception:
-            page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
+            _goto_promoter(page)
     raise TaoBlocked("TAO's website kept showing a security check (Cloudflare) and it did not clear")
 
 
@@ -304,7 +370,7 @@ def _open_via_promoter(page, url):
         return False
     link = page.locator("a").nth(hrefs.index(url))
     link.evaluate("a => a.removeAttribute('target')")  # stay in this tab
-    with page.expect_navigation(wait_until="domcontentloaded"):
+    with page.expect_navigation(wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS):
         if link.is_visible():
             link.click()
         else:

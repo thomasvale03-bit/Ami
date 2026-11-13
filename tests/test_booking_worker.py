@@ -551,7 +551,169 @@ def test_cdp_retry_goes_manual_if_browser_stays_down(tmp_path, monkeypatch):
     s, api, worker = make(tmp_path, tao=Down())
     s.enqueue('a', raw(), NOW)
     result = worker.run_once()
-    assert result['status'] == 'manual', result
+    # One in-process retry, then leave the job queued for the next pickup
+    # rather than parking it as manual (the browser may be back by then).
+    assert result['status'] == 'retry', result
     assert restarts == [1]
-    assert 'not retried' in result['reason']
-    assert s.get('a')['state'] == 'manual'
+    assert 'left queued for the next pickup' in result['reason']
+    assert s.get('a')['state'] == 'retry'
+
+
+def _timeout():
+    return type('TimeoutError', (Exception,), {})('Timeout 15000ms exceeded.')
+
+
+def test_retryable_browser_error_covers_timeouts_and_navigation():
+    assert bw.retryable_browser_error(_timeout())
+    assert bw.retryable_browser_error(RuntimeError(
+        'Page.goto: net::ERR_CONNECTION_TIMED_OUT at https://tickets.taogroup.com/promoter/x'))
+    assert bw.retryable_browser_error(bw.JobTimeExpired('Job exceeded the 360s time cap'))
+    assert bw.retryable_browser_error(RuntimeError(
+        'BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9335'))
+    assert not bw.retryable_browser_error(RuntimeError('list is closed'))
+    assert not bw.retryable_browser_error(ValueError('bad date'))
+
+
+def test_timeout_before_submit_restarts_and_retries_job(tmp_path, monkeypatch):
+    calls = {'listings': 0, 'restarts': 0}
+
+    class Flaky(FakeTao):
+        def listing(self, venue, night):
+            calls['listings'] += 1
+            if calls['listings'] == 1:
+                raise _timeout()
+            return super().listing(venue, night)
+
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: calls.__setitem__('restarts', calls['restarts'] + 1))
+    s, api, worker = make(tmp_path, tao=Flaky())
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'done', result
+    assert calls['restarts'] == 1 and calls['listings'] == 2
+    assert s.get('a')['state'] == 'done'
+
+
+def test_timeout_before_submit_leaves_queued_if_retry_fails(tmp_path, monkeypatch):
+    class Down(FakeTao):
+        def listing(self, venue, night):
+            raise _timeout()
+
+    restarts = []
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: restarts.append(1))
+    s, api, worker = make(tmp_path, tao=Down())
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'retry', result
+    assert restarts == [1]
+    assert 'left queued for the next pickup' in result['reason']
+    assert s.get('a')['state'] == 'retry'
+
+
+def test_navigation_error_before_submit_is_retryable(tmp_path, monkeypatch):
+    class Down(FakeTao):
+        def listing(self, venue, night):
+            raise RuntimeError('Page.goto: net::ERR_CONNECTION_RESET at https://tickets.taogroup.com/promoter/x')
+
+    restarts = []
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: restarts.append(1))
+    s, api, worker = make(tmp_path, tao=Down())
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'retry', result
+    assert restarts == [1]
+    assert s.get('a')['state'] == 'retry'
+
+
+def test_timeout_after_click_is_uncertain_not_retried(tmp_path, monkeypatch):
+    def boom(before_submit):
+        before_submit()
+        raise _timeout()
+
+    restarts = []
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: restarts.append(1))
+    s, api, worker = make(tmp_path, tao=FakeTao(submit=boom))
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'uncertain', result
+    assert restarts == []
+    assert s.get('a')['state'] == 'submission_uncertain'
+
+
+def test_job_time_cap_unsticks_hung_listing_and_retries(tmp_path, monkeypatch):
+    import threading
+    released = threading.Event()
+    calls = {'listings': 0, 'restarts': 0}
+
+    class Hung(FakeTao):
+        def listing(self, venue, night):
+            calls['listings'] += 1
+            if calls['listings'] == 1:
+                if not released.wait(timeout=2):
+                    raise AssertionError('job cap did not unstick the hung listing')
+                raise _timeout()
+            return super().listing(venue, night)
+
+    import browser_host
+
+    def restart():
+        calls['restarts'] += 1
+        released.set()
+
+    monkeypatch.setattr(browser_host, 'restart', restart)
+    s, api, worker = make(tmp_path, tao=Hung())
+    worker.job_time_cap = 0.05
+    # Use wall-clock time so the cap timer can fire; the frozen NOW clock
+    # would never advance toward the deadline on its own.
+    worker.now = __import__('time').time
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'done', result
+    assert calls['restarts'] >= 1 and calls['listings'] == 2
+    assert s.get('a')['state'] == 'done'
+
+
+def test_job_time_cap_after_submit_is_uncertain_not_retried(tmp_path, monkeypatch):
+    def boom(before_submit):
+        before_submit()
+        raise bw.JobTimeExpired('Job exceeded the 360s time cap')
+
+    restarts = []
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: restarts.append(1))
+    s, api, worker = make(tmp_path, tao=FakeTao(submit=boom))
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'uncertain', result
+    assert restarts == []
+    assert s.get('a')['state'] == 'submission_uncertain'
+
+
+def test_run_with_deadline_cancels_timer_and_does_not_fire_after_success():
+    fired = []
+    result = bw.run_with_deadline(lambda: 'ok', 0.2, on_expire=lambda: fired.append(1))
+    assert result == 'ok'
+    __import__('time').sleep(0.3)
+    assert fired == []
+
+
+def test_run_with_deadline_fires_on_expire_when_overrun():
+    import threading
+    released = threading.Event()
+
+    def hung():
+        if not released.wait(timeout=2):
+            raise AssertionError('deadline did not fire')
+        raise bw.JobTimeExpired('Job exceeded the 0s time cap')
+
+    def expire():
+        released.set()
+
+    try:
+        bw.run_with_deadline(hung, 0.05, on_expire=expire)
+        assert False, 'expected JobTimeExpired'
+    except bw.JobTimeExpired:
+        pass

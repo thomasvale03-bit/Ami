@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -45,6 +46,10 @@ log = logging.getLogger("amy.worker")
 PHOENIX = ZoneInfo("America/Phoenix")
 VEGAS = ZoneInfo("America/Los_Angeles")
 DEFAULT_BASE_URL = "https://amy-production-1616.up.railway.app"
+# One slow TAO page must not stall a whole pickup (the 4 PM Nov 12 hang
+# sat in page.goto for 74 minutes). About six minutes is enough for a
+# normal booking plus a couple of 60s page-load retries.
+JOB_TIME_CAP_SECONDS = 360
 
 
 class Stop(Exception):
@@ -411,13 +416,16 @@ def box_lock(ref):
 
 class Worker:
     def __init__(self, api, ledger, tao=None, drais=None, *, mode="dry-run", evidence_dir=None,
-                 now=None, sleep=time.sleep, email_wait_seconds=None, duplicate_check=None, alerts=None):
+                 now=None, sleep=time.sleep, email_wait_seconds=None, duplicate_check=None, alerts=None,
+                 job_time_cap=None):
         self.api, self.ledger, self.mode = api, ledger, mode
         self.tao, self.drais = tao or TaoBooker(), drais or DraisBooker()
         self.evidence_dir = Path(evidence_dir or os.environ.get("AMY_WORKER_DIR", "/data/worker")) / "evidence"
         self.now, self.sleep = now or time.time, sleep
         self.email_wait = (int(os.environ.get("AMY_WORKER_EMAIL_WAIT_SECONDS", "900"))
                            if email_wait_seconds is None else email_wait_seconds)
+        self.job_time_cap = (int(os.environ.get("AMY_WORKER_JOB_SECONDS", str(JOB_TIME_CAP_SECONDS)))
+                             if job_time_cap is None else job_time_cap)
         # Thomas, Nov 11 2026: off by default so additional sign-ups with the
         # same email/venue/night are booked. The per-job ledger still skips a
         # night already submitted for this job. Set AMY_WORKER_DUPLICATE_CHECK=true
@@ -487,47 +495,71 @@ class Worker:
                 raise Stop("retry", f"Box browser busy (AMYI computerUse holds the TAO lock): {exc}")
             try:
                 stall_watchdog.mark_progress(self.evidence_dir.parent, ref)
-                return self._process(job, ref, token, raw)
+                return self._run_job(job, ref, token, raw)
             finally:
                 lock.__exit__(None, None, None)
         except Stop as stop:
-            meta = {"worker": "railway", **stop.extra}
-            if stop.action == "retry":
-                meta["submission_attempted"] = False
-            code, body = self.api.update(ref, token, stop.action, meta, stop.reason)
-            log.warning("Job %s -> %s: %s (HTTP %s)", ref, stop.action, stop.reason, code)
-            if stop.action in ("manual", "uncertain"):
-                self._alert(ref, stop.action, stop.reason, raw)
-            return {"status": stop.action, "ref": ref, "reason": stop.reason, "http": code}
+            return self._finish_stop(ref, token, raw, stop)
         except Exception as exc:  # noqa: BLE001 - never loop on an unknown failure
-            log.exception("Job %s failed unexpectedly", ref)
-            attempted = any((self.ledger.get(night_key(ref, v, n)) or {}).get("state")
-                            for v, n in self._safe_nights(raw))
-            if not attempted and browser_lost(exc):
-                try:
-                    import browser_host
-                    log.warning("Job %s: browser was down; restarting and retrying once", ref)
-                    browser_host.restart()
-                    return self._process(job, ref, token, raw)
-                except Stop as stop:
-                    meta = {"worker": "railway", **stop.extra}
-                    if stop.action == "retry":
-                        meta["submission_attempted"] = False
-                    code, body = self.api.update(ref, token, stop.action, meta, stop.reason)
-                    log.warning("Job %s -> %s: %s (HTTP %s)", ref, stop.action, stop.reason, code)
-                    if stop.action in ("manual", "uncertain"):
-                        self._alert(ref, stop.action, stop.reason, raw)
-                    return {"status": stop.action, "ref": ref, "reason": stop.reason, "http": code}
-                except Exception as retry_exc:  # noqa: BLE001
-                    log.exception("Job %s retry after browser restart failed", ref)
-                    exc = retry_exc
-                    attempted = any((self.ledger.get(night_key(ref, v, n)) or {}).get("state")
-                                    for v, n in self._safe_nights(raw))
-            action = "uncertain" if attempted else "manual"
-            reason = f"Worker error ({type(exc).__name__}: {str(exc)[:300]}); not retried"
-            self.api.update(ref, token, action, {"worker": "railway"}, reason)
-            self._alert(ref, action, reason, raw)
-            return {"status": action, "ref": ref, "reason": reason}
+            return self._handle_unexpected(job, ref, token, raw, exc)
+
+    def _run_job(self, job, ref, token, raw):
+        """Run one job under the hard time cap so a hung page cannot stall the pickup."""
+        return run_with_deadline(
+            lambda: self._process(job, ref, token, raw),
+            self.job_time_cap,
+            on_expire=lambda: self._unstick_browser(ref),
+            clock=self.now,
+        )
+
+    def _unstick_browser(self, ref):
+        log.warning("Job %s hit the %ss time cap; unsticking the booking browser",
+                    ref, self.job_time_cap)
+        try:
+            import browser_host
+            browser_host.restart()
+        except Exception:  # noqa: BLE001
+            log.exception("Could not unstick the booking browser after the job time cap")
+
+    def _finish_stop(self, ref, token, raw, stop):
+        meta = {"worker": "railway", **stop.extra}
+        if stop.action == "retry":
+            meta["submission_attempted"] = False
+        code, body = self.api.update(ref, token, stop.action, meta, stop.reason)
+        log.warning("Job %s -> %s: %s (HTTP %s)", ref, stop.action, stop.reason, code)
+        if stop.action in ("manual", "uncertain"):
+            self._alert(ref, stop.action, stop.reason, raw)
+        return {"status": stop.action, "ref": ref, "reason": stop.reason, "http": code}
+
+    def _handle_unexpected(self, job, ref, token, raw, exc):
+        log.exception("Job %s failed unexpectedly", ref)
+        attempted = any((self.ledger.get(night_key(ref, v, n)) or {}).get("state")
+                        for v, n in self._safe_nights(raw))
+        if not attempted and retryable_browser_error(exc):
+            try:
+                import browser_host
+                log.warning("Job %s: browser error (%s); restarting and retrying once",
+                            ref, type(exc).__name__)
+                browser_host.restart()
+                return self._run_job(job, ref, token, raw)
+            except Stop as stop:
+                return self._finish_stop(ref, token, raw, stop)
+            except Exception as retry_exc:  # noqa: BLE001
+                log.exception("Job %s retry after browser restart failed", ref)
+                exc = retry_exc
+                attempted = any((self.ledger.get(night_key(ref, v, n)) or {}).get("state")
+                                for v, n in self._safe_nights(raw))
+                if not attempted and retryable_browser_error(exc):
+                    return self._finish_stop(ref, token, raw, Stop(
+                        "retry",
+                        f"Worker error ({type(exc).__name__}: {str(exc)[:300]}); "
+                        "left queued for the next pickup",
+                    ))
+        action = "uncertain" if attempted else "manual"
+        reason = f"Worker error ({type(exc).__name__}: {str(exc)[:300]}); not retried"
+        self.api.update(ref, token, action, {"worker": "railway"}, reason)
+        self._alert(ref, action, reason, raw)
+        return {"status": action, "ref": ref, "reason": reason}
 
     @staticmethod
     def _safe_nights(raw):
@@ -942,6 +974,74 @@ def probe_speakeasy(listing_date=None):
 
 
 
+class JobTimeExpired(Exception):
+    """The job's hard time cap elapsed; the page or browser was unstuck."""
+
+
+class JobDeadline:
+    """Wall-clock cap that interrupts a hung Playwright call by running on_expire.
+
+    Playwright's own timeouts sometimes never fire (the 4 PM Nov 12 goto hang).
+    Closing or restarting Chrome from this timer unblocks the main thread."""
+
+    def __init__(self, seconds, *, on_expire=None, clock=time.time):
+        self.seconds = seconds
+        self.deadline_at = clock() + seconds
+        self.clock = clock
+        self.on_expire = on_expire
+        self._timer = None
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._fired = False
+
+    def start(self):
+        remaining = self.deadline_at - self.clock()
+        if remaining <= 0:
+            self._fire()
+            return self
+        self._timer = threading.Timer(remaining, self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+        return self
+
+    def _fire(self):
+        with self._lock:
+            if self._cancelled or self._fired:
+                return
+            self._fired = True
+        log.warning("Job time cap (%ss) elapsed", self.seconds)
+        if self.on_expire:
+            try:
+                self.on_expire()
+            except Exception:  # noqa: BLE001
+                log.exception("job time cap unstick failed")
+
+    def expired(self):
+        return self._fired or self.clock() >= self.deadline_at
+
+    def check(self):
+        if self.expired():
+            raise JobTimeExpired(f"Job exceeded the {self.seconds:.0f}s time cap")
+
+    def cancel(self):
+        with self._lock:
+            self._cancelled = True
+        if self._timer is not None:
+            self._timer.cancel()
+
+
+def run_with_deadline(fn, seconds, *, on_expire=None, clock=time.time):
+    """Run fn; if it overruns `seconds`, call on_expire to unstick the browser."""
+    if seconds is None or seconds <= 0:
+        return fn()
+    deadline = JobDeadline(seconds, on_expire=on_expire, clock=clock).start()
+    try:
+        deadline.check()
+        return fn()
+    finally:
+        deadline.cancel()
+
+
 def browser_lost(exc):
     """True when the failure is a dead/unreachable booking Chrome, not a booking rule."""
     text = f"{type(exc).__name__}: {exc}".lower()
@@ -953,6 +1053,36 @@ def browser_lost(exc):
         "browser closed",
         "target page, context or browser has been closed",
         "connection refused",
+    ))
+
+
+def retryable_browser_error(exc):
+    """True for a pre-submit Playwright timeout, navigation failure, or dead Chrome.
+
+    These are safe to retry only when nothing has been submitted yet. The
+    caller must still check the ledger before retrying."""
+    if isinstance(exc, JobTimeExpired) or browser_lost(exc):
+        return True
+    name = type(exc).__name__.lower()
+    text = f"{name}: {exc}".lower()
+    if "timeouterror" in name:
+        return True
+    return any(s in text for s in (
+        "ms exceeded",
+        "page.goto",
+        "page.reload",
+        "wait_for_load_state",
+        "navigation failed",
+        "navigation timeout",
+        "net::err_",
+        "err_connection",
+        "err_aborted",
+        "err_timed_out",
+        "frame was detached",
+        "execution context was destroyed",
+        "target closed",
+        "connection closed",
+        "job exceeded the",
     ))
 
 
