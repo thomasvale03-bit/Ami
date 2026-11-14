@@ -53,12 +53,19 @@ class RulesTests(unittest.TestCase):
 
 
 class HandleMessageTests(unittest.TestCase):
-    def _handle(self, text):
-        sent, notes = [], []
-        with mock.patch.dict(os.environ, {"AMY_CONCIERGE": "true", "AMY_GUEST_CONFIRMATION": "true",
-                                          "ASSISTED_SIGNUP": "true", "POSH_CONSENT_ON_FILE": "true"}), \
+    def _handle(self, text, queue_on=False, already_handled=False, already_confirmed=False,
+                needs_review=False, env=None):
+        sent, notes, enqueued = [], [], []
+        environ = {"AMY_CONCIERGE": "true", "AMY_GUEST_CONFIRMATION": "true",
+                   "ASSISTED_SIGNUP": "true", "POSH_CONSENT_ON_FILE": "true",
+                   "AMY_QUEUE_ENABLED": "true" if queue_on else ""}
+        if env:
+            environ.update(env)
+        with mock.patch.dict(os.environ, environ, clear=False), \
              mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, text)), \
-             mock.patch.object(gmail_client, "posh_order_already_handled", return_value=False), \
+             mock.patch.object(gmail_client, "posh_order_already_handled", return_value=already_handled), \
+             mock.patch.object(gmail_client, "already_sent", return_value=already_confirmed), \
+             mock.patch.object(gmail_client, "website_ref_already_handled", return_value=False), \
              mock.patch.object(gmail_client, "send_once",
                                side_effect=lambda *a, **k: sent.append((a, k)) or True), \
              mock.patch.object(main.amyi, "notify", side_effect=lambda *a, **k: notes.append((a, k))), \
@@ -66,10 +73,13 @@ class HandleMessageTests(unittest.TestCase):
              mock.patch.object(tao_portal, "submit_registration") as submit, \
              mock.patch.object(tao_portal, "catalog_snapshot", return_value=CATALOG), \
              mock.patch.object(main, "send_assisted_jobs") as jobs, \
+             mock.patch.object(main.posh_webhook, "needs_review", return_value=needs_review), \
+             mock.patch.object(main.queue_service, "enqueue",
+                               side_effect=lambda *a, **k: enqueued.append((a, k)) or {"state": "queued"}), \
              mock.patch.object(main, "datetime") as dt:
             dt.now.return_value = __import__("datetime").datetime(2026, 10, 1, 12, 0)
             out = main.handle_message(mock.MagicMock(), "m1", dry_run=False, labels={})
-        return out, sent, notes, submit, jobs
+        return out, sent, notes, submit, jobs, enqueued
 
     def _assert_no_tao(self, out, sent, submit, jobs, expected_label=gmail_client.PROCESSED_LABEL):
         self.assertEqual(out, expected_label)
@@ -80,7 +90,7 @@ class HandleMessageTests(unittest.TestCase):
             self.assertNotIn("Marquee", str(a))
 
     def test_contact_form_riot_house(self):
-        out, sent, notes, submit, jobs = self._handle(
+        out, sent, notes, submit, jobs, enqueued = self._handle(
             FORM.replace("Requested venues: Omnia Nightclub", "Requested venues: Riot House Scottsdale"))
         self._assert_no_tao(out, sent, submit, jobs, gmail_client.PROCESSED_LABEL)
         self.assertEqual(len(sent), 2)  # guest confirmation + website team summary
@@ -88,16 +98,94 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(notes, [])  # mark_job suppresses Grok Bot contact_form wake
 
     def test_posh_almost_famous(self):
-        out, sent, notes, submit, jobs = self._handle(
+        out, sent, notes, submit, jobs, enqueued = self._handle(
             POSH.replace("Playmaker Tuesdays at OMNIA", "Almost Famous Guestlist"))
         self._assert_no_tao(out, sent, submit, jobs, gmail_client.PROCESSED_LABEL)
         self.assertEqual(len(sent), 2)  # guest confirmation + team summary (always, incl. Posh AF/Riot House)
         self.assertIn("You're on the list: Almost Famous", sent[0][0][3])
         self.assertTrue(sent[1][0][3].startswith("Signed up: "))
+        self.assertEqual(sent[1][0][2], rules.PLAYMAKER_EMAIL)
+        self.assertEqual(enqueued, [])
+        self.assertEqual(notes, [])
+        blob = "\n".join(str(a) + str(k) for a, k in sent)
+        self.assertNotIn("+16025550100", blob)
+        self.assertNotRegex(blob, r"(?i)\bphone\b")
+        self.assertNotIn("jarvis", blob.lower())
+        self.assertNotIn("infojarvis", blob.lower())
+
+
+    def test_posh_almost_famous_sends_in_queue_mode(self):
+        """Queue mode must not swallow Riot House / Almost Famous confirmations."""
+        out, sent, notes, submit, jobs, enqueued = self._handle(
+            POSH.replace("Playmaker Tuesdays at OMNIA", "Almost Famous Guestlist"),
+            queue_on=True)
+        self._assert_no_tao(out, sent, submit, jobs, gmail_client.PROCESSED_LABEL)
+        self.assertEqual(len(sent), 2)
+        self.assertIn("You're on the list: Almost Famous", sent[0][0][3])
+        self.assertIn("Posh order: 1001", sent[0][0][4])
+        self.assertTrue(sent[1][0][3].startswith("Signed up: "))
+        self.assertEqual(sent[1][0][2], "team@playmakerentertainment.com")
+        self.assertEqual(enqueued, [])
         self.assertEqual(notes, [])
 
+    def test_posh_riot_house_sends_in_queue_mode(self):
+        out, sent, notes, submit, jobs, enqueued = self._handle(
+            POSH.replace("Playmaker Tuesdays at OMNIA", "Riot House | Guest List"),
+            queue_on=True)
+        self._assert_no_tao(out, sent, submit, jobs, gmail_client.PROCESSED_LABEL)
+        self.assertEqual(len(sent), 2)
+        self.assertIn("You're on the list: Riot House", sent[0][0][3])
+        self.assertTrue(sent[1][0][3].startswith("Signed up: "))
+        self.assertEqual(enqueued, [])
+
+    def test_posh_scottsdale_confirms_despite_recurring_date_review(self):
+        """Wajhee-style recurring_guess_needs_review must not block the confirmation."""
+        out, sent, notes, submit, jobs, enqueued = self._handle(
+            POSH.replace("Playmaker Tuesdays at OMNIA", "Almost Famous"),
+            queue_on=True, needs_review=True)
+        self._assert_no_tao(out, sent, submit, jobs, gmail_client.PROCESSED_LABEL)
+        self.assertEqual(len(sent), 2)
+        self.assertIn("You're on the list: Almost Famous", sent[0][0][3])
+        self.assertEqual(enqueued, [])
+
+    def test_posh_order_deduped_to_one_confirmation(self):
+        out, sent, notes, submit, jobs, enqueued = self._handle(
+            POSH.replace("Playmaker Tuesdays at OMNIA", "Riot House | Guest List"),
+            queue_on=True, already_handled=True)
+        self.assertEqual(out, gmail_client.PROCESSED_LABEL)
+        self.assertEqual(sent, [])
+        self.assertEqual(enqueued, [])
+        submit.assert_not_called()
+
+    def test_posh_order_already_confirmed_in_sent_is_deduped(self):
+        out, sent, notes, submit, jobs, enqueued = self._handle(
+            POSH.replace("Playmaker Tuesdays at OMNIA", "Almost Famous Guestlist"),
+            queue_on=True, already_confirmed=True)
+        self.assertEqual(out, gmail_client.PROCESSED_LABEL)
+        self.assertEqual(sent, [])
+        self.assertEqual(enqueued, [])
+
+    def test_vegas_posh_still_enqueues_in_queue_mode(self):
+        out, sent, notes, submit, jobs, enqueued = self._handle(POSH, queue_on=True)
+        self.assertEqual(out, gmail_client.PROCESSED_LABEL)
+        self.assertEqual(sent, [])
+        self.assertEqual(len(enqueued), 1)
+        submit.assert_not_called()
+        jobs.assert_not_called()
+
+    def test_late_friday_signup_still_gets_confirmation(self):
+        """Signups after the 7:43 PM door list still get a confirmation email."""
+        out, sent, notes, submit, jobs, enqueued = self._handle(
+            POSH.replace("Playmaker Tuesdays at OMNIA", "Riot House | Guest List"),
+            queue_on=True)
+        self.assertEqual(len(sent), 2)
+        self.assertIn("You're on the list: Riot House", sent[0][0][3])
+        # Door-list job is a separate scheduled send; this path must not emit one.
+        for a, k in sent:
+            self.assertNotIn("Guest List —", str(a[3]) if len(a) > 3 else "")
+
     def test_unknown_venue_goes_to_team_not_default(self):
-        out, sent, notes, submit, jobs = self._handle(
+        out, sent, notes, submit, jobs, enqueued = self._handle(
             FORM.replace("Requested venues: Omnia Nightclub", "Requested venues: Mystery Lounge"))
         self._assert_no_tao(out, sent, submit, jobs, gmail_client.EXCEPTION_LABEL)
         self.assertEqual(sent, [])  # needs-attention is suppressed in concierge mode
