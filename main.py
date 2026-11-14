@@ -172,6 +172,22 @@ def handle_scottsdale_request(service, message_id, raw, dry_run):
     return gmail_client.PROCESSED_LABEL
 
 
+def scottsdale_door_list_query(q_term):
+    """Gmail query for Scottsdale door-list source mail.
+
+    Posh webhook signups are inserted From=To the intake inbox, so Gmail
+    also applies the SENT label. A bare ``-in:sent`` therefore drops them
+    and the list goes out as "Posh shows 0 orders". Keep ``-in:sent`` for
+    other mail (confirmations, prior door lists) and always include
+    ``NEW POSH SIGNUP`` messages, including Sent. Callers still dedupe
+    parsed orders by Posh order number.
+    """
+    return (
+        f'(({q_term}) newer_than:14d -in:sent) '
+        f'OR (subject:"NEW POSH SIGNUP" ({q_term}) newer_than:14d)'
+    )
+
+
 def send_scottsdale_door_lists(service, mode, now=None):
     """On Friday and Saturday evenings at/after 7:43 PM America/Phoenix, send
     tonight's Riot House and Almost Famous guest-list rundown emails to
@@ -197,7 +213,7 @@ def send_scottsdale_door_lists(service, mode, now=None):
 
         q_term = '"Riot House" OR "riothouse"' if venue == "Riot House" else '"Almost Famous"'
         resp = service.users().messages().list(
-            userId="me", q=f"({q_term}) newer_than:14d -in:sent", maxResults=100
+            userId="me", q=scottsdale_door_list_query(q_term), maxResults=100
         ).execute()
         orders = []
         seen_keys = set()
