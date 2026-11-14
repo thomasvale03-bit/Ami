@@ -184,7 +184,7 @@ p.b{{color:#BDBDBD;font-size:16px;line-height:24px;margin:16px 0 0}}
 a.btn{{display:inline-block;margin-top:26px;padding:13px 34px;border-radius:30px;background:#D4AF37;color:#0d0d0d;font-weight:700;text-decoration:none}}
 .f{{color:#5f5f5f;font-size:12px;padding:0 32px 28px}}</style></head>
 <body><div class="c"><div class="bar"></div><div class="p">
-<img src="https://isteam.wsimg.com/genai-assistant/logoagent/customer/86557a2a-428d-40d8-87e7-0710f78e0dfa/session/272ddf34-d38d-44d8-8ae9-33cd91a55c2f/horizontal-transparent-0582e683-5deb-43fb-80b9-0ac1ca56ae18/logo-logo.png/:/rs=w:560" width="220" alt="Playmaker Entertainment" style="max-width:100%;margin-bottom:24px">
+<img src="https://playmakerentertainment.com/brand/logo-email.jpg" width="220" alt="Playmaker Entertainment" style="max-width:100%;margin-bottom:24px">
 <p class="k">{kicker}</p><h1>{title}</h1><p class="b">{body}</p>
 <a class="btn" href="https://playmakerentertainment.com">Visit Playmaker</a></div>
 <div class="f">Questions? Email <a href="mailto:info@playmakerentertainment.com" style="color:#C9A84C">info@playmakerentertainment.com</a><br>Playmaker Entertainment &middot; Las Vegas</div></div></body></html>"""
