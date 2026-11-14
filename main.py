@@ -56,7 +56,12 @@ PHOENIX = ZoneInfo("America/Phoenix")
 
 def _send_branded_or_gmail(service, message_id, to, subject, text, html, dedupe_query=None):
     """Send from info@playmakerentertainment.com via Zoho SMTP (send_branded)
-    when Zoho is configured, falling back to gmail_client.send_once."""
+    when Zoho is configured, falling back to gmail_client.send_once.
+
+    A prior matching send (Gmail Sent, branded_sent log, or send_branded's
+    "duplicate" reply) counts as success so a retry never raises SEND FAILED
+    after the guest already got the email.
+    """
     dq = dedupe_query or f'to:{to} subject:"{subject}" newer_than:7d'
     if posh_webhook.zoho_configured():
         code, res = posh_webhook.send_branded(service, {
@@ -66,11 +71,42 @@ def _send_branded_or_gmail(service, message_id, to, subject, text, html, dedupe_
             "html": html,
             "dedupe_query": dq,
         })
-        return code == 200 and isinstance(res, dict) and bool(res.get("sent"))
-    return gmail_client.send_once(
+        if code == 200 and isinstance(res, dict) and bool(res.get("sent")):
+            return True
+        if code == 200 and isinstance(res, str) and "duplicate" in res.lower():
+            return True
+        return False
+    # send_once returns False when the dedupe query already matches Sent.
+    if gmail_client.send_once(
         service, message_id, to, subject, text,
         sender=posh_webhook.branded_from(), html=html, dedupe_query=dq,
-    )
+    ):
+        return True
+    try:
+        return gmail_client.already_sent(service, dq) is True
+    except Exception:
+        return False
+
+
+def _posh_order_already_confirmed(service, order_id, message_id):
+    """True if this Posh order already got a Scottsdale confirmation.
+
+    Checks a prior intake message labeled processed/exception, and Sent or
+    branded-send records that mention the order number (the team summary
+    includes "Posh order: {id}"; the guest text part does too).
+    """
+    if not order_id:
+        return False
+    try:
+        if gmail_client.posh_order_already_handled(service, order_id, message_id) is True:
+            return True
+    except Exception:
+        log.exception("posh_order_already_handled failed for %s", order_id)
+    try:
+        return gmail_client.already_sent(service, f'"Posh order: {order_id}"') is True
+    except Exception:
+        log.exception("already_sent check failed for Posh order %s", order_id)
+        return False
 
 
 def handle_scottsdale_request(service, message_id, raw, dry_run):
@@ -114,19 +150,31 @@ def handle_scottsdale_request(service, message_id, raw, dry_run):
         return gmail_client.PROCESSED_LABEL
 
     order_id = (raw.get("posh") or {}).get("order_number") or ""
+    if _posh_order_already_confirmed(service, order_id, message_id):
+        log.info("%s: Posh order %s already confirmed; not sending again", message_id, order_id)
+        return gmail_client.PROCESSED_LABEL
+
     _track(message_id, name=full_name, email=email, venue=canonical, dates=nights, order_id=order_id)
+
+    # Order # is on the text part only, for dedupe; the HTML template is unchanged.
+    guest_text = text if not order_id else f"{text.rstrip()}\n\nPosh order: {order_id}"
+    guest_dq = (
+        f'to:{email} "Posh order: {order_id}" newer_than:30d'
+        if (email and order_id) else
+        f'to:{email} subject:"{subject}" newer_than:7d'
+    )
 
     sent_ok = False
     if email:
         try:
             sent_ok = bool(_send_branded_or_gmail(
                 service,
-                f"amy-scottsdale-{message_id}@playmakerentertainment.com",
+                f"amy-scottsdale-{order_id or message_id}@playmakerentertainment.com",
                 email,
                 subject,
-                text,
+                guest_text,
                 html,
-                dedupe_query=f'to:{email} subject:"{subject}" newer_than:7d',
+                dedupe_query=guest_dq,
             ))
         except Exception:
             log.exception("%s: Scottsdale confirmation send raised", message_id)
@@ -146,7 +194,6 @@ def handle_scottsdale_request(service, message_id, raw, dry_run):
          f"AMY could NOT send this guest's Scottsdale confirmation. AMYI has been alerted.\n\n")
         + f"Name: {full_name or '(none)'}\n"
         f"Email: {email}\n"
-        f"Phone: {raw.get('phone') or (raw.get('posh') or {}).get('phone') or '(none)'}\n"
         f"Venue: {canonical}\n"
         f"Dates: {', '.join(nights)}\n"
         f"Party: {f_cnt}F / {m_cnt}M\n"
@@ -162,7 +209,11 @@ def handle_scottsdale_request(service, message_id, raw, dry_run):
             tsub,
             tbody,
             thtml,
-            dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Ref: {message_id}"',
+            dedupe_query=(
+                f'to:{rules.PLAYMAKER_EMAIL} "Posh order: {order_id}" newer_than:30d'
+                if order_id else
+                f'to:{rules.PLAYMAKER_EMAIL} "Ref: {message_id}"'
+            ),
         )
     except Exception:
         log.exception("%s: Scottsdale team summary send failed", message_id)
@@ -1013,6 +1064,25 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
                                            and any(a in body.lower() for a in allowlist)):
             log.info("[test mode] leaving %s untouched (not from an allowlisted address)", message_id)
             return None
+
+    # Riot House / Almost Famous (and other Scottsdale clubs) are email-only:
+    # send the guest confirmation immediately, including in queue mode, and
+    # do not enqueue a Vegas booking job. Recurring-date review and missing
+    # TAO consent must not block these confirmations.
+    if non_vegas_venue_problem(raw) == "scottsdale":
+        if raw.get("source") == "Posh":
+            order = (raw.get("posh") or {}).get("order_number")
+            if gmail_client.posh_order_already_handled(service, order, message_id):
+                log.info("%s: POSH order %s was already processed; not confirming it again", message_id, order)
+                return gmail_client.PROCESSED_LABEL
+        if raw.get("form_ref") and raw.get("source") != "Posh":
+            if (raw["form_ref"] in _WEBSITE_REFS_SEEN
+                    or (not dry_run and gmail_client.website_ref_already_handled(service, raw["form_ref"], message_id))):
+                log.info("%s: website submission %s was already processed; not confirming it again", message_id, raw["form_ref"])
+                return gmail_client.PROCESSED_LABEL
+            _WEBSITE_REFS_SEEN.add(raw["form_ref"])
+        log.info("%s: Scottsdale venue %s; sending Scottsdale confirmation (no TAO Vegas)", message_id, raw.get("venues"))
+        return handle_scottsdale_request(service, message_id, raw, dry_run)
 
     # Intake remains active. Persist source before routing/browser/email.
     # Existing operational ledger rows are deliberately NOT migrated.
