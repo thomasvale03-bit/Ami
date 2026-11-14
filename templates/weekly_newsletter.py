@@ -18,9 +18,7 @@ from datetime import date, timedelta
 
 CONTACT = "info@playmakerentertainment.com"
 SIGNUP = "https://playmakerentertainment.com"
-LOGO = ("https://isteam.wsimg.com/genai-assistant/logoagent/customer/86557a2a-428d-40d8-87e7-0710f78e0dfa/"
-        "session/272ddf34-d38d-44d8-8ae9-33cd91a55c2f/horizontal-transparent-0582e683-5deb-43fb-80b9-0ac1ca56ae18/"
-        "logo-logo.png/:/rs=w:560")
+LOGO = "https://playmakerentertainment.com/brand/logo-email.jpg"
 LINEUP_FILES = (("weekly_nightclub.jpg", "lineup-nightclub", "TAO Group nightclub lineup"),
                 ("weekly_dayclub.jpg", "lineup-dayclub", "TAO Group dayclub lineup"))
 VENUE_CODES = {"OMNIA Nightclub": "OMNC", "Hakkasan Nightclub": "HKLV", "JEWEL Nightclub": "JWL",
