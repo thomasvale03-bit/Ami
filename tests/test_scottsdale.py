@@ -115,6 +115,75 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(sent[1][1], "Almost Famous Guest List — Fri Oct 23")
         self.assertIn("No guests yet. Posh shows 0 orders for tonight.", sent[0][2])
 
+    def test_door_list_query_includes_sent_webhooks(self):
+        q = main.scottsdale_door_list_query('"Almost Famous"')
+        self.assertIn("newer_than:14d", q)
+        self.assertIn('subject:"NEW POSH SIGNUP"', q)
+        self.assertIn('"Almost Famous"', q)
+        # Sent webhook mail is included; -in:sent is not applied to that branch.
+        self.assertIn('OR (subject:"NEW POSH SIGNUP"', q)
+
+    def test_send_scottsdale_door_lists_includes_sent_webhooks_and_dedupes(self):
+        """Webhook self-mail (SENT+INBOX) is counted once per Posh order #."""
+        wajhee = (
+            "NEW POSH CLIENT\nCLIENT INFORMATION\nName: Wajhee Amer\n"
+            "Email: wajhee.amer.24@gmail.com\nEVENT INFORMATION\n"
+            "Event: Almost Famous\nEvent Date: 2026-11-14T02:00:00.000Z\n"
+            "Ticket: Female Admission,Male Admission\nORDER INFORMATION\n"
+            "Order Number: 40722378\nSOURCE: POSH WEBHOOK\n"
+        )
+        bodies = {"inbox-copy": wajhee, "sent-copy": wajhee}
+        subjects = {
+            "inbox-copy": "NEW POSH SIGNUP (webhook) #40722378 Almost Famous",
+            "sent-copy": "NEW POSH SIGNUP (webhook) #40722378 Almost Famous",
+        }
+        current_mid = {"id": None}
+        sent, queries = [], []
+
+        def list_side_effect(*args, **kwargs):
+            queries.append(kwargs.get("q") or "")
+            listed = mock.MagicMock()
+            if '"Almost Famous"' in (kwargs.get("q") or ""):
+                listed.execute.return_value = {
+                    "messages": [{"id": "inbox-copy"}, {"id": "sent-copy"}]
+                }
+            else:
+                listed.execute.return_value = {"messages": []}
+            return listed
+
+        def get_body(service, mid):
+            current_mid["id"] = mid
+            return {}, bodies[mid]
+
+        def get_subject(msg):
+            return subjects[current_mid["id"]]
+
+        svc = mock.MagicMock()
+        svc.users().messages().list.side_effect = list_side_effect
+        friday_evening = __import__("datetime").datetime(
+            2026, 11, 13, 19, 45, tzinfo=main.PHOENIX
+        )
+        with mock.patch.object(gmail_client, "already_sent", return_value=False), \
+             mock.patch.object(gmail_client, "get_plain_text_body", side_effect=get_body), \
+             mock.patch.object(gmail_client, "get_subject", side_effect=get_subject), \
+             mock.patch.object(main, "_send_branded_or_gmail",
+                               side_effect=lambda s, mid, to, subj, txt, html, **kw: sent.append((to, subj, txt)) or True):
+            count = main.send_scottsdale_door_lists(svc, "live", now=friday_evening)
+
+        self.assertEqual(count, 2)
+        self.assertTrue(any('subject:"NEW POSH SIGNUP"' in q for q in queries))
+        self.assertEqual(sent[0][1], "Riot House Guest List — Fri Nov 13")
+        self.assertIn("No guests yet. Posh shows 0 orders for tonight.", sent[0][2])
+        self.assertEqual(sent[1][1], "Almost Famous Guest List — Fri Nov 13")
+        af = sent[1][2]
+        self.assertIn("Wajhee Amer", af)
+        self.assertIn("#40722378", af)
+        self.assertIn("1 woman", af)
+        self.assertIn("1 man", af)
+        self.assertIn("2 guests", af)
+        self.assertIn("1 order", af)
+        self.assertEqual(af.count("Wajhee Amer"), 1)
+        self.assertEqual(af.count("#40722378"), 1)
 
 if __name__ == "__main__":
     unittest.main()
