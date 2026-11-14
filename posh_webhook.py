@@ -593,6 +593,37 @@ WEBSITE_VENUES = {
                   "Palm Tree Beach Club", "LAVO Party Brunch"},
     "Scottsdale": {"Almost Famous", "Riot House", "Cake", "El Hefe", "Maya Day Club", "Maya Night Club"},
 }
+# Notify-only website venues (Thomas, Nov 14 2026): accepted by intake, but the
+# only action is one branded team@ email. No Gmail intake insert (so no parse,
+# booking job, OMNIA/closed-night fallback, Marquee Dayclub add or guest email).
+WEBSITE_NOTIFY_ONLY = {
+    "Las Vegas": {"ZOUK", "Ghostbar", "XS", "Encore Beach Club", "LIV", "LIV Beach"},
+}
+WEBSITE_NOTIFY_ONLY_ALIASES = (
+    ("zouk nightclub", "Las Vegas", "ZOUK"),
+    ("zouk", "Las Vegas", "ZOUK"),
+    ("ghostbar", "Las Vegas", "Ghostbar"),
+    ("ghost bar", "Las Vegas", "Ghostbar"),
+    ("xs nightclub", "Las Vegas", "XS"),
+    ("xs", "Las Vegas", "XS"),
+    ("encore beach club", "Las Vegas", "Encore Beach Club"),
+    ("encore beach", "Las Vegas", "Encore Beach Club"),
+    ("ebc", "Las Vegas", "Encore Beach Club"),
+    ("liv beach", "Las Vegas", "LIV Beach"),
+    ("liv nightclub", "Las Vegas", "LIV"),
+    ("liv las vegas", "Las Vegas", "LIV"),
+    ("liv", "Las Vegas", "LIV"),
+)
+
+
+def is_notify_only(city, venue):
+    return venue in WEBSITE_NOTIFY_ONLY.get(city, ())
+
+
+def _website_venue_ok(city, venue):
+    return venue in WEBSITE_VENUES.get(city, ()) or is_notify_only(city, venue)
+
+
 WEBSITE_SOURCES = {"guestlistgo": "GuestlistGo", "playmaker": "Playmaker"}
 # Playmaker site (preview + production) is always allowed next to the env list.
 PLAYMAKER_ORIGINS = {"https://playmaker-web-production.up.railway.app",
@@ -680,6 +711,17 @@ def _match_website_venue(raw_text):
     best = None
     best_idx = 10**9
     for alias, v_city, canonical in WEBSITE_VENUE_ALIASES:
+        m = re.search(r"(?:^|[^a-z0-9])" + re.escape(alias) + r"(?:[^a-z0-9]|$)", low, re.I)
+        if m and m.start() < best_idx:
+            best_idx = m.start()
+            best = (v_city, canonical)
+    if best:
+        return best
+    # Notify-only venues: only when no bookable venue is named (existing behavior unchanged).
+    for alias, v_city, canonical in WEBSITE_NOTIFY_ONLY_ALIASES:
+        if low == alias or (prio and prio.group(1).strip().lower() == alias):
+            return v_city, canonical
+    for alias, v_city, canonical in WEBSITE_NOTIFY_ONLY_ALIASES:
         m = re.search(r"(?:^|[^a-z0-9])" + re.escape(alias) + r"(?:[^a-z0-9]|$)", low, re.I)
         if m and m.start() < best_idx:
             best_idx = m.start()
@@ -816,7 +858,7 @@ def normalize_website_payload(p):
     raw_venue = str(raw_venue or "").strip()
 
     explicit_city = str(p.get("city") or d.get("City") or "").strip()
-    if explicit_city in WEBSITE_VENUES and raw_venue in WEBSITE_VENUES[explicit_city]:
+    if explicit_city in WEBSITE_VENUES and _website_venue_ok(explicit_city, raw_venue):
         out["city"] = explicit_city
         out["venue"] = raw_venue
     elif explicit_city and explicit_city not in WEBSITE_VENUES:
@@ -826,7 +868,7 @@ def normalize_website_payload(p):
         matched_city, matched_venue = _match_website_venue(raw_venue)
         is_open_pref = bool(re.search(r"open to (?:all |other )?venues|any venue|all venues", raw_venue, re.I)) or ("venue" not in p and not raw_venue)
         city = explicit_city or ("Scottsdale" if ("scottsdale" in raw_venue.lower() or matched_city == "Scottsdale") else "Las Vegas")
-        if matched_venue and matched_venue in WEBSITE_VENUES.get(city, ()):
+        if matched_venue and _website_venue_ok(city, matched_venue):
             out["city"] = city
             out["venue"] = matched_venue
         elif is_open_pref and city in WEBSITE_VENUES:
@@ -879,7 +921,7 @@ def validate_website(p):
         return None, "bad email"
     if not 10 <= len(re.sub(r"\D", "", phone)) <= 15:
         return None, "bad phone"
-    if venue not in WEBSITE_VENUES.get(city, ()):
+    if not _website_venue_ok(city, venue):
         return None, "bad city/venue"
     try:
         night = datetime.strptime(date, "%Y-%m-%d").date()
@@ -1023,6 +1065,8 @@ def accept_website(intake, payload, _sleep=None):
     clean, err = validate_website(payload)
     if err:
         return 400, err
+    if is_notify_only(clean["city"], clean["venue"]):
+        return notify_only_website(intake, clean)
     import queue_service
     receipt = None
     if queue_service.enabled() and not intake.dry_run:
@@ -1132,6 +1176,66 @@ def retry_pending_website(intake):
                     break
                 log.exception("Website form: pending %s failed", name)
     return done, left
+
+
+def notify_only_text(clean):
+    """Team notice for a notify-only venue: no phone number (team rule)."""
+    night, end = clean["night"].isoformat(), clean.get("end", clean["night"]).isoformat()
+    when = night if end == night else f"{night} to {end}"
+    return "\n".join([
+        "Website guest list sign-up (notify only: no booking, no guest email sent).",
+        "",
+        f"Guest: {clean['name']}",
+        f"Email: {clean['email']}",
+        f"Venue: {clean['venue']}",
+        f"Date: {when}",
+        f"Female guests: {clean['women']}",
+        f"Male guests: {clean['men']}",
+        f"Source: {clean['source']}",
+        f"Ref: {clean['ref'] or '-'}",
+        "",
+        "Handle this request manually with the venue.",
+    ])
+
+
+def notify_only_subject(clean):
+    # Must not match gmail_client.SEARCH_QUERY phrases, so Amy never parses it as a request.
+    return f"Notify-only website signup: {clean['venue']} {clean['night'].isoformat()} - {clean['name']}"
+
+
+def notify_only_website(intake, clean):
+    """Notify-only venue: one branded email to team@ from info@ and nothing else."""
+    from config import rules
+    import html as _html
+    key = _website_key(clean)
+    with intake._lock:
+        if key in intake._seen:
+            return 200, "duplicate (this run)"
+        if intake.dry_run:
+            intake._seen.add(key)
+            log.info("[dry run] would send notify-only team email %s:\n%s", key, notify_only_text(clean))
+            return 200, "dry run (notify only)"
+        if _delivered(key):
+            intake._seen.add(key)
+            return 200, "duplicate"
+        text = notify_only_text(clean)
+        body = "<br>".join(_html.escape(line) for line in text.split("\n"))
+        subject = notify_only_subject(clean)
+        tag = clean["ref"] or re.sub(r"[^\w-]", "", clean["email"])
+        code, result = send_branded(intake.service(), {
+            "to": rules.PLAYMAKER_EMAIL, "subject": subject, "text": text,
+            "html": f"<div style=\"font-family:Arial,sans-serif;font-size:15px;line-height:1.5\">{body}</div>",
+            "dedupe_query": f'to:{rules.PLAYMAKER_EMAIL} subject:"{subject}" "Ref: {tag}"'})
+        if code != 200:
+            log.error("Website form: notify-only team email failed for %s: %s %s", key, code, result)
+            return 503, "could not notify team, try again"
+        intake._seen.add(key)
+        try:
+            _mark_delivered(key)
+        except OSError:
+            log.exception("Website form: could not record delivered %s", key)
+        log.info("Website form: notify-only %s -> team email (%s)", key, result)
+        return 200, "team notified"
 
 
 def notify_team_website(service, clean, subject):
