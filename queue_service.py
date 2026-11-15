@@ -121,6 +121,24 @@ def enqueue(ref, raw):
     return row
 
 
+MDC_ADDON_VENUE = 'Marquee Dayclub'
+
+
+def is_mdc_addon(venue, night, requested_nights, drais):
+    """Marquee Dayclub add-on (owner rule 2026-10-25, through Mar 31 2027).
+
+    The worker adds Marquee Dayclub on a requested night when it is open. That
+    extra receipt is accepted ONLY for Marquee Dayclub, ONLY on a night that is
+    in the request, never for Drai's jobs, and never in place of the requested
+    venue (the requested venue/date receipts are still all required). Any other
+    venue not in the request (e.g. a Hakkasan->JEWEL fallback) is still refused
+    so venue changes stay flagged for review (Thomas, Nov 15 2026).
+    """
+    from config import rules
+    return (not drais and venue == MDC_ADDON_VENUE and night in requested_nights
+            and night <= rules.MARQUEE_DAYCLUB_PUSH_END)
+
+
 def validate_completion(raw, metadata):
     """Evidence supplied by AMYI after observing actual UI confirmation.
 
@@ -139,13 +157,17 @@ def validate_completion(raw, metadata):
         venues = {rules.normalize_venue_name(v) for v in raw['venues']}
         start, end = date.fromisoformat(raw['start_date']), date.fromisoformat(raw['end_date'])
         expected = {(v, date.fromordinal(day).isoformat()) for v in venues for day in range(start.toordinal(), end.toordinal() + 1)}
+        requested_nights = {night for _v, night in expected}
         actual = set()
         drais = any(rules.is_drais(v) for v in venues)
         for record in records:
             if not isinstance(record, dict):
                 raise Conflict('Invalid booking record')
             venue, night = rules.normalize_venue_name(record['venue']), record['date']
-            if (venue, night) not in expected or record.get('verified') is not True:
+            if record.get('verified') is not True:
+                raise Conflict('Receipt must match exact source date/venue')
+            mdc_extra = (venue, night) not in expected and is_mdc_addon(venue, night, requested_nights, drais)
+            if (venue, night) not in expected and not mdc_extra:
                 raise Conflict('Receipt must match exact source date/venue')
             party = record.get('party')
             expected_party = {'male_count': int(raw.get('male_count') or 0),
@@ -176,7 +198,8 @@ def validate_completion(raw, metadata):
                         raise Conflict("Drai's permits only name+party fields")
             elif not record.get('order_id'):
                 raise Conflict('Actual order ID required')
-            actual.add((venue, night))
+            if not mdc_extra:
+                actual.add((venue, night))
         if actual != expected:
             raise Conflict('All exact source venue/date records required; incomplete jobs stay active/manual')
         if not drais or evidence.get('email_receipts'):
