@@ -168,6 +168,35 @@ class Store:
                        ('Owner requeue ' + approval[:200], json.dumps(meta), now, ref))
         return self.get(ref)
 
+    def owner_complete(self, ref, approval, now):
+        """Owner-approved: mark ONE manual job done from the verified receipts
+        the worker already saved when completion was refused. No booking and
+        no email happens here. The saved evidence must pass the same
+        validate_completion check a live completion would (exact requested
+        venue/date receipts, party counts, order ids, guest+team email ids), so
+        a venue fallback (e.g. Hakkasan->JEWEL) is still refused."""
+        approval = str(approval or '').strip()
+        if not approval:
+            raise Conflict('owner approval (message id) required')
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone()
+            if row is None:
+                raise Conflict('Unknown job')
+            if row['state'] != 'manual':
+                raise Conflict('Only a manual job can be owner-completed')
+            meta = json.loads(row['metadata'] or '{}')
+            evidence = (meta.get('resolution') or {}).get('evidence')
+            if not isinstance(evidence, dict):
+                raise Conflict('No saved worker receipts on this job')
+            from queue_service import validate_completion
+            validate_completion(json.loads(row['raw']), {'evidence': evidence})
+            meta['evidence'] = evidence
+            meta['completed_at'] = now
+            meta['owner_complete'] = {'approval': approval[:200], 'at': now, 'previous_reason': row['reason']}
+            db.execute("UPDATE queue_jobs SET state='done',reason=?,metadata=?,updated=?,claim_token=NULL WHERE ref=?",
+                       ('Completed from saved receipts (owner ' + approval[:200] + ')', json.dumps(meta), now, ref))
+        return self.get(ref)
+
     def update(self, ref, token, action, metadata, now, reason=''):
         if not isinstance(metadata, dict):
             raise Conflict('metadata must be an object')
