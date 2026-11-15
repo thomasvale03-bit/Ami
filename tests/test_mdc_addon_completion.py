@@ -71,3 +71,49 @@ def test_mdc_extra_never_on_drais_jobs():
              rec('Marquee Dayclub', '2026-11-21'))
     with pytest.raises(Conflict):
         q.validate_completion(r, m)
+
+
+# --- owner-approved completion from saved receipts -------------------------
+from datetime import datetime  # noqa: E402
+import socket  # noqa: E402
+from unittest.mock import Mock  # noqa: E402
+
+NOW = datetime(2026, 11, 15, 2, 0, tzinfo=q.PHOENIX).timestamp()
+AUTH = {'Authorization': 'Bearer ' + 't' * 32}
+
+
+@pytest.fixture
+def qenv(monkeypatch, tmp_path):
+    monkeypatch.setenv('AMY_QUEUE_ENABLED', 'true')
+    monkeypatch.setenv('AMY_QUEUE_API_TOKEN', 't' * 32)
+    monkeypatch.setenv('AMY_QUEUE_DIR', str(tmp_path / 'queue'))
+    monkeypatch.setenv('AMY_JOBS_FILE', str(tmp_path / 'jobs.json'))
+    monkeypatch.setattr(socket, 'create_connection', Mock(side_effect=AssertionError('No network')))
+    return q.store()
+
+
+def refused_job(s, r, records):
+    """Worker outcome: booked + emailed, completion refused -> manual with the receipts saved."""
+    import json
+    full = dict(r, name='Mock Guest', first_name='Mock', last_name='Guest', email='g@example.invalid')
+    s.enqueue('mock', full, NOW)
+    m = {'worker': 'railway', **meta(*records)}
+    with s.connect() as db:
+        db.execute("UPDATE queue_jobs SET state='manual',reason=?,metadata=? WHERE ref='mock'",
+                   ('Booked and emailed but completion refused', json.dumps({'resolution': m})))
+    assert s.get('mock')['state'] == 'manual'
+
+
+def test_owner_complete_from_saved_mdc_receipts(qenv, monkeypatch):
+    refused_job(qenv, raw(), [rec('OMNIA Nightclub', '2026-11-15'), rec('Marquee Dayclub', '2026-11-15')])
+    assert q.handle('POST', '/queue/owner-complete/mock', AUTH, {}, s=qenv, now=NOW)[0] == 409  # approval required
+    code, row = q.handle('POST', '/queue/owner-complete/mock', AUTH, {'owner_approval': 'pt992u'}, s=qenv, now=NOW)
+    assert code == 200 and row['state'] == 'done'
+    assert q.handle('POST', '/queue/owner-complete/mock', AUTH, {'owner_approval': 'pt992u'}, s=qenv, now=NOW)[0] == 409  # done: not manual
+
+
+def test_owner_complete_refuses_fallback_venue(qenv):
+    refused_job(qenv, raw(venues=('Hakkasan Nightclub',), start='2026-11-20'), [rec('JEWEL Nightclub', '2026-11-20')])
+    code, body = q.handle('POST', '/queue/owner-complete/mock', AUTH, {'owner_approval': 'pt992u'}, s=qenv, now=NOW)
+    assert code == 409 and 'exact source date/venue' in body['error']
+    assert qenv.get('mock')['state'] == 'manual'

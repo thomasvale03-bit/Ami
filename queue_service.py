@@ -269,6 +269,14 @@ def handle(method, url, headers, payload, *, s=None, now=None):
             if not isinstance(payload, dict):
                 raise Conflict('JSON object required')
             return 200, s.owner_requeue(unquote(path[len('/queue/requeue/'):]), payload.get('owner_approval'), now)
+        if method == 'POST' and path.startswith('/queue/owner-complete/'):
+            if not isinstance(payload, dict):
+                raise Conflict('JSON object required')
+            ref = unquote(path[len('/queue/owner-complete/'):])
+            row = s.owner_complete(ref, payload.get('owner_approval'), now)
+            import job_tracker
+            job_tracker.update(ref, queue_owned=True, status='done', done_at=now)
+            return 200, row
         if method == 'POST' and path.startswith('/queue/jobs/'):
             if not isinstance(payload, dict):
                 raise Conflict('JSON object required')
