@@ -90,7 +90,6 @@ def team_email(ref, raw, request, bookings):
         "— Guest details —",
         f"Name: {name}",
         f"Email: {request['email']}",
-        f"Phone: {raw.get('phone') or '(none)'}",
         f"Party: {_party(request['female_count'], request['male_count'])} (free)",
         f"Promoter: {request.get('promoter') or 'Not provided'}",
         f"Source: {source}",
@@ -177,11 +176,11 @@ def drais_team_email(ref, raw, request, bookings):
     posh = raw.get("posh") or {}
     source = f"Posh order {posh['order_number']}" if posh.get("order_number") else (raw.get("source") or "website")
     lines = ["ALREADY SIGNED UP — NO ACTION NEEDED", f"Guest: {name}", f"Email: {request['email']}",
-             f"Phone: {raw.get('phone') or '(none)'}", f"Party: {f} women, {m} men"]
+             f"Party: {f} women, {m} men"]
+    # Thomas: no phone numbers in emails; Drai's is confirmation-email only (no Speakeasy).
     for b in sorted(bookings, key=lambda b: b["date"]):
-        listed = b.get("speakeasy_date") or b["date"]
-        lines.append(f"{date.fromisoformat(b['date']).strftime('%a')} {b['date']} (night) - {DRAIS_VENUE} - "
-                     f"Added in Speakeasy (listed under {listed})")
+        lines.append(f"{DRAIS_VENUE}, {date.fromisoformat(b['date']).strftime('%a')} {b['date']} "
+                     f"(confirmation email sent, no Speakeasy signup)")
     lines += [f"Source: {source}", f"AMY ref: {ref}"]
     text = "\n".join(lines)
     label = date_label(request["start_date"], request["end_date"])
