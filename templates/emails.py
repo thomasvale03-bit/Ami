@@ -204,7 +204,6 @@ def manual_work_order(request, nights, promoter_url, drais_nights=()):
         "",
         f"Guest: {name}",
         f"Email: {request['email']}",
-        f"Phone: {request.get('phone') or '(none)'}",
         f"Party: {party_phrase(request['female_count'], request['male_count'])}",
         "",
         "Open this link, clear the “I’m human” check, then book each night:",
@@ -318,7 +317,7 @@ def pending_signup_email(request, nights, drais_nights=()):
     else:
         subject = f"Drai's: {name} — {date_lbl}"
     lines = [
-        f"Name: {name}", f"Email: {request['email']}", f"Phone: {request.get('phone') or '(none)'}",
+        f"Name: {name}", f"Email: {request['email']}",
         f"Party: {party}",
         f"Promoter: {request['promoter']}" if request.get("promoter") else "Promoter: (none given)",
         "",

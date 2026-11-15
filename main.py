@@ -567,8 +567,7 @@ def posh_summary(raw):
              f"Event: {p.get('event_name') or '(none)'}",
              f"Event start: {p.get('event_start') or '(none)'}",
              f"Ticket: {p.get('ticket') or '(none)'}",
-             f"Order number: {p.get('order_number') or '(none)'}",
-             f"Phone: {p.get('phone') or '(none)'}"]
+             f"Order number: {p.get('order_number') or '(none)'}"]
     if raw.get("start_date"):
         from datetime import date
         from rules_engine import candidate_venues
