@@ -560,6 +560,55 @@ def team_alert(service, message_id, raw, problems, dry_run):
     )
 
 
+HELD_ALERT_SKIP = ("Legacy job completed",)
+
+
+def held_signup_alert(service, message_id, raw, row, since=None):
+    """Queue mode (Thomas, Nov 15 2026): a signup that lands held/manual at
+    intake gets ONE "needs attention" email to team@ from info@ (branded
+    sender). Sent even with concierge mode on; no phone numbers; once per ref
+    (only for a job created by this intake, plus a Sent/branded dedupe)."""
+    if not row or row.get("state") != "manual":
+        return False
+    reason = row.get("reason") or ""
+    if any(reason.startswith(s) for s in HELD_ALERT_SKIP):
+        return False
+    if since is not None and float(row.get("created") or 0) < since - 1:
+        return False  # job existed before this intake: already alerted
+    name = raw.get("name") or " ".join(x for x in (raw.get("first_name"), raw.get("last_name")) if x) or "(unknown)"
+    venues = ", ".join(raw.get("venues") or []) or "(none specified)"
+    start, end = raw.get("start_date") or "?", raw.get("end_date") or raw.get("start_date") or "?"
+    dates = start if start == end else f"{start} to {end}"
+    p = raw.get("posh") or {}
+    issue, action = (raw.get("_action_needed") or (reason, "Review the request and book it by hand if it is valid."))[:2]
+    lines = [
+        "NEEDS ATTENTION: this signup was saved but NOT booked automatically.",
+        "",
+        f"Guest: {name}",
+        f"Email: {raw.get('email') or '(none)'}",
+        f"Venue(s): {venues}",
+        f"Date(s): {dates}",
+        f"Party: {raw.get('female_count') or 0} women, {raw.get('male_count') or 0} men",
+        f"Source: {'Posh order ' + p['order_number'] if p.get('order_number') else (raw.get('source') or 'website')}",
+    ]
+    if p.get("event_name"):
+        lines.append(f"Posh event: {p['event_name']}")
+    lines += ["", f"Why it is held: {reason}"]
+    if issue and issue != reason:
+        lines.append(f"Detail: {issue}")
+    lines += [f"What to do: {action}", "", f"AMY ref: {message_id}"]
+    text = "\n".join(lines)
+    text = re.sub(r"(?im)^.*phone.*$\n?", "", text)  # never include phone numbers
+    subject = f"Amy — needs attention: {name}, {dates} (held, not booked)"
+    html = '<html><body><pre style="font-family:inherit;white-space:pre-wrap">' + \
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</pre></body></html>"
+    return bool(_send_branded_or_gmail(
+        service, f"amy-held-{message_id}@playmakerentertainment.com", rules.PLAYMAKER_EMAIL,
+        subject, text, html,
+        dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "AMY ref: {message_id}" "NEEDS ATTENTION"',
+    ))
+
+
 def posh_summary(raw):
     """Posh order details plus the nightclub Amy would book, for the team."""
     p = raw.get("posh", {})
@@ -1088,7 +1137,12 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
     if queue_service.enabled():
         if dry_run:
             return None
-        queue_service.enqueue(message_id, raw)
+        enqueued_at = time.time()
+        row = queue_service.enqueue(message_id, raw)
+        try:
+            held_signup_alert(service, message_id, raw, row, since=enqueued_at)
+        except Exception:  # noqa: BLE001 - the job is already saved; never fail intake on the alert
+            log.exception("%s: held-signup alert failed", message_id)
         return gmail_client.PROCESSED_LABEL
 
     if raw.get("form_ref") and raw.get("source") != "Posh":

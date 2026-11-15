@@ -27,9 +27,13 @@ from zoneinfo import ZoneInfo
 log = logging.getLogger("amy.posh_lookup")
 VEGAS = ZoneInfo("America/Los_Angeles")
 BASE = "https://posh.vip/e/"
-MAX_FETCHES = int(os.environ.get("POSH_LOOKUP_MAX_FETCHES", "40"))
+MAX_FETCHES = int(os.environ.get("POSH_LOOKUP_MAX_FETCHES", "80"))
+# Seeded series: probe one page per week this far past the purchase. Posh
+# pages no longer list sibling dates (Nov 2026), and LAVO/DESEO buyers order
+# up to 5+ weeks ahead, so the target's own page must be found directly.
+WEEKLY_PROBE_WEEKS = int(os.environ.get("POSH_LOOKUP_WEEKS", "12"))
 # Seen on Playmaker series (UTC end): TAO NC 8-30/9-30, OMNIA/JEWEL 8-0/9-0, Hakkasan 11-30/12-30, LAVO 1-0/2-0.
-DEFAULT_END_TIMES = ("8-30", "9-30", "8-0", "9-0", "11-30", "12-30", "1-0", "2-0", "6-0", "10-0", "10-30", "11-0", "12-0", "11-0-1", "12-0-1")
+DEFAULT_END_TIMES = ("8-30", "9-30", "8-0", "9-0", "11-30", "12-30", "12-0", "11-0", "1-0", "2-0", "6-0", "10-0", "10-30", "13-0", "11-0-1", "12-0-1")
 
 SIBLING_RE = re.compile(r'"([0-9a-f]{24})",\{"href":"/e/([a-z0-9-]+)"')
 EVENT_ID_RE = re.compile(r'"eventId"\s*:\s*"([0-9a-f]{24})"')
@@ -98,6 +102,11 @@ def seeds():
         if m:
             out[m.group(1)[:PREFIX_LEN]] = (m.group(2), tuple(t.strip() for t in (m.group(3) or "").split("/") if t.strip()))
     return out
+
+
+def seed_weekdays(seed):
+    """Weekdays (Mon=0) of a seeded series' slug end dates, or () if unknown."""
+    return tuple(seed[2]) if seed and len(seed) > 2 and seed[2] else ()
 
 
 def _base_and_time(slug):
@@ -226,7 +235,8 @@ def _default_fetch(url):
 class _Fetcher:
     def __init__(self, fetch, sleep, limit):
         self.fetch, self.sleep, self.left, self.first = fetch, sleep, limit, True
-        self.deadline = time.monotonic() + float(os.environ.get("POSH_LOOKUP_MAX_SECONDS", "90"))
+        # Runs in the webhook's background worker (Posh is acked first, 720078a).
+        self.deadline = time.monotonic() + float(os.environ.get("POSH_LOOKUP_MAX_SECONDS", "150"))
 
     def __call__(self, slug):
         if self.left <= 0:
@@ -344,6 +354,93 @@ def _extrapolate_beyond_carousel(found, target_id, key):
     return out
 
 
+def weekly_probe_slugs(base, times, weekdays, purchased_utc, weeks=None):
+    """[(week, [slugs for that week])]: the series weekday(s) from the day
+    before the purchase onward, one date per weekday per week."""
+    weeks = WEEKLY_PROBE_WEEKS if weeks is None else weeks
+    first = (purchased_utc - timedelta(days=1)).date()
+    out = []
+    for w in range(weeks):
+        slugs = []
+        for wd in weekdays:
+            d = first + timedelta(days=(wd - first.weekday()) % 7 + 7 * w)
+            slugs += [f"{base}-{d.year}-{d.month}-{d.day}-{t}" for t in times]
+        out.append((w, slugs))
+    return out
+
+
+def _weekly_probe(event_id, purchased_utc, get, tried, event_start=None, event_end=None, need_weekdays=True):
+    """Seeded series: walk the series week by week and match the child page's
+    own event id (Posh pages no longer carry the sibling-date map).
+    need_weekdays=True (first pass) only runs for seeds with known weekdays;
+    the second pass (after the sibling search) learns them from nearby pages."""
+    key = series_key(event_id)
+    seed = seeds().get(key) if key else None
+    if not seed or purchased_utc is None:
+        return None
+    base = seed[0]
+    weekdays = seed_weekdays(seed)
+    if need_weekdays and not weekdays:
+        return None
+    learned = sorted(_end_times.get(base, ())) if not weekdays else []
+    times = list(dict.fromkeys(learned + list(seed[1]) + derived_end_times(event_start, event_end)))
+    if not weekdays:
+        # Weekdays of series pages already read (sibling search above).
+        seen = set()
+        for eid, slug in list(_slugs.items()):
+            m = SLUG_TAIL_RE.search(slug)
+            if m and series_key(eid) == key and slug.startswith(base + "-"):
+                try:
+                    seen.add(date(int(m.group(1)), int(m.group(2)), int(m.group(3))).weekday())
+                except ValueError:
+                    pass
+        weekdays = tuple(sorted(seen))
+    if not weekdays:
+        # Learn the weekday(s) from the first week of pages around the purchase.
+        hits = set()
+        for offset in range(-1, 7):
+            d = (purchased_utc + timedelta(days=offset)).date()
+            for t in times:
+                slug = f"{base}-{d.year}-{d.month}-{d.day}-{t}"
+                if slug in tried:
+                    continue
+                html = get(slug)
+                tried.add(slug)
+                if not html:
+                    continue
+                if page_event_id(html) == event_id:
+                    return page_start(html)
+                hits.add(d.weekday())
+                times = [t] + [x for x in times if x != t]
+                break
+        weekdays = tuple(sorted(hits))
+        if not weekdays:
+            return None
+    confirmed = None
+    for _w, slugs in weekly_probe_slugs(base, times, weekdays, purchased_utc):
+        if confirmed:  # the end time that worked last week first
+            slugs = sorted(slugs, key=lambda s: not s.endswith("-" + confirmed))
+        found_dates = set()
+        for slug in slugs:
+            m = SLUG_TAIL_RE.search(slug)
+            day = m.group(1, 2, 3) if m else slug
+            if slug in tried or day in found_dates:
+                continue  # one page per weekday per week is enough
+            html = get(slug)
+            tried.add(slug)
+            if not html:
+                continue
+            found_dates.add(day)
+            pid = page_event_id(html)
+            _learn({pid: slug} if pid else {})
+            _, confirmed = _base_and_time(slug)
+            if pid == event_id:
+                return page_start(html)
+            if pid and series_key(pid) == key and pid > event_id and len(weekdays) == 1:
+                return None  # walked past the target: it is earlier than expected
+    return None
+
+
 def _resolve(event_id, event_name, purchased_utc, get, event_start=None, event_end=None):
     tried = set()
     key = series_key(event_id)
@@ -360,6 +457,9 @@ def _resolve(event_id, event_name, purchased_utc, get, event_start=None, event_e
         start = open_target(_slugs[event_id])
         if start:
             return start
+    start = _weekly_probe(event_id, purchased_utc, get, tried, event_start, event_end)
+    if start:
+        return start
     for slug in _all_candidates(event_id, event_name, purchased_utc, event_start, event_end):
         if slug in tried:
             continue
@@ -397,7 +497,7 @@ def _resolve(event_id, event_name, purchased_utc, get, event_start=None, event_e
             tried.add(nxt)
             if not html:
                 break
-    return None
+    return _weekly_probe(event_id, purchased_utc, get, tried, event_start, event_end, need_weekdays=False)
 
 
 def night_from_start(start, rollover_hour=6):
