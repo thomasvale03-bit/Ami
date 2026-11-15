@@ -242,6 +242,13 @@ def handle(method, url, headers, payload, *, s=None, now=None):
             if not isinstance(payload, dict):
                 raise Conflict('JSON object required')
             return 200, review_legacy(s, unquote(path[len('/queue/legacy/'):]), payload, now)
+        if method == 'GET' and path == '/queue/door-list-preview':
+            # DRY RUN of the Scottsdale 7:43 PM door lists: read-only Gmail
+            # search + counts. Sends NO email to anyone.
+            night = date.fromisoformat(parse_qs(urlparse(url).query).get('night', [''])[0])
+            import gmail_client
+            import main as amy_main
+            return 200, amy_main.scottsdale_door_list_preview(gmail_client.get_service(), night)
         if method == 'GET' and path == '/queue/jobs':
             query = parse_qs(urlparse(url).query)
             limit = max(1, min(int(query.get('limit', ['50'])[0]), 100))

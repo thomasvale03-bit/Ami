@@ -17,7 +17,7 @@ import re
 import sys
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 
 from rules_engine import (
@@ -239,6 +239,120 @@ def scottsdale_door_list_query(q_term):
     )
 
 
+DOOR_LIST_MAX_MESSAGES = int(os.environ.get("SCOTTSDALE_DOOR_LIST_MAX_MESSAGES", "2000"))
+DOOR_LIST_PAGE_SIZE = 500  # Gmail API maximum per page
+
+
+def door_list_message_refs(service, query, cap=None, stats=None):
+    """Every Gmail search hit for `query`, following nextPageToken until the
+    results are exhausted (a single page holds at most 500, and Riot House
+    alone gets ~200 webhook emails in the 14-day window). Stops at a safety
+    cap and logs loudly if it is hit. Newest first, as Gmail returns them."""
+    cap = DOOR_LIST_MAX_MESSAGES if cap is None else cap
+    refs, token, pages = [], None, 0
+    while True:
+        kwargs = {"userId": "me", "q": query, "maxResults": min(DOOR_LIST_PAGE_SIZE, max(1, cap - len(refs)))}
+        if token:
+            kwargs["pageToken"] = token
+        resp = service.users().messages().list(**kwargs).execute()
+        pages += 1
+        refs.extend(resp.get("messages", []) or [])
+        token = resp.get("nextPageToken")
+        if len(refs) >= cap:
+            if token or len(refs) > cap:
+                log.error("Scottsdale door list: Gmail search hit the %d-message safety cap; "
+                          "older matching emails were NOT read (query: %s)", cap, query)
+                if stats is not None:
+                    stats["cap_hit"] = True
+            refs = refs[:cap]
+            break
+        if not token:
+            break
+    if stats is not None:
+        stats["pages"] = stats.get("pages", 0) + pages
+        stats["emails_read"] = stats.get("emails_read", 0) + len(refs)
+    return refs
+
+
+def collect_scottsdale_door_orders(service, venue, tonight, cutoff=None, stats=None):
+    """Unique Posh orders for `venue` on `tonight` (read-only; sends nothing).
+
+    Signups that arrived after `cutoff` (the 7:43 PM send) are never added.
+    Orders are deduped by Posh order number (else guest email + date)."""
+    q_term = '"Riot House" OR "riothouse"' if venue == "Riot House" else '"Almost Famous"'
+    refs = door_list_message_refs(service, scottsdale_door_list_query(q_term), stats=stats)
+    cutoff_ms = int(cutoff.timestamp() * 1000) if cutoff is not None else None
+    orders = []
+    seen_keys = set()
+    for ref in reversed(refs):
+        mid = ref["id"]
+        msg, body = gmail_client.get_plain_text_body(service, mid)
+        if cutoff_ms is not None and int((msg or {}).get("internalDate") or 0) > cutoff_ms:
+            if stats is not None:
+                stats["after_cutoff"] = stats.get("after_cutoff", 0) + 1
+            continue
+        subj = gmail_client.get_subject(msg or {})
+        if posh.is_posh_signup(subj, body):
+            raw = posh.parse_signup(mid, body)
+        elif any(m.lower() in (subj or "").lower() for m in rules.SUBJECT_MARKERS):
+            raw = gmail_client.parse_request(mid, body)
+        else:
+            continue
+        ev = ((raw.get("posh") or {}).get("event_name") or "").strip()
+        if rules.scottsdale_venue([ev] + list(raw.get("venues") or [])) != venue:
+            continue
+        sd = (raw.get("start_date") or "").strip()
+        ed = (raw.get("end_date") or sd).strip()
+        if sd and not (sd <= tonight.isoformat() <= ed):
+            continue
+        if stats is not None:
+            stats["matching_emails"] = stats.get("matching_emails", 0) + 1
+        order_no = ((raw.get("posh") or {}).get("order_number") or "").strip()
+        guest_email = (raw.get("email") or "").strip().lower()
+        guest_name = (raw.get("name") or "").strip() or guest_email
+        dedupe_key = order_no or f"{guest_email}:{sd}"
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        try:
+            w = int(raw.get("female_count") or 0)
+        except (TypeError, ValueError):
+            w = 0
+        try:
+            m = int(raw.get("male_count") or 0)
+        except (TypeError, ValueError):
+            m = 0
+        ticket = ((raw.get("posh") or {}).get("ticket") or "").strip()
+        orders.append({
+            "name": guest_name,
+            "email": guest_email,
+            "women": w,
+            "men": m,
+            "ticket": ticket,
+            "order_number": order_no,
+        })
+    return orders
+
+
+def scottsdale_door_list_preview(service, night):
+    """DRY RUN for one door-list night: counts only, sends NO email.
+    Uses the same collection as the real 7:43 PM send, cut off at 7:43 PM."""
+    cutoff = datetime.combine(night, dtime(19, 43), tzinfo=PHOENIX)
+    out = {"night": night.isoformat(), "cutoff": cutoff.isoformat(), "venues": {}}
+    for venue in ("Riot House", "Almost Famous"):
+        stats = {}
+        orders = collect_scottsdale_door_orders(service, venue, night, cutoff=cutoff, stats=stats)
+        out["venues"][venue] = {
+            **stats,
+            "unique_orders": len(orders),
+            "order_numbers": [o["order_number"] for o in orders],
+            "women": sum(o["women"] for o in orders),
+            "men": sum(o["men"] for o in orders),
+            "tickets": sum(o["women"] + o["men"] for o in orders),
+        }
+    return out
+
+
 def send_scottsdale_door_lists(service, mode, now=None):
     """On Friday and Saturday evenings at/after 7:43 PM America/Phoenix, send
     tonight's Riot House and Almost Famous guest-list rundown emails to
@@ -262,54 +376,7 @@ def send_scottsdale_door_lists(service, mode, now=None):
         if mode != "dry-run" and gmail_client.already_sent(service, dedupe_q):
             continue
 
-        q_term = '"Riot House" OR "riothouse"' if venue == "Riot House" else '"Almost Famous"'
-        resp = service.users().messages().list(
-            userId="me", q=scottsdale_door_list_query(q_term), maxResults=100
-        ).execute()
-        orders = []
-        seen_keys = set()
-        for ref in reversed(resp.get("messages", [])):
-            mid = ref["id"]
-            msg, body = gmail_client.get_plain_text_body(service, mid)
-            subj = gmail_client.get_subject(msg or {})
-            if posh.is_posh_signup(subj, body):
-                raw = posh.parse_signup(mid, body)
-            elif any(m.lower() in (subj or "").lower() for m in rules.SUBJECT_MARKERS):
-                raw = gmail_client.parse_request(mid, body)
-            else:
-                continue
-            ev = ((raw.get("posh") or {}).get("event_name") or "").strip()
-            if rules.scottsdale_venue([ev] + list(raw.get("venues") or [])) != venue:
-                continue
-            sd = (raw.get("start_date") or "").strip()
-            ed = (raw.get("end_date") or sd).strip()
-            if sd and not (sd <= tonight.isoformat() <= ed):
-                continue
-            order_no = ((raw.get("posh") or {}).get("order_number") or "").strip()
-            guest_email = (raw.get("email") or "").strip().lower()
-            guest_name = (raw.get("name") or "").strip() or guest_email
-            dedupe_key = order_no or f"{guest_email}:{sd}"
-            if dedupe_key in seen_keys:
-                continue
-            seen_keys.add(dedupe_key)
-            try:
-                w = int(raw.get("female_count") or 0)
-            except (TypeError, ValueError):
-                w = 0
-            try:
-                m = int(raw.get("male_count") or 0)
-            except (TypeError, ValueError):
-                m = 0
-            ticket = ((raw.get("posh") or {}).get("ticket") or "").strip()
-            orders.append({
-                "name": guest_name,
-                "email": guest_email,
-                "women": w,
-                "men": m,
-                "ticket": ticket,
-                "order_number": order_no,
-            })
-
+        orders = collect_scottsdale_door_orders(service, venue, tonight, cutoff=now)
         if orders:
             lines = []
             tot_w = sum(o["women"] for o in orders)
