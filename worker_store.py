@@ -157,15 +157,17 @@ class Store:
             row = db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone()
             if row is None:
                 raise Conflict('Unknown job')
-            if row['state'] != 'manual':
-                raise Conflict('Only a manual job can be requeued')
+            # Owner may also pull a pre-submit retry job forward (Thomas, Nov 15
+            # 2026: list opened tonight, don't wait for the hourly retry).
+            if row['state'] not in ('manual', 'retry'):
+                raise Conflict('Only a manual or retry job can be requeued')
             meta = json.loads(row['metadata'] or '{}')
             progress = meta.get('progress') or {}
             if progress.get('submitting') or progress.get('bookings') or meta.get('evidence'):
                 raise Conflict('Job has submission progress; manual review required')
             meta['owner_requeue'] = {'approval': approval[:200], 'at': now, 'previous_reason': row['reason']}
-            db.execute("UPDATE queue_jobs SET state='queued',reason=?,metadata=?,updated=?,claim_token=NULL WHERE ref=?",
-                       ('Owner requeue ' + approval[:200], json.dumps(meta), now, ref))
+            db.execute("UPDATE queue_jobs SET state='queued',reason=?,metadata=?,updated=?,due=?,claim_token=NULL WHERE ref=?",
+                       ('Owner requeue ' + approval[:200], json.dumps(meta), now, now, ref))
         return self.get(ref)
 
     def owner_complete(self, ref, approval, now):
