@@ -107,6 +107,13 @@ def _short(iso):
     return f"{d.strftime('%a %b')} {d.day}"
 
 
+def _nights_label(nights):
+    nights = sorted(nights)
+    if len(nights) > 2:
+        return f"{_long(nights[0])} to {_long(nights[-1])}"
+    return ' and '.join(_long(n) for n in nights)
+
+
 def alert_payload(s, ref, today):
     """ONE team@ email for this job's flagged nights (today or later), or None.
 
@@ -142,7 +149,7 @@ def alert_payload(s, ref, today):
              "(orders are never canceled automatically).", "",
              f"Guest: {guest} ({email})",
              f"Requested: {', '.join(sorted(_requested(raw)))} on "
-             f"{' and '.join(_long(n) for n in sorted(_requested_nights(raw)))} (Amy Ref {ref})", ""]
+             f"{_nights_label(_requested_nights(raw))} (Amy Ref {ref})", ""]
     for night in flagged_nights:
         lines.append(f"— {_long(night)} —")
         for c in [c for c in changes if c['date'] == night]:

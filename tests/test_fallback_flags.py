@@ -249,3 +249,12 @@ def test_jobs_listing_limit_raised():
         s.enqueue(f'r{i}', raw(), NOW)
     code, out = q.handle('GET', '/queue/jobs?state=queued&limit=500', {'Authorization': 'Bearer ' + TOKEN}, None, s=s, now=NOW)
     assert code == 200 and len(out['jobs']) == 120
+
+
+def test_alert_multi_night_request_uses_a_range():
+    s = q.store()
+    _manual(s, 'm1', raw(venues=('Hakkasan Nightclub',), start='2026-11-16', end='2026-11-20'),
+            [rec('OMNIA Nightclub', '2026-11-17', order='o17')])
+    p = queue_flags.alert_payload(s, 'm1', '2026-11-16')
+    assert 'Hakkasan Nightclub on Monday November 16 to Friday November 20' in p['text']
+    assert p['subject'] == 'AMY alert: Venue change - Miia Sara Elkabes Tue Nov 17'
