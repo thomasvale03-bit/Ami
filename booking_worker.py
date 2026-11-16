@@ -845,43 +845,77 @@ class Worker:
         from rules_engine import normalize_guest_request
         request = normalize_guest_request(raw)
         rows = [{**b["record"], **(b.get("meta") or {})} for b in bookings]
-        if drais:
-            builders = (("guest", worker_emails.drais_guest_email(request, rows)),
+
+        def build(update=False):
+            if drais:
+                return (("guest", worker_emails.drais_guest_email(request, rows)),
                         ("team", worker_emails.drais_team_email(ref, raw, request, rows)))
-        else:
-            builders = (("guest", worker_emails.guest_email(request, rows)),
-                        ("team", worker_emails.team_email(ref, raw, request, rows)))
-        saved = ((job.get("metadata") or {}).get("progress") or {}).get("emails") or {}
-        saved.update((self.ledger.get(f"{ref}|emails") or {}).get("receipts") or {})
+            return (("guest", worker_emails.guest_email(request, rows, update=update)),
+                    ("team", worker_emails.team_email(ref, raw, request, rows, update=update)))
+
+        order_ids = sorted({str(r["order_id"]) for r in rows if r.get("order_id")})
+        entry = self.ledger.get(f"{ref}|emails") or {}
+        saved = dict(((job.get("metadata") or {}).get("progress") or {}).get("emails") or {})
+        saved.update(entry.get("receipts") or {})
+        update = False
+        if saved and order_ids and not drais:
+            # Saved receipts only count when they already covered every order.
+            # A venue added later (e.g. Marquee Dayclub after the night was
+            # confirmed) gets an "Updated:" guest confirmation and team notice
+            # instead of silently reusing the old receipts (Thomas, Nov 16 2026).
+            covered = entry.get("orders")
+            if covered is None and not entry.get("at"):
+                covered = order_ids  # receipts from elsewhere (no local record): keep old behavior
+            if covered is None:
+                sent_at = entry.get("at") or 0
+                covered = [str(r["order_id"]) for r in rows if r.get("order_id")
+                           and (self.ledger.get(night_key(ref, r["venue"], r["date"])) or {}).get("at", 0) <= sent_at]
+            if set(order_ids) - set(covered):
+                saved, update = {}, True
+        payloads = dict(build(update))
         receipts = []
-        for kind, payload in builders:
+        for kind in ("guest", "team"):
+            payload = payloads[kind]
             if saved.get(kind):
                 receipts.append({"kind": kind, "id": saved[kind]})
                 continue
             if not worker_emails.allowed_recipient(payload["to"]):
                 raise Stop("manual", f"{kind} email recipient blocked; bookings done, DO NOT rebook")
-            message_id = self._send_one(kind, payload)
+            updated = None if drais else (lambda k=kind: dict(build(True))[k])
+            message_id = self._send_one(kind, payload, order_ids=order_ids, updated=updated)
             saved[kind] = message_id
-            self.ledger.put(f"{ref}|emails", {"receipts": dict(saved)})
+            self.ledger.put(f"{ref}|emails", {"receipts": dict(saved), "orders": order_ids})
             self.api.update(ref, token, "progress", {"progress": {"emails": {kind: message_id}}})
             receipts.append({"kind": kind, "id": message_id})
         return receipts
 
-    def _send_one(self, kind, payload):
+    def _send_one(self, kind, payload, order_ids=(), updated=None):
         deadline = self.now() + self.email_wait
         while True:
             # report_prior: on a duplicate, the server says which earlier email
-            # matched (Gmail Sent id or the branded send-log Message-ID), so a
-            # verified booking completes with that receipt instead of stopping
-            # at manual (Thomas, Nov 16 2026). The guest is never emailed twice.
+            # matched and which order IDs it listed. If it already covered
+            # every order of this job, that receipt is used (never email twice).
+            # If not (a second order for the same night, or a newly added
+            # venue), the "Updated:" version is sent once instead, so the guest
+            # and team still hear about the new order (Thomas, Nov 16 2026).
             code, body = self.api.send_branded({**payload, "report_prior": True})
             result = (body or {}).get("result") if isinstance(body, dict) else None
             if code == 200 and isinstance(result, dict) and result.get("sent") and result.get("id"):
                 return result["id"]
             if code == 200 and isinstance(result, dict) and result.get("duplicate"):
                 prior = result.get("prior") or {}
+                covered = prior.get("order_ids")
+                covers = not order_ids or (covered is not None and set(order_ids) <= set(covered))
+                if prior.get("id") and covers:
+                    log.info("%s email already sent earlier with these orders (%s); using that receipt",
+                             kind, prior.get("source"))
+                    return str(prior["id"])
+                if updated is not None:
+                    log.info("%s email for these orders not sent yet; sending the Updated confirmation", kind)
+                    payload, updated = updated(), None
+                    continue
                 if prior.get("id"):
-                    log.info("%s email was already sent earlier (%s); using that receipt", kind, prior.get("source"))
+                    # The Updated version itself was already sent (retry): reuse it.
                     return str(prior["id"])
                 raise Stop("manual", f"{kind} email: /send-branded reports it was already sent but could not find "
                            "the prior message ID. Bookings done, DO NOT rebook")

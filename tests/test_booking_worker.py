@@ -720,20 +720,49 @@ def test_run_with_deadline_fires_on_expire_when_overrun():
 
 
 def test_duplicate_guest_email_completes_with_prior_receipt(tmp_path):
-    """Nov 16 2026: an already-sent guest email completes with the earlier
-    email's id (server report_prior) instead of stopping at manual."""
+    """Nov 16 2026: an already-sent guest email that listed the same orders
+    completes with the earlier email's id instead of stopping at manual."""
     s, api, worker = make(tmp_path)
     s.enqueue('a', raw(), NOW)
     api.send_responses = [(200, {'result': {'sent': False, 'duplicate': True,
-                                            'prior': {'id': 'gmail:abc', 'source': 'gmail_sent'}}})]
+                                            'prior': {'id': 'gmail:abc', 'source': 'gmail_sent', 'order_ids': ['ORDER-1']}}})]
     assert worker.run_once()['status'] == 'done'
     receipts = {r['kind']: r['id'] for r in s.get('a')['metadata']['evidence']['email_receipts']}
     assert receipts['guest'] == 'gmail:abc' and receipts['team'].startswith('MSG-')
     assert all(p.get('report_prior') for p in api.sent) and len(api.sent) == 2
 
 
+def test_second_order_same_night_sends_updated_guest_and_team(tmp_path):
+    s, api, worker = make(tmp_path)
+    s.enqueue('a', raw(), NOW)
+    other = {'id': 'MID-0', 'source': 'branded_log', 'order_ids': ['OTHER-ORDER']}
+    api.send_responses = [(200, {'result': {'sent': False, 'duplicate': True, 'prior': other}}),
+                          (200, {'result': {'sent': True, 'id': 'UPD-G'}}),
+                          (200, {'result': {'sent': False, 'duplicate': True, 'prior': other}}),
+                          (200, {'result': {'sent': True, 'id': 'UPD-T'}})]
+    assert worker.run_once()['status'] == 'done'
+    assert api.sent[1]['subject'].startswith('Updated: ') and api.sent[3]['subject'].startswith('Updated: Signed up:')
+    assert {r['kind']: r['id'] for r in s.get('a')['metadata']['evidence']['email_receipts']} == {'guest': 'UPD-G', 'team': 'UPD-T'}
+
+
+def test_added_venue_after_confirmation_sends_updated(tmp_path):
+    import time
+    s, api, worker = make(tmp_path, tao=FakeTao(dayclubs=True))
+    s.enqueue('a', raw(venues=['Hakkasan Nightclub', 'Marquee Dayclub']), NOW)
+    old = {'verified': True, 'venue': 'Hakkasan Nightclub', 'date': '2026-11-25', 'order_id': 'OLD-1',
+           'party': {'male_count': 1, 'female_count': 2}}
+    worker.ledger.put(bw.night_key('a', 'Hakkasan Nightclub', '2026-11-25'), {'state': 'booked', 'record': old, 'meta': {}})
+    time.sleep(0.01)
+    worker.ledger.put('a|emails', {'receipts': {'guest': 'G0', 'team': 'T0'}})
+    time.sleep(0.01)
+    assert worker.run_once()['status'] == 'done'
+    assert [p['subject'].split(':')[0] for p in api.sent] == ['Updated', 'Updated']
+    assert 'OLD-1' in api.sent[0]['text']
+
+
 def test_duplicate_without_prior_id_stays_manual(tmp_path):
     s, api, worker = make(tmp_path)
     s.enqueue('a', raw(), NOW)
-    api.send_responses = [(200, {'result': {'sent': False, 'duplicate': True, 'prior': None}})]
+    nothing = (200, {'result': {'sent': False, 'duplicate': True, 'prior': None}})
+    api.send_responses = [nothing, nothing]
     assert worker.run_once()['status'] == 'manual'
