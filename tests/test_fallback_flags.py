@@ -258,3 +258,19 @@ def test_alert_multi_night_request_uses_a_range():
     p = queue_flags.alert_payload(s, 'm1', '2026-11-16')
     assert 'Hakkasan Nightclub on Monday November 16 to Friday November 20' in p['text']
     assert p['subject'] == 'AMY alert: Venue change - Miia Sara Elkabes Tue Nov 17'
+
+
+def test_flag_alert_emails_off_by_default(monkeypatch):
+    """Thomas, Nov 16 2026: no alert emails; double booking is fine."""
+    monkeypatch.delenv('AMY_QUEUE_FLAG_ALERTS', raising=False)
+    assert q.flag_alerts_enabled() is False
+    s = q.store()
+    _elkabes(s)
+    sent = []
+    monkeypatch.setattr(q, '_branded_sender', lambda p: sent.append(p))
+    assert q.send_flag_alert(s, 'j1', NOW) is None
+    code, out = q.handle('POST', '/queue/flags/alert/j1', {'Authorization': 'Bearer ' + TOKEN}, {}, s=s, now=NOW)
+    assert code == 409 and sent == []
+    # read-only list still works
+    code, out = q.handle('GET', '/queue/flags?from=2026-11-16', {'Authorization': 'Bearer ' + TOKEN}, None, s=s, now=NOW)
+    assert code == 200 and out['counts']['double_bookings'] == 1
