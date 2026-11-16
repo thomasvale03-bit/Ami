@@ -52,7 +52,19 @@ def drais_guest_subject(start, end):
     return f"You're on the list: Drai's After Hours — Playmaker Entertainment ({date_label(start, end)})"
 
 
-def guest_email(request, bookings):
+UPDATE_NOTE = "Updated confirmation: this adds your newest booking to anything we sent you before. All orders listed stay active."
+
+
+def update_subject(subject, bookings):
+    """'Updated:' repeat subject (owner rule) made unique by the order IDs it
+    covers, so /send-branded never mistakes a new order for an already-sent
+    confirmation, while a retry of the same update is still deduped."""
+    ids = sorted({str(b.get("order_id"))[:8] for b in bookings if b.get("order_id")})
+    tail = f" (Order {' + '.join(ids)})" if ids else ""
+    return ("Updated: " + subject + tail).replace(",", "").replace(";", "")
+
+
+def guest_email(request, bookings, update=False):
     """bookings: [{venue, date, event, event_time, order_id}] (TAO only)."""
     first = request.get("first_name") or "there"
     label = date_label(request["start_date"], request["end_date"])
@@ -63,7 +75,8 @@ def guest_email(request, bookings):
         lines.append(f"{_long(b['date'])} - {b['venue']} ({inner})")
     text = "\n\n".join([
         f"Hi {first},",
-        "You're on the Playmaker Entertainment guest list. Here's what you're set for:\n" + "\n".join(lines),
+        ((UPDATE_NOTE + "\n\n") if update else "")
+        + "You're on the Playmaker Entertainment guest list. Here's what you're set for:\n" + "\n".join(lines),
         "Arrive early and bring a valid, government-issued 21+ photo ID. Guest-list admission is "
         "subject to each venue's rules, dress code, and capacity.",
         "Questions? Email info@playmakerentertainment.com",
@@ -72,13 +85,16 @@ def guest_email(request, bookings):
     rows = [(html_emails._short_date(b["date"]), b["venue"], b.get("event"))
             for b in sorted(bookings, key=lambda b: (b["date"], b["venue"]))]
     html = html_emails.render_confirmation(
-        first, rows, html_emails.party_size(request["female_count"], request["male_count"]))
+        first, rows, html_emails.party_size(request["female_count"], request["male_count"]),
+        UPDATE_NOTE if update else None)
     subject = guest_subject(request["start_date"], request["end_date"])
+    if update:
+        subject = update_subject(subject, bookings)
     return {"to": request["email"], "subject": subject, "text": text, "html": html,
             "dedupe_query": f'to:{request["email"]} subject:"{subject}"'}
 
 
-def team_email(ref, raw, request, bookings):
+def team_email(ref, raw, request, bookings, update=False):
     name = f"{request.get('first_name', '')} {request.get('last_name', '')}".strip() or raw.get("name", "")
     label = date_label(request["start_date"], request["end_date"])
     source = raw.get("source") or "website"
@@ -93,7 +109,9 @@ def team_email(ref, raw, request, bookings):
                       + f"\n✅ Signed up — Order ID {b['order_id']}"
                       + (f"\n{b['confirmation_url']}" if b.get("confirmation_url") else ""))
     text = "\n".join([
-        "Signed up — no action needed. AMY's Railway booking worker submitted the night(s) below.",
+        ("Updated — no action needed. Another order was added for this guest (new order, added venue or "
+         "second sign-up for the same night); every order below is active."
+         if update else "Signed up — no action needed. AMY's Railway booking worker submitted the night(s) below."),
         "",
         "— Guest details —",
         f"Name: {name}",
@@ -108,6 +126,8 @@ def team_email(ref, raw, request, bookings):
         f"Amy Ref: {ref}",
     ])
     subject = f"Signed up: {name} — {label}"
+    if update:
+        subject = update_subject(subject, bookings)
     html = "<pre style=\"font-family:Helvetica,Arial,sans-serif;white-space:pre-wrap\">" + \
         _html.escape(text) + "</pre>"
     return {"to": TEAM_TO, "subject": subject, "text": text, "html": html,

@@ -664,6 +664,9 @@ def record_branded_sent(to, subject, body="", message_id=None):
     entry = {"to": addr, "subject": subj, "ts": int(time.time())}
     if message_id:
         entry["id"] = str(message_id)
+    # Order IDs the email listed, so a later duplicate check can tell a true
+    # repeat from a new order on the same night (Nov 16 2026).
+    entry["order_ids"] = sorted(set(re.findall(r"Order ID ([0-9A-Za-z-]{6,})", body or "")))
     sl = subj.lower()
     if (CONFIRMATION_SUBJECT_CONCIERGE.lower() in sl
             or CONFIRMATION_SUBJECT_POST_SIGNUP.lower() in sl
@@ -731,13 +734,20 @@ def prior_sent(service, query):
         resp = service.users().messages().list(userId="me", q=f"in:sent {query}", maxResults=1).execute()
         msgs = (resp or {}).get("messages") or []
         if msgs and msgs[0].get("id"):
-            return {"id": "gmail:" + str(msgs[0]["id"]), "source": "gmail_sent"}
+            try:
+                body = get_plain_text_body(service, msgs[0]["id"]) or ""
+                order_ids = sorted(set(re.findall(r"Order ID ([0-9A-Za-z-]{6,})", body)))
+            except Exception:  # noqa: BLE001
+                order_ids = None
+            return {"id": "gmail:" + str(msgs[0]["id"]), "source": "gmail_sent", "order_ids": order_ids}
     except Exception:  # noqa: BLE001
         log.exception("prior_sent Gmail lookup failed")
     entry = _branded_sent_entry(query)
     if entry:
         return {"id": entry.get("id") or f"branded-log:{entry.get('to')}:{entry.get('ts')}",
-                "source": "branded_log", "subject": entry.get("subject"), "ts": entry.get("ts")}
+                "source": "branded_log", "subject": entry.get("subject"), "ts": entry.get("ts"),
+                # None = logged before order IDs were recorded (unknown coverage).
+                "order_ids": entry.get("order_ids")}
     return None
 
 
