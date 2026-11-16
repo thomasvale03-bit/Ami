@@ -717,3 +717,23 @@ def test_run_with_deadline_fires_on_expire_when_overrun():
         assert False, 'expected JobTimeExpired'
     except bw.JobTimeExpired:
         pass
+
+
+def test_duplicate_guest_email_completes_with_prior_receipt(tmp_path):
+    """Nov 16 2026: an already-sent guest email completes with the earlier
+    email's id (server report_prior) instead of stopping at manual."""
+    s, api, worker = make(tmp_path)
+    s.enqueue('a', raw(), NOW)
+    api.send_responses = [(200, {'result': {'sent': False, 'duplicate': True,
+                                            'prior': {'id': 'gmail:abc', 'source': 'gmail_sent'}}})]
+    assert worker.run_once()['status'] == 'done'
+    receipts = {r['kind']: r['id'] for r in s.get('a')['metadata']['evidence']['email_receipts']}
+    assert receipts['guest'] == 'gmail:abc' and receipts['team'].startswith('MSG-')
+    assert all(p.get('report_prior') for p in api.sent) and len(api.sent) == 2
+
+
+def test_duplicate_without_prior_id_stays_manual(tmp_path):
+    s, api, worker = make(tmp_path)
+    s.enqueue('a', raw(), NOW)
+    api.send_responses = [(200, {'result': {'sent': False, 'duplicate': True, 'prior': None}})]
+    assert worker.run_once()['status'] == 'manual'
