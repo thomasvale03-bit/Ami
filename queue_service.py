@@ -255,9 +255,11 @@ def validate_completion(raw, metadata, require_team_receipt=True):
 
 
 def flag_alerts_enabled():
-    """Venue-change / double-booking alerts to team@ (Thomas, Nov 16 2026).
-    On unless AMY_QUEUE_FLAG_ALERTS=false."""
-    return os.environ.get('AMY_QUEUE_FLAG_ALERTS', 'true').lower() != 'false'
+    """Venue-change / double-booking alert emails to team@. OFF by default
+    (Thomas, Nov 16 2026 10:14 AM: "Dont need emails sent to me. Ok to double
+    book."). Only AMY_QUEUE_FLAG_ALERTS=true turns them back on. The read-only
+    GET /queue/flags list is unaffected; double bookings are never blocked."""
+    return os.environ.get('AMY_QUEUE_FLAG_ALERTS', '').lower() == 'true'
 
 
 def _branded_sender(payload):
@@ -267,6 +269,8 @@ def _branded_sender(payload):
 
 
 def send_flag_alert(s, ref, now):
+    if not flag_alerts_enabled():
+        return None
     import queue_flags
     return queue_flags.send_alert(s, ref, now, datetime.fromtimestamp(now, PHOENIX).date(), _branded_sender)
 
@@ -349,6 +353,8 @@ def handle(method, url, headers, payload, *, s=None, now=None):
         if method == 'POST' and path.startswith('/queue/flags/alert/'):
             # Owner tool: send (or re-send; deduped by subject) one job's alert now.
             ref = unquote(path[len('/queue/flags/alert/'):])
+            if not flag_alerts_enabled():
+                raise Conflict('Flag alert emails are off (owner, Nov 16 2026)')
             if s.get(ref) is None:
                 raise Conflict('Unknown job')
             return 200, {'ref': ref, 'alert': send_flag_alert(s, ref, now)}
