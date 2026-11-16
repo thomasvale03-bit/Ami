@@ -89,25 +89,103 @@ def test_live_completion_with_fallback_marks_done(tmp_path):
 
 # --- 2. duplicate guest email ------------------------------------------------
 
-def test_duplicate_guest_email_completes_with_prior_receipt(tmp_path):
+def test_duplicate_guest_email_covering_same_orders_completes_with_prior_receipt(tmp_path):
     s, api, worker = make(tmp_path)
     s.enqueue('a', wraw(), NOW)
     api.send_responses = [(200, {'result': {'sent': False, 'duplicate': True,
-                                            'prior': {'id': 'gmail:abc', 'source': 'gmail_sent'}}})]
+                                            'prior': {'id': 'gmail:abc', 'source': 'gmail_sent', 'order_ids': ['ORDER-1']}}})]
     assert worker.run_once()['status'] == 'done'
-    row = s.get('a')
-    assert row['state'] == 'done'
-    receipts = {r['kind']: r['id'] for r in row['metadata']['evidence']['email_receipts']}
+    receipts = {r['kind']: r['id'] for r in s.get('a')['metadata']['evidence']['email_receipts']}
     assert receipts['guest'] == 'gmail:abc' and receipts['team'].startswith('MSG-')
     assert all(p.get('report_prior') for p in api.sent)
     assert len(api.sent) == 2  # one guest attempt (refused as duplicate), one team email
 
 
+def test_second_order_same_night_sends_updated_guest_and_team(tmp_path):
+    """Samantha Nov 16: the earlier email listed another order, so the new
+    order gets an Updated: guest confirmation and its own team notice."""
+    s, api, worker = make(tmp_path)
+    s.enqueue('a', wraw(), NOW)
+    other = {'id': 'MID-0', 'source': 'branded_log', 'order_ids': ['OTHER-ORDER']}
+    api.send_responses = [(200, {'result': {'sent': False, 'duplicate': True, 'prior': other}}),
+                          (200, {'result': {'sent': True, 'id': 'UPD-G'}}),
+                          (200, {'result': {'sent': False, 'duplicate': True, 'prior': other}}),
+                          (200, {'result': {'sent': True, 'id': 'UPD-T'}})]
+    assert worker.run_once()['status'] == 'done'
+    subjects = [p['subject'] for p in api.sent]
+    assert subjects[1] == "Updated: You're on the Playmaker Entertainment guest list for November 25 (Order ORDER-1)"
+    assert subjects[3].startswith('Updated: Signed up: Mock Guest') and subjects[3].endswith('(Order ORDER-1)')
+    assert 'Updated confirmation' in api.sent[1]['text'] and 'Updated confirmation' in api.sent[1]['html']
+    receipts = {r['kind']: r['id'] for r in s.get('a')['metadata']['evidence']['email_receipts']}
+    assert receipts == {'guest': 'UPD-G', 'team': 'UPD-T'}
+
+
+def test_unknown_prior_coverage_sends_updated(tmp_path):
+    s, api, worker = make(tmp_path)
+    s.enqueue('a', wraw(), NOW)
+    api.send_responses = [(200, {'result': {'sent': False, 'duplicate': True, 'prior': {'id': 'branded-log:x', 'order_ids': None}}})]
+    assert worker.run_once()['status'] == 'done'
+    assert api.sent[1]['subject'].startswith('Updated: ')
+
+
+def test_updated_also_already_sent_reuses_it_and_never_loops(tmp_path):
+    s, api, worker = make(tmp_path)
+    s.enqueue('a', wraw(), NOW)
+    dup = (200, {'result': {'sent': False, 'duplicate': True, 'prior': {'id': 'P1', 'order_ids': []}}})
+    api.send_responses = [dup, (200, {'result': {'sent': False, 'duplicate': True, 'prior': {'id': 'P2', 'order_ids': ['ORDER-1']}}})]
+    assert worker.run_once()['status'] == 'done'
+    assert {r['kind']: r['id'] for r in s.get('a')['metadata']['evidence']['email_receipts']}['guest'] == 'P2'
+    assert len(api.sent) == 3
+
+
 def test_duplicate_without_prior_id_stays_manual(tmp_path):
     s, api, worker = make(tmp_path)
     s.enqueue('a', wraw(), NOW)
-    api.send_responses = [(200, {'result': {'sent': False, 'duplicate': True, 'prior': None}})]
+    nothing = (200, {'result': {'sent': False, 'duplicate': True, 'prior': None}})
+    api.send_responses = [nothing, nothing]
     assert worker.run_once()['status'] == 'manual'
+
+
+def test_added_venue_after_confirmation_sends_updated(tmp_path):
+    """Angela Nov 16: JEWEL booked and emailed earlier; Marquee Dayclub added
+    later must not reuse the old receipts silently."""
+    import time
+    import booking_worker as bw
+    s, api, worker = make(tmp_path)
+    s.enqueue('a', wraw(venues=['Hakkasan Nightclub', 'Marquee Dayclub']), NOW)
+    old = {'verified': True, 'venue': 'Hakkasan Nightclub', 'date': '2026-11-25', 'order_id': 'OLD-1',
+           'party': {'male_count': 1, 'female_count': 2}}
+    worker.ledger.put(bw.night_key('a', 'Hakkasan Nightclub', '2026-11-25'), {'state': 'booked', 'record': old, 'meta': {}})
+    time.sleep(0.01)
+    worker.ledger.put('a|emails', {'receipts': {'guest': 'G0', 'team': 'T0'}})
+    time.sleep(0.01)
+    assert worker.run_once()['status'] == 'done'
+    assert len(worker.tao.submits) == 1  # only the new venue was booked
+    assert [p['subject'].split(':')[0] for p in api.sent] == ['Updated', 'Updated']
+    assert 'OLD-1' in api.sent[0]['text'] and 'ORDER-1' in api.sent[0]['text']
+    receipts = {r['kind']: r['id'] for r in s.get('a')['metadata']['evidence']['email_receipts']}
+    assert receipts['guest'] != 'G0' and receipts['team'] != 'T0'
+
+
+def test_saved_receipts_covering_all_orders_are_reused(tmp_path):
+    import booking_worker as bw
+    import time
+    s, api, worker = make(tmp_path)
+    s.enqueue('a', wraw(venues=['Hakkasan Nightclub']), NOW)
+    old = {'verified': True, 'venue': 'Hakkasan Nightclub', 'date': '2026-11-25', 'order_id': 'OLD-1',
+           'party': {'male_count': 1, 'female_count': 2}}
+    worker.ledger.put(bw.night_key('a', 'Hakkasan Nightclub', '2026-11-25'), {'state': 'booked', 'record': old, 'meta': {}})
+    time.sleep(0.01)
+    worker.ledger.put('a|emails', {'receipts': {'guest': 'G0', 'team': 'T0'}})
+    assert worker.run_once()['status'] == 'done'
+    assert api.sent == []
+
+
+def test_branded_log_records_order_ids(monkeypatch):
+    import gmail_client
+    gmail_client.record_branded_sent('g@example.invalid', 'Subj', 'x Order ID abcdef12-3456 y Order ID 99887766', message_id='M1')
+    entry = gmail_client._branded_sent_entry('to:g@example.invalid subject:"Subj"')
+    assert entry['order_ids'] == ['99887766', 'abcdef12-3456'] and entry['id'] == 'M1'
 
 
 def test_send_branded_reports_prior_from_send_log(monkeypatch):
