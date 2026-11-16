@@ -117,3 +117,18 @@ def test_owner_complete_refuses_fallback_venue(qenv):
     code, body = q.handle('POST', '/queue/owner-complete/mock', AUTH, {'owner_approval': 'pt992u'}, s=qenv, now=NOW)
     assert code == 409 and 'exact source date/venue' in body['error']
     assert qenv.get('mock')['state'] == 'manual'
+
+
+def test_owner_requeue_pulls_retry_forward(qenv):
+    import json
+    qenv.enqueue('r1', dict(raw(venues=('TAO Nightclub',)), name='M G', email='g@example.invalid'), NOW)
+    with qenv.connect() as db:
+        db.execute("UPDATE queue_jobs SET state='retry',due=? WHERE ref='r1'", (NOW + 3600,))
+    code, row = q.handle('POST', '/queue/requeue/r1', AUTH, {'owner_approval': 'pt995u'}, s=qenv, now=NOW)
+    assert code == 200 and row['state'] == 'queued' and row['due'] <= NOW
+    # A retry job with submission progress is never requeued.
+    qenv.enqueue('r2', dict(raw(), name='M G', email='h@example.invalid'), NOW)
+    with qenv.connect() as db:
+        db.execute("UPDATE queue_jobs SET state='retry',metadata=? WHERE ref='r2'",
+                   (json.dumps({'progress': {'submitting': {'OMNIA Nightclub|2026-11-15': True}}}),))
+    assert q.handle('POST', '/queue/requeue/r2', AUTH, {'owner_approval': 'pt995u'}, s=qenv, now=NOW)[0] == 409
