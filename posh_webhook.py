@@ -554,11 +554,24 @@ def send_branded(service, payload, _sleep=None):
     else:
         dedupe_q = (f"to:{to} {gmail_client.FOLLOW_UP_SEARCH} newer_than:60d"
                     if is_followup else f'to:{to} subject:"{subject}"')
-    if _gmail_call(lambda: gmail_client.already_sent(service, dedupe_q), _sleep=_sleep):
-        return 200, "duplicate (already in Sent)"
-    with _branded_lock:
-        if (to.lower(), subject) in _zoho_sent or (is_followup and (to.lower(), "__followup__") in _zoho_sent):
+    def _duplicate():
+        # Booking worker (report_prior): say which earlier email matched so the
+        # job can complete with that receipt instead of stopping at manual.
+        if not payload.get("report_prior"):
             return 200, "duplicate (already in Sent)"
+        try:
+            prior = gmail_client.prior_sent(service, dedupe_q)
+        except Exception:  # noqa: BLE001
+            log.exception("prior_sent lookup failed")
+            prior = None
+        return 200, {"sent": False, "duplicate": True, "detail": "duplicate (already in Sent)", "prior": prior}
+
+    if _gmail_call(lambda: gmail_client.already_sent(service, dedupe_q), _sleep=_sleep):
+        return _duplicate()
+    with _branded_lock:
+        dup = (to.lower(), subject) in _zoho_sent or (is_followup and (to.lower(), "__followup__") in _zoho_sent)
+    if dup:
+        return _duplicate()
     if zoho_configured() and not from_name:
         try:
             mid = _zoho_send(to, subject, text, html, sender)
@@ -566,7 +579,7 @@ def send_branded(service, payload, _sleep=None):
                 _zoho_sent.add((to.lower(), subject))
                 if is_followup:
                     _zoho_sent.add((to.lower(), "__followup__"))
-            gmail_client.record_branded_sent(to, subject, text)
+            gmail_client.record_branded_sent(to, subject, text, message_id=mid)
             log.info("Branded email sent via zoho to %s from %s (id %s)", to, sender, mid)
             return 200, {"sent": True, "id": mid, "from": sender, "via": "zoho"}
         except Exception as e:  # noqa: BLE001

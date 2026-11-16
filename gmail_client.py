@@ -648,7 +648,7 @@ def _load_branded_sent():
     return []
 
 
-def record_branded_sent(to, subject, body=""):
+def record_branded_sent(to, subject, body="", message_id=None):
     """Persist a /send-branded send (e.g. Zoho SMTP, which bypasses Gmail Sent)
     so already_sent() and send_follow_ups() never duplicate it, and confirmations
     sent via Zoho are also visible to recent_confirmations()."""
@@ -662,6 +662,8 @@ def record_branded_sent(to, subject, body=""):
         return
     subj = (subject or "").strip()
     entry = {"to": addr, "subject": subj, "ts": int(time.time())}
+    if message_id:
+        entry["id"] = str(message_id)
     sl = subj.lower()
     if (CONFIRMATION_SUBJECT_CONCIERGE.lower() in sl
             or CONFIRMATION_SUBJECT_POST_SIGNUP.lower() in sl
@@ -683,6 +685,26 @@ def record_branded_sent(to, subject, body=""):
         log.exception("Could not save branded_sent log %s", path)
 
 
+def _branded_sent_entry(query):
+    """The latest persisted /send-branded entry matching query, else None."""
+    q = query or ""
+    m_to = re.search(r"\bto:([^\s)]+)", q, re.I)
+    if not m_to:
+        return None
+    addr = m_to.group(1).strip().strip('"').lower()
+    ql = q.lower()
+    is_followup = "hope you had fun" in ql or "until next time" in ql or "see you next time" in ql
+    m_sub = re.search(r'subject:"([^"]+)"', q, re.I)
+    found = None
+    for entry in _load_branded_sent():
+        if (entry.get("to") or "").lower() != addr:
+            continue
+        esub = entry.get("subject") or ""
+        if (is_followup and esub.lower().startswith("hope you had fun")) or (m_sub and esub == m_sub.group(1)):
+            found = entry
+    return found
+
+
 def _branded_sent_matches(query):
     """True if query matches a pre-seeded or persisted /send-branded email."""
     q = query or ""
@@ -694,16 +716,29 @@ def _branded_sent_matches(query):
     is_followup = "hope you had fun" in ql or "until next time" in ql or "see you next time" in ql
     if is_followup and addr in _SEED_FOLLOWUP_RECIPIENTS:
         return True
-    for entry in _load_branded_sent():
-        if (entry.get("to") or "").lower() != addr:
-            continue
-        esub = entry.get("subject") or ""
-        if is_followup and esub.lower().startswith("hope you had fun"):
-            return True
-        m_sub = re.search(r'subject:"([^"]+)"', q, re.I)
-        if m_sub and esub == m_sub.group(1):
-            return True
-    return False
+    return _branded_sent_entry(query) is not None
+
+
+def prior_sent(service, query):
+    """Find the earlier email that already_sent(query) matched, so a duplicate
+    send can still be completed with a real receipt reference.
+
+    Returns {"id", "source", ...} or None. Gmail Sent hits give the Gmail
+    message id ("gmail:<id>"). Zoho sends logged in branded_sent.json give the
+    logged Message-ID, or "branded-log:<to>:<ts>" for entries logged before
+    message ids were recorded (Nov 16 2026)."""
+    try:
+        resp = service.users().messages().list(userId="me", q=f"in:sent {query}", maxResults=1).execute()
+        msgs = (resp or {}).get("messages") or []
+        if msgs and msgs[0].get("id"):
+            return {"id": "gmail:" + str(msgs[0]["id"]), "source": "gmail_sent"}
+    except Exception:  # noqa: BLE001
+        log.exception("prior_sent Gmail lookup failed")
+    entry = _branded_sent_entry(query)
+    if entry:
+        return {"id": entry.get("id") or f"branded-log:{entry.get('to')}:{entry.get('ts')}",
+                "source": "branded_log", "subject": entry.get("subject"), "ts": entry.get("ts")}
+    return None
 
 
 def already_sent(service, query):

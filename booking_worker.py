@@ -658,10 +658,21 @@ class Worker:
     def _send_one(self, kind, payload):
         deadline = self.now() + self.email_wait
         while True:
-            code, body = self.api.send_branded(payload)
+            # report_prior: on a duplicate, the server says which earlier email
+            # matched (Gmail Sent id or the branded send-log Message-ID), so a
+            # verified booking completes with that receipt instead of stopping
+            # at manual (Thomas, Nov 16 2026). The guest is never emailed twice.
+            code, body = self.api.send_branded({**payload, "report_prior": True})
             result = (body or {}).get("result") if isinstance(body, dict) else None
             if code == 200 and isinstance(result, dict) and result.get("sent") and result.get("id"):
                 return result["id"]
+            if code == 200 and isinstance(result, dict) and result.get("duplicate"):
+                prior = result.get("prior") or {}
+                if prior.get("id"):
+                    log.info("%s email was already sent earlier (%s); using that receipt", kind, prior.get("source"))
+                    return str(prior["id"])
+                raise Stop("manual", f"{kind} email: /send-branded reports it was already sent but could not find "
+                           "the prior message ID. Bookings done, DO NOT rebook")
             if code == 200 and isinstance(result, str) and "duplicate" in result.lower():
                 raise Stop("manual", f"{kind} email: /send-branded reports it was already sent; find the prior "
                            "message ID before completing. Bookings done, DO NOT rebook")

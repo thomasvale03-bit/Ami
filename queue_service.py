@@ -58,6 +58,10 @@ def exceptions_summary(s, limit=100):
             'party': {'female_count': raw.get('female_count'), 'male_count': raw.get('male_count')},
             'source': raw.get('source', ''),
             'progress': meta.get('progress') or {}, 'resolution': meta.get('resolution') or {},
+            # Verified orders already placed for this job (so a "manual" job
+            # that is really booked is never mistaken for an unbooked one).
+            'booked': [{'venue': b.get('venue'), 'date': b.get('date'), 'order_id': b.get('order_id'),
+                        'fallback': bool(b.get('fallback'))} for b in Store.saved_bookings(meta)],
         })
     counts = {}
     for item in items:
@@ -131,15 +135,34 @@ def is_mdc_addon(venue, night, requested_nights, drais):
     extra receipt is accepted ONLY for Marquee Dayclub, ONLY on a night that is
     in the request, never for Drai's jobs, and never in place of the requested
     venue (the requested venue/date receipts are still all required). Any other
-    venue not in the request (e.g. a Hakkasan->JEWEL fallback) is still refused
-    so venue changes stay flagged for review (Thomas, Nov 15 2026).
+    venue not in the request is handled by is_approved_fallback (accepted on
+    the same requested night only, recorded and flagged to team@).
     """
     from config import rules
     return (not drais and venue == MDC_ADDON_VENUE and night in requested_nights
             and night <= rules.MARQUEE_DAYCLUB_PUSH_END)
 
 
-def validate_completion(raw, metadata):
+# Venues the worker's approved routing may move a night to (Thomas: OMNIA is
+# the first fallback for closed/code-required nights; weekday routing falls
+# back to Marquee, TAO or Hakkasan; Nov 15 2026 OMNIA->TAO move).
+FALLBACK_TARGETS = frozenset({'OMNIA Nightclub', 'Marquee Nightclub', 'TAO Nightclub', 'Hakkasan Nightclub'})
+
+
+def is_approved_fallback(record, venue, night, requested_nights, drais):
+    """A booked venue that differs from the request is accepted ONLY on a night
+    that is in the request (exact-date rule never relaxes), never for Drai's
+    jobs or as a Drai's receipt, and only when the worker marked it
+    fallback:true (nightclub) or it is one of the approved fallback venues.
+    Each accepted change is returned by validate_completion, saved on the job
+    and emailed to team@ (venue changes are always flagged)."""
+    from config import rules
+    if drais or night not in requested_nights or rules.is_drais(venue) or not rules.is_known_vegas_venue(venue):
+        return False
+    return venue in FALLBACK_TARGETS or (record.get('fallback') is True and 'Nightclub' in venue)
+
+
+def validate_completion(raw, metadata, require_team_receipt=True):
     """Evidence supplied by AMYI after observing actual UI confirmation.
 
     The queue cannot observe a click or independently prove a receipt. It checks
@@ -159,6 +182,7 @@ def validate_completion(raw, metadata):
         expected = {(v, date.fromordinal(day).isoformat()) for v in venues for day in range(start.toordinal(), end.toordinal() + 1)}
         requested_nights = {night for _v, night in expected}
         actual = set()
+        fallbacks = []
         drais = any(rules.is_drais(v) for v in venues)
         for record in records:
             if not isinstance(record, dict):
@@ -167,7 +191,9 @@ def validate_completion(raw, metadata):
             if record.get('verified') is not True:
                 raise Conflict('Receipt must match exact source date/venue')
             mdc_extra = (venue, night) not in expected and is_mdc_addon(venue, night, requested_nights, drais)
-            if (venue, night) not in expected and not mdc_extra:
+            fallback = ((venue, night) not in expected and not mdc_extra
+                        and is_approved_fallback(record, venue, night, requested_nights, drais))
+            if (venue, night) not in expected and not mdc_extra and not fallback:
                 raise Conflict('Receipt must match exact source date/venue')
             party = record.get('party')
             expected_party = {'male_count': int(raw.get('male_count') or 0),
@@ -198,20 +224,84 @@ def validate_completion(raw, metadata):
                         raise Conflict("Drai's permits only name+party fields")
             elif not record.get('order_id'):
                 raise Conflict('Actual order ID required')
-            if not mdc_extra:
+            if fallback:
+                fallbacks.append((venue, night, record))
+            elif not mdc_extra:
                 actual.add((venue, night))
+        venue_changes = []
+        for venue, night, record in fallbacks:
+            open_pairs = sorted(p for p in expected - actual if p[1] == night)
+            if not open_pairs:
+                raise Conflict('Fallback receipt has no unbooked requested venue on that night')
+            actual.add(open_pairs[0])
+            venue_changes.append({'requested_venue': open_pairs[0][0], 'booked_venue': venue, 'date': night,
+                                  'order_id': record.get('order_id')})
         if actual != expected:
             raise Conflict('All exact source venue/date records required; incomplete jobs stay active/manual')
         if not drais or evidence.get('email_receipts'):
             receipts = evidence.get('email_receipts')
             if not isinstance(receipts, list) or not receipts or any(not isinstance(r, dict) or not r.get('id') for r in receipts):
                 raise Conflict('Actual email send receipts required before completion')
-            if {r.get('kind') for r in receipts} != {'guest', 'team'}:
+            kinds = {r.get('kind') for r in receipts}
+            if require_team_receipt and kinds != {'guest', 'team'}:
                 raise Conflict('Approved guest and team receipt IDs required')
+            if not require_team_receipt and ('guest' not in kinds or not kinds <= {'guest', 'team'}):
+                raise Conflict('Approved guest receipt ID required')
     except (KeyError, TypeError, ValueError) as exc:
         if isinstance(exc, Conflict):
             raise
         raise Conflict('Malformed receipt/source metadata') from exc
+    return {'venue_changes': venue_changes}
+
+
+def flag_alerts_enabled():
+    """Venue-change / double-booking alerts to team@ (Thomas, Nov 16 2026).
+    On unless AMY_QUEUE_FLAG_ALERTS=false."""
+    return os.environ.get('AMY_QUEUE_FLAG_ALERTS', 'true').lower() != 'false'
+
+
+def _branded_sender(payload):
+    import gmail_client
+    import posh_webhook
+    return posh_webhook.send_branded(gmail_client.get_service(), payload)
+
+
+def send_flag_alert(s, ref, now):
+    import queue_flags
+    return queue_flags.send_alert(s, ref, now, datetime.fromtimestamp(now, PHOENIX).date(), _branded_sender)
+
+
+def _dispatch_alert(s, ref, now):
+    """Background (never delays or fails the queue reply). Tests replace this."""
+    if not flag_alerts_enabled():
+        return
+    import threading
+
+    def run():
+        try:
+            send_flag_alert(s, ref, now)
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger('amy.queue').exception('Flag alert failed for %s', ref)
+    threading.Thread(target=run, name='flag-alert-' + ref, daemon=True).start()
+
+
+def lookup_prior_send(raw, kind):
+    """The earlier guest confirmation /send-branded refused as a duplicate
+    (same recipient + subject the worker uses), from Gmail Sent or the
+    branded send log. Read-only."""
+    if kind != 'guest':
+        return None
+    import gmail_client
+    import worker_emails
+    from config import rules
+    email = (raw.get('email') or '').strip()
+    if not email:
+        return None
+    drais = any(rules.is_drais(rules.normalize_venue_name(v)) for v in raw.get('venues') or [])
+    subject = (worker_emails.drais_guest_subject if drais else worker_emails.guest_subject)(
+        raw['start_date'], raw['end_date'])
+    return gmail_client.prior_sent(gmail_client.get_service(), f'to:{email} subject:"{subject}"')
 
 
 def handle(method, url, headers, payload, *, s=None, now=None):
@@ -249,9 +339,22 @@ def handle(method, url, headers, payload, *, s=None, now=None):
             import gmail_client
             import main as amy_main
             return 200, amy_main.scottsdale_door_list_preview(gmail_client.get_service(), night)
+        if method == 'GET' and path == '/queue/flags':
+            # Every venue change and same-night double booking from today on
+            # (or ?from=YYYY-MM-DD), across ALL job states. Read-only.
+            import queue_flags
+            start = parse_qs(urlparse(url).query).get('from', [''])[0]
+            today = date.fromisoformat(start) if start else datetime.fromtimestamp(now, PHOENIX).date()
+            return 200, queue_flags.upcoming_flags(s, today)
+        if method == 'POST' and path.startswith('/queue/flags/alert/'):
+            # Owner tool: send (or re-send; deduped by subject) one job's alert now.
+            ref = unquote(path[len('/queue/flags/alert/'):])
+            if s.get(ref) is None:
+                raise Conflict('Unknown job')
+            return 200, {'ref': ref, 'alert': send_flag_alert(s, ref, now)}
         if method == 'GET' and path == '/queue/jobs':
             query = parse_qs(urlparse(url).query)
-            limit = max(1, min(int(query.get('limit', ['50'])[0]), 100))
+            limit = max(1, min(int(query.get('limit', ['50'])[0]), 1000))
             return 200, {'jobs': s.listing(query.get('state', [None])[0], limit)}
         if method == 'GET' and path.startswith('/queue/jobs/'):
             row = s.get(unquote(path[len('/queue/jobs/'):]))
@@ -283,6 +386,18 @@ def handle(method, url, headers, payload, *, s=None, now=None):
             row = s.owner_complete(ref, payload.get('owner_approval'), now)
             import job_tracker
             job_tracker.update(ref, queue_owned=True, status='done', done_at=now)
+            if payload.get('alert', True) is not False:
+                _dispatch_alert(s, ref, now)
+            return 200, row
+        if method == 'POST' and path.startswith('/queue/owner-reconcile/'):
+            if not isinstance(payload, dict):
+                raise Conflict('JSON object required')
+            ref = unquote(path[len('/queue/owner-reconcile/'):])
+            row = s.owner_reconcile(ref, payload.get('owner_approval'), now, lookup_prior=lookup_prior_send)
+            import job_tracker
+            job_tracker.update(ref, queue_owned=True, status='done', done_at=now)
+            if payload.get('alert', True) is not False:
+                _dispatch_alert(s, ref, now)
             return 200, row
         if method == 'POST' and path.startswith('/queue/jobs/'):
             if not isinstance(payload, dict):
@@ -293,6 +408,9 @@ def handle(method, url, headers, payload, *, s=None, now=None):
             import job_tracker
             job_tracker.update(ref, queue_owned=True, status='done' if row['state'] == 'done' else 'queue:' + row['state'],
                                done_at=now if row['state'] == 'done' else None)
+            if payload.get('action') in ('complete', 'manual', 'uncertain') and row['state'] in (
+                    'done', 'manual', 'submission_uncertain'):
+                _dispatch_alert(s, ref, now)
             return 200, row
         return 404, {'error': 'not found'}
     except (Conflict, ValueError, TypeError) as exc:
