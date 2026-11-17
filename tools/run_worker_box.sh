@@ -62,6 +62,13 @@ stop() {
     pkill -P "$(cat "$PIDFILE")" 2>/dev/null || true
     kill "$(cat "$PIDFILE")" 2>/dev/null || true
   fi
+  # The worker runs in its own session (start_new_session), so killing the bash
+  # loop's children does not reach it: stop any leftover supervisor/worker too,
+  # or an orphaned old worker keeps running pickups next to the new one.
+  pkill -f "stall_watchdog.py --supervise" 2>/dev/null || true
+  pkill -f "booking_worker.py --loop" 2>/dev/null || true
+  sleep 1
+  pkill -9 -f "booking_worker.py --loop" 2>/dev/null || true
   pkill -f "user-data-dir=${AMY_BROWSER_PROFILE:-/workspace/worker-profile}" 2>/dev/null || true
   rm -f "$PIDFILE"; echo stopped
 }
