@@ -203,6 +203,7 @@ Amy's `--loop` process also runs a tiny web server (`PORT`, default 8080):
 
 - `POST /webhooks/posh?token=<POSH_WEBHOOK_TOKEN>`: Posh "New order" webhook
 - `GET /healthz`: returns `{"result": "ok"}`
+- `GET /dashboard?key=<DASHBOARD_KEY>`: read-only live queue page (mobile-friendly, auto-refreshes every 60s). The key is stored in an HttpOnly cookie so the bookmark keeps working. Never share the key or put it in logs.
 
 The webhook checks the token, skips cancelled, refunded, disputed and in-person
 orders and anything that isn't `new_order` (`new_order_request` = pending, not

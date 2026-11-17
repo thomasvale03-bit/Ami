@@ -1271,12 +1271,14 @@ def notify_team_website(service, clean, subject):
 
 def make_handler(intake, store=None):
     class Handler(BaseHTTPRequestHandler):
-        def _send(self, code, ctype, data):
+        def _send(self, code, ctype, data, headers=None):
             data = data.encode() if isinstance(data, str) else data
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(data)
 
@@ -1324,6 +1326,10 @@ def make_handler(intake, store=None):
 
         def do_GET(self):
             path = urlparse(self.path).path.rstrip("/")
+            if path == "/dashboard":
+                import queue_dashboard
+                code, ctype, body, extra = queue_dashboard.handle("GET", self.path, self.headers)
+                return self._send(code, ctype, body, extra)
             if path.startswith("/queue/"):
                 import queue_service
                 code, result = queue_service.handle("GET", self.path, self.headers, None)
@@ -1534,6 +1540,6 @@ def serve(intake, port=None, host="0.0.0.0", store=None):
     port = int(port if port is not None else os.environ.get("PORT", "8080"))
     server = ThreadingHTTPServer((host, port), make_handler(intake, store))
     threading.Thread(target=server.serve_forever, name="posh-webhook", daemon=True).start()
-    log.info("Posh webhook listening on :%d (POST /webhooks/posh, GET /healthz, /newsletter/optin, /unsubscribe, /newsletter/export)%s", server.server_address[1],
+    log.info("Posh webhook listening on :%d (POST /webhooks/posh, GET /healthz, /dashboard, /newsletter/optin, /unsubscribe, /newsletter/export)%s", server.server_address[1],
              "" if expected_token() else " - POSH_WEBHOOK_TOKEN not set, every webhook will be rejected")
     return server
