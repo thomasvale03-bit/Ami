@@ -169,7 +169,8 @@ def request_catch_up(directory):
     (directory / "run_now").touch()
 
 
-def record_stall(directory, *, slot, duration, requeued, clock=time.time, logger=None):
+def record_stall(directory, *, slot, duration, requeued, clock=time.time, logger=None, recovery=None,
+                 chrome_ok=None):
     """Write the STALL_RESTART log line and append one JSONL event."""
     logger = logger or log
     ids = list(requeued or [])
@@ -186,6 +187,12 @@ def record_stall(directory, *, slot, duration, requeued, clock=time.time, logger
         "duration": int(duration),
         "requeued": ids,
     }
+    # Extra detail for the in-worker audit (worker_monitor.unrecovered_stalls).
+    for key in ("finished", "uncertain", "left_manual"):
+        if (recovery or {}).get(key):
+            event[key] = list(recovery[key])
+    if chrome_ok is not None:
+        event["chrome_ok"] = bool(chrome_ok)
     path = directory / EVENTS_NAME
     with path.open("a") as handle:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
@@ -346,6 +353,17 @@ def restart_chrome_if_needed():
         return None
 
 
+def _chrome_answers():
+    """True/False for the plain worker Chrome, None when not applicable."""
+    if os.environ.get("AMY_BROWSER_LAUNCH", "").lower() != "plain":
+        return None
+    try:
+        import browser_host
+        return bool(browser_host.healthy())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def handle_stall(proc, directory, api, ledger, *, clock=time.time, worker=None, sleep=time.sleep):
     hb = read_heartbeat(directory) or {}
     slot = hb.get("slot")
@@ -361,11 +379,15 @@ def handle_stall(proc, directory, api, ledger, *, clock=time.time, worker=None, 
         release_worker_lock()
     except Exception:  # noqa: BLE001
         log.exception("stall lock release failed")
+    chrome_ok = None
     try:
         restart_chrome_if_needed()
+        chrome_ok = _chrome_answers()
     except Exception:  # noqa: BLE001
         log.exception("stall chrome restart failed")
-    record_stall(directory, slot=slot, duration=duration, requeued=recovery.get("requeued") or [], clock=clock)
+        chrome_ok = False if os.environ.get("AMY_BROWSER_LAUNCH", "").lower() == "plain" else None
+    record_stall(directory, slot=slot, duration=duration, requeued=recovery.get("requeued") or [], clock=clock,
+                 recovery=recovery, chrome_ok=chrome_ok)
     request_catch_up(directory)
     end_run(directory)
     return recovery

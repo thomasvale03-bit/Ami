@@ -14,12 +14,17 @@
 #   AMY_WORKER_MODE=dry-run         (live also needs AMY_WORKER_LIVE_CONFIRM=yes)
 #   AMY_WORKER_DRAIS=true
 #   SPEAKEASY_EMAIL=... SPEAKEASY_PASSWORD=...
+# Monitor alerts (in-worker sweep/audit, worker_monitor.py): /workspace/amy-worker/alert.env
+#   (mode 600) with AMYI_WEBHOOK_URL=... and AMYI_WEBHOOK_AUTH=<full Authorization value>.
+#   Sourced at start; the monitor also re-reads it before each alert, so no restart
+#   is needed. `alert-env` writes it from those two env vars without printing them.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 RUN=/workspace/amy-worker
 PIDFILE="$RUN/worker.pid"
 LOG="$RUN/worker.log"
 DATA="${AMY_WORKER_DIR:-$RUN/data}"
+ALERT_ENV="${AMY_ALERT_ENV:-$RUN/alert.env}"
 mkdir -p "$RUN" && chmod 700 "$RUN"
 
 running() { [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
@@ -29,6 +34,8 @@ start() {
   (
     set -a
     [[ -f /home/box/.config/amy-worker.env ]] && . /home/box/.config/amy-worker.env
+    [[ -f "$ALERT_ENV" ]] && . "$ALERT_ENV"
+    AMY_ALERT_ENV="$ALERT_ENV"
     AMY_QUEUE_API_TOKEN="$(cat /home/box/agent-data/amy-queue-client/api-token)"
     [[ -f /home/box/.config/amy_branded_send_token ]] && BRANDED_SEND_TOKEN="$(cat /home/box/.config/amy_branded_send_token)"
     AMY_BROWSER_LAUNCH=plain                       # plain Chrome + CDP (passes Cloudflare)
@@ -80,12 +87,22 @@ run_now() {
   echo "worker pid $(cat "$PIDFILE"): off-schedule pickup of the whole queue requested (starts within 5 s)"
 }
 
+alert_env() {
+  # Write AMYI_WEBHOOK_URL / AMYI_WEBHOOK_AUTH from this shell's env; never echoes values.
+  if [[ -z "${AMYI_WEBHOOK_URL:-}" ]]; then echo "AMYI_WEBHOOK_URL not set in this shell" >&2; exit 1; fi
+  umask 077
+  { printf 'AMYI_WEBHOOK_URL=%q\n' "$AMYI_WEBHOOK_URL"; printf 'AMYI_WEBHOOK_AUTH=%q\n' "${AMYI_WEBHOOK_AUTH:-}"; } > "$ALERT_ENV.tmp"
+  chmod 600 "$ALERT_ENV.tmp" && mv "$ALERT_ENV.tmp" "$ALERT_ENV"
+  echo "wrote $ALERT_ENV (mode 600; values not shown)"
+}
+
 case "${1:-}" in
   start) start ;;
   kick) kick ;;
   run-now) run_now ;;
   ensure) running && echo "running (pid $(cat "$PIDFILE"))" || start ;;
   stop) stop ;;
+  alert-env) alert_env ;;
   status) running && echo "running (pid $(cat "$PIDFILE"))" || echo "not running"; tail -n 5 "$LOG" 2>/dev/null || true ;;
-  *) echo "usage: $0 start|stop|status|ensure|kick|run-now" >&2; exit 2 ;;
+  *) echo "usage: $0 start|stop|status|ensure|kick|run-now|alert-env" >&2; exit 2 ;;
 esac

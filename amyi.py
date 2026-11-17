@@ -134,13 +134,13 @@ RETRY_DELAYS = (5, 30, 120)
 _inflight = set()
 
 
-def _post_once(payload, opener=None):
+def _post_once(payload, opener=None, url=None, auth=None):
     """One HTTP attempt. Returns (status or None, body text)."""
-    url = os.environ.get("AMYI_WEBHOOK_URL")
+    url = url or os.environ.get("AMYI_WEBHOOK_URL")
     if not url:
         return None, "AMYI_WEBHOOK_URL unset"
     headers = {"Content-Type": "application/json"}
-    auth = (os.environ.get("AMYI_WEBHOOK_AUTH") or "").strip()
+    auth = ((os.environ.get("AMYI_WEBHOOK_AUTH") or "") if auth is None else (auth or "")).strip()
     if auth.lower().startswith("authorization:"):  # tolerate a full "Authorization: ..." line
         auth = auth.split(":", 1)[1].strip()
     if auth:
@@ -193,6 +193,28 @@ def deliver(payload, _sleep=time.sleep, opener=None, delays=RETRY_DELAYS):
             _inflight.difference_update(keys)
     job_tracker.webhook_result(payload.get("ref") or "", status, attempts, ok, payload=payload)
     return ok
+
+
+def post_alert(payload, *, url=None, auth=None, opener=None, _sleep=time.sleep, delays=(5, 30)):
+    """Box-worker monitor alert (worker_monitor.py): ONE batched POST with a
+    couple of retries. No order dedupe here (the monitor dedupes ref+problem
+    for 6h) and no job-ledger write. Never sent under tests. The auth value is
+    never logged. Returns True on 2xx, False on failure, None when no URL."""
+    if _under_tests() and opener is None:
+        return None
+    if not (url or os.environ.get("AMYI_WEBHOOK_URL")):
+        return None
+    status, body = None, ""
+    for i in range(len(delays) + 1):
+        if i:
+            _sleep(delays[i - 1])
+        status, body = _post_once(payload, opener, url=url, auth=auth)
+        log.info("AMYI worker_alert (%s item(s)) attempt %d -> HTTP %s body=%r",
+                 payload.get("count"), i + 1, status, (body or "")[:300])
+        if status is not None and 200 <= status < 300:
+            return True
+    log.warning("AMYI worker_alert FAILED after %d attempts (last HTTP %s)", len(delays) + 1, status)
+    return False
 
 
 def _post(payload):

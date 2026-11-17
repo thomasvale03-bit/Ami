@@ -339,6 +339,7 @@ def pickup_step(worker, state, now, kicked=False):
     state.mark(slot)  # before running: a crash mid-run never re-runs the hour
     log.info("Pickup run %s starting (%s)", slot, "kick" if kicked else "schedule")
     stall_watchdog.start_run(state.dir, slot)
+    _mark_pickup(state.dir, now)
     try:
         try:
             result = worker.run_pickup()
@@ -359,6 +360,7 @@ def run_now(worker, max_batches=8, work_dir=None):
     directory = Path(work_dir or os.environ.get("AMY_WORKER_DIR", "/data/worker"))
     log.info("Off-schedule pickup (run_now) starting")
     stall_watchdog.start_run(directory, "run_now")
+    _mark_pickup(directory)
     try:
         batches = []
         for _ in range(max_batches):
@@ -379,10 +381,56 @@ def run_now(worker, max_batches=8, work_dir=None):
         stall_watchdog.end_run(directory)
 
 
-def live_loop(worker, work_dir, loop=True, step=5, heartbeat=600, clock=time.time, sleep=time.sleep):
+def _mark_pickup(directory, now=None):
+    """Record when a pickup started (the in-worker audit compares job creation
+    times against it)."""
+    try:
+        import worker_monitor
+        worker_monitor.mark_pickup(directory, now)
+    except Exception:  # noqa: BLE001
+        log.warning("could not record pickup start")
+
+
+def sweep_pickup(worker, work_dir):
+    """Fast intake sweep found due jobs: one normal pickup now, outside the
+    slot schedule. Same claim path, rules and per-job box lock as a scheduled
+    run; does not touch last_slot."""
+    directory = Path(work_dir)
+    log.info("Sweep pickup starting")
+    stall_watchdog.start_run(directory, "sweep")
+    _mark_pickup(directory)
+    try:
+        try:
+            result = worker.run_pickup()
+        except Exception:  # noqa: BLE001
+            log.exception("Sweep pickup failed")
+            result = {"status": "error"}
+        log.info("sweep run: %s", json.dumps(result, default=str)[:4000])
+        return result
+    finally:
+        stall_watchdog.end_run(directory)
+
+
+def build_monitor(worker, work_dir):
+    """In-worker sweep/health/audit (worker_monitor.py). AMY_WORKER_MONITOR=false
+    turns it off."""
+    if os.environ.get("AMY_WORKER_MONITOR", "true").lower() in ("0", "false", "no", "off"):
+        log.warning("In-worker monitor OFF (AMY_WORKER_MONITOR)")
+        return None
+    import worker_monitor
+    return worker_monitor.Monitor(worker.api, work_dir)
+
+
+def live_loop(worker, work_dir, loop=True, step=5, heartbeat=600, clock=time.time, sleep=time.sleep,
+              monitor=None):
     """Short sleeps, recomputed from wall-clock time every step (the box VM can
-    be paused mid-sleep), a kick file for an immediate pickup, a heartbeat."""
+    be paused mid-sleep), a kick file for an immediate pickup, a heartbeat.
+    `monitor` (worker_monitor.Monitor): fast intake sweep + self-health every
+    ~15 min and the stuck-sign-up audit every ~30 min, between pickups only."""
     state = SlotState(work_dir)
+    if monitor is not None:
+        log.info("Monitor on: intake sweep every %ss, audit every %ss (alerts via AMYI webhook)",
+                 monitor.sweep_every, monitor.audit_every)
     log.info("Pickup schedule (Phoenix): Mon-Wed %s; Thu-Sun %s; window :00-:%02d; next run %s",
              sorted(MON_WED_HOURS), sorted(THU_SUN_HOURS), RUN_WINDOW_MIN - 1, next_slot_label(clock()))
     last_beat = 0.0
@@ -392,6 +440,11 @@ def live_loop(worker, work_dir, loop=True, step=5, heartbeat=600, clock=time.tim
             run_now(worker, work_dir=state.dir)
             now = clock()
         slot, result = pickup_step(worker, state, now, kicked=state.take_kick())
+        if monitor is not None:
+            try:
+                monitor.tick(lambda reason: sweep_pickup(worker, state.dir), now=clock())
+            except Exception:  # noqa: BLE001
+                log.exception("Monitor tick failed")
         if not loop:
             return result or {"status": "not_scheduled", "next": next_slot_label(now)}
         if now - last_beat >= heartbeat:
@@ -1201,7 +1254,8 @@ def main(argv=None):
     idle = max(int(os.environ.get("AMY_WORKER_IDLE_SECONDS", "120")), 30)
     log.info("AMY booking worker started in %s mode", mode)
     if mode == "live":
-        return live_loop(worker, work_dir, loop=args.loop)
+        return live_loop(worker, work_dir, loop=args.loop,
+                         monitor=build_monitor(worker, work_dir) if args.loop else None)
     while True:
         try:
             result = worker.run_once()
