@@ -323,11 +323,22 @@ class RouterTest(unittest.TestCase):
         def chat_postMessage(self, **kw):
             self.posts.append(kw)
 
-    def test_existing_channel(self):
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        env = mock.patch.dict(os.environ, {'SLACK_WORKER_STATE': os.path.join(d.name, 'state.json')})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_existing_channel_single_hello(self):
         c = self.Client([{'name': 'general', 'id': 'C1'}, {'name': 'amy-bookings', 'id': 'C2'}])
         r = sw_app.Router(c, channel='amy-bookings', owner='U0CK42KJT7E')
         r.post('hi')
         self.assertEqual(c.posts[-1]['channel'], 'C2')
+        sw_app.Router(c, channel='amy-bookings', owner='U0CK42KJT7E').post('again')  # restart
+        hellos = [p for p in c.posts if 'AMY Worker here' in p['text']]
+        self.assertEqual(len(hellos), 1)
+        self.assertEqual(hellos[0]['channel'], 'C2')
 
     def test_dm_fallback_when_missing_and_cannot_create(self):
         c = self.Client([{'name': 'weeklyevents', 'id': 'C3'}])
