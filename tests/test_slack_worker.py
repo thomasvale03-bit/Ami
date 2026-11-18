@@ -331,8 +331,16 @@ class RouterTest(unittest.TestCase):
 
     def test_dm_fallback_when_missing_and_cannot_create(self):
         c = self.Client([{'name': 'weeklyevents', 'id': 'C3'}])
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        env = mock.patch.dict(os.environ, {'SLACK_WORKER_STATE': os.path.join(d.name, 'state.json')})
+        env.start()
+        self.addCleanup(env.stop)
         r = sw_app.Router(c, channel='amy-bookings', owner='U0CK42KJT7E')
         r.post('hi')
+        # A restart does not repeat the heads-up.
+        sw_app.Router(c, channel='amy-bookings', owner='U0CK42KJT7E').post('again')
+        self.assertEqual(sum("doesn't exist" in p['text'] for p in c.posts), 1)
         self.assertEqual(r.kind, 'dm')
         self.assertEqual(c.posts[-1]['channel'], 'DU0CK42KJT7E')
         self.assertIn("doesn't exist", c.posts[0]['text'])

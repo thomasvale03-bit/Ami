@@ -99,14 +99,29 @@ class Router:
                 self.note = f"Tom's DM (#{self.name} doesn't exist and I can't create it)"
         except Exception as exc:  # noqa: BLE001
             log.error('could not resolve update channel: %s', type(exc).__name__)
-        if self.kind == 'dm' and previous != 'dm' and self.target:
+        if self.kind == 'dm' and previous != 'dm' and self.target and not self._noticed():
             try:
                 self.client.chat_postMessage(channel=self.target, text=(
                     f"Heads up: I'll post booking updates here because #{self.name} doesn't exist yet and I "
                     f"can't create channels. Create #{self.name} and I'll switch to it within the hour."))
+                self._mark_noticed()
             except Exception:  # noqa: BLE001
                 pass
         return self.target
+
+    def _notice_path(self):
+        state = os.environ.get('SLACK_WORKER_STATE', '/data/slack-worker/state.json')
+        return os.path.join(os.path.dirname(state), 'dm-fallback-noticed')
+
+    def _noticed(self):
+        return os.path.exists(self._notice_path())
+
+    def _mark_noticed(self):
+        try:
+            os.makedirs(os.path.dirname(self._notice_path()), exist_ok=True)
+            open(self._notice_path(), 'w').close()
+        except OSError:
+            pass
 
     def post(self, text):
         target = self.resolve()
@@ -174,7 +189,8 @@ def build_app():
 
 
 def main():
-    logging.basicConfig(level=os.environ.get('LOG_LEVEL', 'INFO'),
+    import sys
+    logging.basicConfig(level=os.environ.get('LOG_LEVEL', 'INFO'), stream=sys.stdout,
                         format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     for name in ('SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'AMY_QUEUE_API_TOKEN'):
         if not os.environ.get(name):
