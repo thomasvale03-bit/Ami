@@ -99,6 +99,14 @@ class Router:
                 self.note = f"Tom's DM (#{self.name} doesn't exist and I can't create it)"
         except Exception as exc:  # noqa: BLE001
             log.error('could not resolve update channel: %s', type(exc).__name__)
+        if self.kind == 'channel' and self.target and not self._noticed('hello-' + self.target):
+            try:
+                self.client.chat_postMessage(channel=self.target, text=(
+                    "Hey team :wave: AMY Worker here. I'll post booking updates in this channel. "
+                    "DM me or @mention me with `help` to see what I can look up."))
+                self._mark_noticed('hello-' + self.target)
+            except Exception:  # noqa: BLE001
+                pass
         if self.kind == 'dm' and previous != 'dm' and self.target and not self._noticed():
             try:
                 self.client.chat_postMessage(channel=self.target, text=(
@@ -109,17 +117,17 @@ class Router:
                 pass
         return self.target
 
-    def _notice_path(self):
+    def _notice_path(self, name='dm-fallback-noticed'):
         state = os.environ.get('SLACK_WORKER_STATE', '/data/slack-worker/state.json')
-        return os.path.join(os.path.dirname(state), 'dm-fallback-noticed')
+        return os.path.join(os.path.dirname(state), name)
 
-    def _noticed(self):
-        return os.path.exists(self._notice_path())
+    def _noticed(self, name='dm-fallback-noticed'):
+        return os.path.exists(self._notice_path(name))
 
-    def _mark_noticed(self):
+    def _mark_noticed(self, name='dm-fallback-noticed'):
         try:
-            os.makedirs(os.path.dirname(self._notice_path()), exist_ok=True)
-            open(self._notice_path(), 'w').close()
+            os.makedirs(os.path.dirname(self._notice_path(name)), exist_ok=True)
+            open(self._notice_path(name), 'w').close()
         except OSError:
             pass
 
