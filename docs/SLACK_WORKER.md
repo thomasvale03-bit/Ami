@@ -45,16 +45,40 @@ commands still work.
 Booking updates still go only to `#amy-bookings`. The once-per-channel
 hello posts only to that updates channel, never to `#generalchat`,
 `#weeklyevents`, or `#random`. In channels the bot answers only when
-@mentioned.
+@mentioned, and it replies in a thread on that mention.
+
+If someone asks how to sign clients or guests up, the bot explains that
+it cannot sign anyone up from Slack (read-only). Guests sign up on
+playmakerentertainment.com or by DMing Playmaker on Instagram, with the
+intake fields Email / First & Last name / Number of Females/Males /
+Dates In Vegas.
+
+Incoming Slack events are logged (type, channel, ts, user only). If
+Socket Mode misses an `app_mention` or DM, a catch-up loop scans
+channels the bot is in (and open DMs) about every 45 seconds and
+replays unanswered mentions from the last 6 hours into a thread, using
+a volume-backed set so it does not double-reply.
 
 ## Joining public channels
-The bot is already in `#amy-bookings`. Joining other public channels
-(`#generalchat`, `#weeklyevents`, `#random` — there is no `#general`)
-needs the `channels:join` bot scope, which the current install does not
-have. Add `channels:join` to the app manifest and reinstall, or `/invite
-@AMY Worker` from a member already in each channel (AMYI can do this in
-the browser). Do not expect the worker to join by itself until that
-scope is granted.
+The bot is already in `#amy-bookings`, `#generalchat`, `#weeklyevents`,
+and `#random` (there is no `#general`). Joining additional public
+channels needs the `channels:join` bot scope, which the current install
+does not have (`x-oauth-scopes` as of Nov 18 2026). Add `channels:join`
+to the app manifest and reinstall, or `/invite @AMY Worker` from a
+member already in the channel. Do not expect the worker to join by
+itself until that scope is granted.
+
+## Event subscriptions
+The live install already has `app_mentions:read`, `chat:write`,
+`channels:history`, and `im:history`. The app manifest subscribes to
+`app_mention` and `message.im`, plus `message.channels` as a backup for
+channel mentions. Event subscriptions cannot be verified with the bot
+token (that needs `app_configurations:read`). If channel @mentions
+arrive with no worker log line `incoming type=...`, confirm in the Slack
+app Event Subscriptions page that **Enable Events** is on and the bot
+events include `app_mention` (and `message.channels` if you want the
+backup path). No reinstall is required unless a new scope is added —
+`message.channels` uses the already-granted `channels:history`.
 
 ## Variables
 | Variable | Value |
