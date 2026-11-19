@@ -71,7 +71,31 @@ def configured():
 
 
 class LlmError(RuntimeError):
-    pass
+    """status + OpenAI's error type/code/param/message (scrubbed; never the key)."""
+
+    def __init__(self, message, status=None, detail=None):
+        super().__init__(message)
+        self.status = status
+        self.detail = detail or {}
+
+
+def error_detail(body):
+    """OpenAI error JSON -> safe dict. Messages are scrubbed (a 401 can echo a
+    masked key fragment)."""
+    try:
+        err = json.loads(body).get('error') or {}
+    except (ValueError, AttributeError):
+        return {'message': scrub(str(body or '')[:300], 300)}
+    if not isinstance(err, dict):
+        return {'message': scrub(str(err), 300)}
+    return {k: scrub(str(err.get(k)), 300) for k in ('type', 'code', 'param', 'message') if err.get(k) is not None}
+
+
+def describe(exc):
+    if isinstance(exc, LlmError) and exc.detail:
+        bits = ' '.join(f'{k}={v!r}' for k, v in exc.detail.items())
+        return f'{exc} ({bits})'
+    return scrub(str(exc), 400)
 
 
 def http_post(payload, timeout=60):
@@ -82,7 +106,11 @@ def http_post(payload, timeout=60):
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:  # never include headers/key
-        raise LlmError(f'OpenAI HTTP {exc.code}') from None
+        try:
+            body = exc.read().decode('utf-8', 'replace')
+        except Exception:  # noqa: BLE001
+            body = ''
+        raise LlmError(f'OpenAI HTTP {exc.code}', status=exc.code, detail=error_detail(body)) from None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         raise LlmError(f'OpenAI unreachable: {type(exc).__name__}') from None
 
@@ -131,3 +159,22 @@ def answer(lookups, text, *, history=None, post=http_post, model=None):
             messages.append({'role': 'tool', 'tool_call_id': call.get('id'),
                              'content': json.dumps(result, default=str)[:30000]})
     raise LlmError('too many tool rounds')
+
+
+def self_check(post=http_post, model=None, log_=None):
+    """Startup check against the same endpoint: one plain request and one with
+    the read-only tools. Logs ok/fail with OpenAI's error (never the key).
+    Returns {'plain': ..., 'tools': ...}."""
+    log_ = log_ or log
+    model = model or os.environ.get('OPENAI_MODEL', '').strip() or DEFAULT_MODEL
+    results = {}
+    base = [{'role': 'system', 'content': 'Reply with the single word ok.'}, {'role': 'user', 'content': 'ping'}]
+    for name, extra in (('plain', {}), ('tools', {'tools': TOOLS})):
+        try:
+            resp = post({'model': model, 'messages': base, 'max_completion_tokens': 400, **extra})
+            results[name] = 'ok'
+            log_.info('OpenAI self-check (%s): ok, model=%s', name, scrub(str(resp.get('model') or model), 80))
+        except Exception as exc:  # noqa: BLE001
+            results[name] = describe(exc)
+            log_.error('OpenAI self-check (%s): FAIL %s', name, describe(exc))
+    return results

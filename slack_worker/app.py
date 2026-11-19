@@ -159,7 +159,7 @@ def reply_text(lookups, text, *, use_llm=None, llm_answer=None):
             try:
                 return (llm_answer or llm.answer)(lookups, commands.strip_mentions(text))
             except Exception as exc:  # noqa: BLE001
-                log.warning('OpenAI answer failed: %s', scrub(str(exc), 120))
+                log.error('OpenAI answer failed: %s', llm.describe(exc))
                 if cmd:
                     return commands.run(lookups, cmd, arg)
                 return "Couldn't reach ChatGPT right now. Try a command:\n" + commands.HELP
@@ -210,6 +210,8 @@ def main():
     router.resolve()
     log.info('updates go to %s; answers via %s', router.note or '?',
              'OpenAI ' + (os.environ.get('OPENAI_MODEL') or llm.DEFAULT_MODEL) if llm.configured() else 'keyword commands')
+    if llm.configured():
+        threading.Thread(target=llm.self_check, name='openai-self-check', daemon=True).start()
     watcher = Watcher(AmyApi(), router.post)
     threading.Thread(target=watcher.run_forever, name='amy-watcher', daemon=True).start()
     SocketModeHandler(app, os.environ['SLACK_APP_TOKEN']).start()

@@ -366,3 +366,49 @@ class RouterTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OpenAiErrorTest(unittest.TestCase):
+    def test_error_detail_is_parsed_and_scrubbed(self):
+        body = json.dumps({'error': {'message': 'Incorrect API key provided: sk-proj-abc123XYZ.', 'type': 'invalid_request_error',
+                                     'param': None, 'code': 'invalid_api_key'}})
+        d = llm.error_detail(body)
+        self.assertEqual(d['code'], 'invalid_api_key')
+        self.assertNotIn('abc123XYZ', d['message'])
+        exc = llm.LlmError('OpenAI HTTP 401', status=401, detail=d)
+        text = llm.describe(exc)
+        self.assertIn('OpenAI HTTP 401', text)
+        self.assertIn('invalid_api_key', text)
+        self.assertNotIn('abc123', text)
+
+    def test_http_post_surfaces_body(self):
+        import io
+        import urllib.error
+        body = json.dumps({'error': {'message': "Unsupported parameter: 'x'", 'type': 'invalid_request_error',
+                                     'param': 'x', 'code': 'unsupported_parameter'}}).encode()
+
+        def boom(req, timeout=None):
+            self.assertNotIn('Bearer', str(req.full_url))
+            raise urllib.error.HTTPError(req.full_url, 400, 'Bad Request', {}, io.BytesIO(body))
+        with mock.patch('urllib.request.urlopen', boom), mock.patch.dict(os.environ, {'OPENAI_API_KEY': 'sk-test-secret'}):
+            with self.assertRaises(llm.LlmError) as cm:
+                llm.http_post({'model': 'm'})
+        self.assertEqual(cm.exception.status, 400)
+        self.assertEqual(cm.exception.detail['param'], 'x')
+        self.assertNotIn('sk-test-secret', llm.describe(cm.exception))
+
+    def test_self_check_logs_ok_and_fail(self):
+        logs = []
+
+        class L:
+            def info(self, *a): logs.append(('info', a[0] % a[1:]))
+            def error(self, *a): logs.append(('error', a[0] % a[1:]))
+
+        def post(payload):
+            if 'tools' in payload:
+                raise llm.LlmError('OpenAI HTTP 400', 400, {'code': 'unsupported_parameter', 'param': 'tools'})
+            return {'model': 'gpt-6.1-sol'}
+        res = llm.self_check(post=post, model='gpt-6.1-sol', log_=L())
+        self.assertEqual(res['plain'], 'ok')
+        self.assertIn('unsupported_parameter', res['tools'])
+        self.assertEqual([lvl for lvl, _ in logs], ['info', 'error'])
