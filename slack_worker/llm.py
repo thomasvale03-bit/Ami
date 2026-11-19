@@ -14,7 +14,8 @@ import urllib.request
 from .views import scrub
 
 log = logging.getLogger('amy.slack.llm')
-API_URL = 'https://api.openai.com/v1/chat/completions'
+API_URL = 'https://api.openai.com/v1/chat/completions'  # plain self-check (same as PARTYEVERYDAY)
+RESPONSES_URL = 'https://api.openai.com/v1/responses'  # function tools (required for gpt-6.1-sol)
 DEFAULT_MODEL = 'gpt-6.1-sol'
 MAX_ROUNDS = 5
 
@@ -67,19 +68,45 @@ TOOLS = [
 
 
 def reasoning_effort():
-    """gpt-6.1-sol rejects function tools on /v1/chat/completions unless
-    reasoning_effort is 'none' (OpenAI HTTP 400, param=reasoning_effort). The
-    lookups are simple, so 'none' is the default; override with
-    OPENAI_REASONING_EFFORT, or set it to '' to omit the parameter."""
-    return os.environ.get('OPENAI_REASONING_EFFORT', 'none').strip()
+    """gpt-6.1-sol rejects function tools on /v1/chat/completions (any
+    reasoning_effort other than 'none', and 'none' is not supported), so tool
+    calls go through /v1/responses. Default effort 'low' keeps Slack replies
+    quick; OPENAI_REASONING_EFFORT overrides ('' omits the parameter)."""
+    return os.environ.get('OPENAI_REASONING_EFFORT', 'low').strip()
 
 
-def with_tools(payload):
-    out = {**payload, 'tools': TOOLS}
+def responses_tools():
+    """Chat Completions tool specs -> Responses API function tools."""
+    return [{'type': 'function', 'name': t['function']['name'], 'description': t['function']['description'],
+             'parameters': t['function']['parameters']} for t in TOOLS]
+
+
+def responses_payload(model, input_items, *, instructions=None, previous=None, max_tokens=4000):
+    payload = {'model': model, 'input': input_items, 'tools': responses_tools(), 'max_output_tokens': max_tokens}
+    if instructions:
+        payload['instructions'] = instructions
+    if previous:
+        payload['previous_response_id'] = previous
     effort = reasoning_effort()
     if effort:
-        out['reasoning_effort'] = effort
-    return out
+        payload['reasoning'] = {'effort': effort}
+    return payload
+
+
+def output_text(resp):
+    if isinstance(resp.get('output_text'), str) and resp['output_text'].strip():
+        return resp['output_text']
+    parts = []
+    for item in resp.get('output') or []:
+        if item.get('type') == 'message':
+            for c in item.get('content') or []:
+                if c.get('type') in ('output_text', 'text') and c.get('text'):
+                    parts.append(c['text'])
+    return '\n'.join(parts)
+
+
+def function_calls(resp):
+    return [i for i in resp.get('output') or [] if i.get('type') == 'function_call']
 
 
 def configured():
@@ -114,9 +141,9 @@ def describe(exc):
     return scrub(str(exc), 400)
 
 
-def http_post(payload, timeout=60):
+def http_post(payload, timeout=60, url=API_URL):
     key = os.environ.get('OPENAI_API_KEY', '').strip()
-    req = urllib.request.Request(API_URL, data=json.dumps(payload).encode(), method='POST', headers={
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), method='POST', headers={
         'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -149,45 +176,55 @@ def call_tool(lookups, name, args):
         return {'error': f'lookup failed: {scrub(str(exc), 120)}'}
 
 
-def answer(lookups, text, *, history=None, post=http_post, model=None):
+def responses_post(payload):
+    return http_post(payload, url=RESPONSES_URL)
+
+
+def answer(lookups, text, *, history=None, post=responses_post, model=None):
+    """Responses API tool loop over the read-only lookups."""
     model = model or os.environ.get('OPENAI_MODEL', '').strip() or DEFAULT_MODEL
-    messages = [{'role': 'system', 'content': SYSTEM_PROMPT}]
-    messages += list(history or [])
-    messages.append({'role': 'user', 'content': text})
+    items = [{'role': m['role'], 'content': m['content']} for m in (history or [])
+             if m.get('role') in ('user', 'assistant') and isinstance(m.get('content'), str)]
+    items.append({'role': 'user', 'content': text})
+    resp = post(responses_payload(model, items, instructions=SYSTEM_PROMPT))
     for _ in range(MAX_ROUNDS):
-        resp = post(with_tools({'model': model, 'messages': messages, 'max_completion_tokens': 4000}))
-        choice = (resp.get('choices') or [{}])[0]
-        msg = choice.get('message') or {}
-        calls = msg.get('tool_calls') or []
+        calls = function_calls(resp)
         if not calls:
-            content = (msg.get('content') or '').strip()
+            content = output_text(resp).strip()
             if not content:
                 raise LlmError('empty reply')
             return scrub(content, 3500)
-        messages.append({'role': 'assistant', 'content': msg.get('content'), 'tool_calls': calls})
+        outputs = []
         for call in calls:
-            fn = call.get('function') or {}
             try:
-                args = json.loads(fn.get('arguments') or '{}')
+                args = json.loads(call.get('arguments') or '{}')
             except ValueError:
                 args = {}
-            result = call_tool(lookups, fn.get('name'), args if isinstance(args, dict) else {})
-            messages.append({'role': 'tool', 'tool_call_id': call.get('id'),
-                             'content': json.dumps(result, default=str)[:30000]})
+            result = call_tool(lookups, call.get('name'), args if isinstance(args, dict) else {})
+            outputs.append({'type': 'function_call_output', 'call_id': call.get('call_id'),
+                            'output': json.dumps(result, default=str)[:30000]})
+        resp = post(responses_payload(model, outputs, instructions=SYSTEM_PROMPT, previous=resp.get('id')))
     raise LlmError('too many tool rounds')
 
 
-def self_check(post=http_post, model=None, log_=None):
-    """Startup check against the same endpoint: one plain request and one with
-    the read-only tools. Logs ok/fail with OpenAI's error (never the key).
-    Returns {'plain': ..., 'tools': ...}."""
+def self_check(post=None, model=None, log_=None, tools_post=None):
+    """Startup check: one plain Chat Completions request (PARTYEVERYDAY's path)
+    and one Responses request with the read-only tools (the answer path). Logs
+    ok/FAIL with OpenAI's error, never the key. Returns {'plain','tools'}."""
+    post = post or http_post
+    tools_post = tools_post or (post if post is not http_post else responses_post)
     log_ = log_ or log
     model = model or os.environ.get('OPENAI_MODEL', '').strip() or DEFAULT_MODEL
     results = {}
-    base = [{'role': 'system', 'content': 'Reply with the single word ok.'}, {'role': 'user', 'content': 'ping'}]
-    for name, wrap in (('plain', dict), ('tools', with_tools)):
+    checks = (
+        ('plain', post, {'model': model, 'max_completion_tokens': 400, 'messages': [
+            {'role': 'system', 'content': 'Reply with the single word ok.'}, {'role': 'user', 'content': 'ping'}]}),
+        ('tools', tools_post, responses_payload(model, [{'role': 'user', 'content': 'ping'}],
+                                                instructions='Reply with the single word ok.', max_tokens=400)),
+    )
+    for name, fn, payload in checks:
         try:
-            resp = post(wrap({'model': model, 'messages': base, 'max_completion_tokens': 400}))
+            resp = fn(payload)
             results[name] = 'ok'
             log_.info('OpenAI self-check (%s): ok, model=%s', name, scrub(str(resp.get('model') or model), 80))
         except Exception as exc:  # noqa: BLE001

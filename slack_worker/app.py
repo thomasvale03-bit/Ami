@@ -169,6 +169,20 @@ def reply_text(lookups, text, *, use_llm=None, llm_answer=None):
         return "Couldn't reach AMY right now, try again in a minute."
 
 
+def startup_check(lookups, answer=None, check=None):
+    """OpenAI self-check plus one real read-only tool round trip (queue
+    status). Logs ok/FAIL only; never the key, never posts to Slack."""
+    (check or llm.self_check)()
+    try:
+        text = (answer or llm.answer)(lookups, 'How many jobs are in done right now? Use the queue_status tool.')
+        log.info('OpenAI self-check (round trip): ok, %d chars, has number=%s', len(text),
+                 any(ch.isdigit() for ch in text))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error('OpenAI self-check (round trip): FAIL %s', llm.describe(exc))
+        return False
+
+
 def build_app():
     from slack_bolt import App
 
@@ -211,7 +225,7 @@ def main():
     log.info('updates go to %s; answers via %s', router.note or '?',
              'OpenAI ' + (os.environ.get('OPENAI_MODEL') or llm.DEFAULT_MODEL) if llm.configured() else 'keyword commands')
     if llm.configured():
-        threading.Thread(target=llm.self_check, name='openai-self-check', daemon=True).start()
+        threading.Thread(target=startup_check, args=(Lookups(api),), name='openai-self-check', daemon=True).start()
     watcher = Watcher(AmyApi(), router.post)
     threading.Thread(target=watcher.run_forever, name='amy-watcher', daemon=True).start()
     SocketModeHandler(app, os.environ['SLACK_APP_TOKEN']).start()

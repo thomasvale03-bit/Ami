@@ -162,6 +162,8 @@ class ReplyRoutingTest(unittest.TestCase):
 
 class LlmTest(unittest.TestCase):
     def test_tool_loop_and_scrub(self):
+        """Responses API: function_call -> function_call_output chained by
+        previous_response_id; final text scrubbed."""
         lk = Lookups(FakeApi([job('r1', 'done', bookings=BOOKED)]), clock=lambda: NOW)
         calls = []
 
@@ -169,24 +171,43 @@ class LlmTest(unittest.TestCase):
             calls.append(payload)
             if len(calls) == 1:
                 self.assertEqual(payload['model'], 'gpt-6.1-sol')
-                self.assertIn("Sound like Tom", payload['messages'][0]['content'])
-                self.assertEqual({t['function']['name'] for t in payload['tools']},
+                self.assertIn('Sound like Tom', payload['instructions'])
+                self.assertEqual(payload['input'][-1], {'role': 'user', 'content': 'is jessica booked?'})
+                self.assertEqual({t['name'] for t in payload['tools']},
                                  {'queue_status', 'jobs_in_state', 'guest_lookup', 'bookings_on_date', 'worker_health'})
-                return {'choices': [{'message': {'content': None, 'tool_calls': [
-                    {'id': 't1', 'type': 'function',
-                     'function': {'name': 'guest_lookup', 'arguments': '{"name": "jessica"}'}}]}}]}
-            tool_msg = payload['messages'][-1]
-            self.assertEqual(tool_msg['role'], 'tool')
-            self.assertIn('Jessica Alba', tool_msg['content'])
-            self.assertNotIn('555-1234', tool_msg['content'])
-            self.assertNotIn('jess@example.com', tool_msg['content'])
-            return {'choices': [{'message': {'content': 'Yeah, Jessica is on Hakkasan. Her cell is 602-555-1234'}}]}
+                self.assertTrue(all(t['type'] == 'function' and 'parameters' in t for t in payload['tools']))
+                self.assertNotIn('messages', payload)
+                self.assertNotIn('reasoning_effort', payload)
+                return {'id': 'resp_1', 'output': [
+                    {'type': 'reasoning', 'id': 'rs_1', 'summary': []},
+                    {'type': 'function_call', 'call_id': 'call_1', 'name': 'guest_lookup',
+                     'arguments': '{"name": "jessica"}'}]}
+            self.assertEqual(payload['previous_response_id'], 'resp_1')
+            out = payload['input'][0]
+            self.assertEqual(out['type'], 'function_call_output')
+            self.assertEqual(out['call_id'], 'call_1')
+            self.assertIn('Jessica Alba', out['output'])
+            self.assertNotIn('555-1234', out['output'])
+            self.assertNotIn('jess@example.com', out['output'])
+            return {'id': 'resp_2', 'output': [{'type': 'message', 'role': 'assistant', 'content': [
+                {'type': 'output_text', 'text': 'Yeah, Jessica is on Hakkasan. Her cell is 602-555-1234'}]}]}
 
         with mock.patch.dict(os.environ, {'OPENAI_MODEL': 'gpt-6.1-sol'}):
             out = llm.answer(lk, 'is jessica booked?', post=post)
         self.assertIn('Jessica is on Hakkasan', out)
         self.assertNotIn('555-1234', out)
         self.assertEqual(len(calls), 2)
+
+    def test_answer_uses_responses_endpoint_by_default(self):
+        lk = Lookups(FakeApi([]), clock=lambda: NOW)
+        urls = []
+
+        def fake_http(payload, timeout=60, url=llm.API_URL):
+            urls.append(url)
+            return {'id': 'r', 'output_text': 'Queue is clean.'}
+        with mock.patch.object(llm, 'http_post', fake_http):
+            self.assertEqual(llm.answer(lk, 'queue?'), 'Queue is clean.')
+        self.assertEqual(urls, ['https://api.openai.com/v1/responses'])
 
     def test_configured_reads_env(self):
         with mock.patch.dict(os.environ, {'OPENAI_API_KEY': ''}):
@@ -415,29 +436,37 @@ class OpenAiErrorTest(unittest.TestCase):
 
 
 class ReasoningEffortTest(unittest.TestCase):
-    def test_tool_requests_send_reasoning_effort_none(self):
-        lk = Lookups(FakeApi([job('r1', 'done', bookings=BOOKED)]), clock=lambda: NOW)
-        seen = []
+    def test_default_effort_low_on_responses(self):
+        os.environ.pop('OPENAI_REASONING_EFFORT', None)
+        p = llm.responses_payload('gpt-6.1-sol', [])
+        self.assertEqual(p['reasoning'], {'effort': 'low'})
+        self.assertNotIn('reasoning_effort', p)
 
-        def post(payload):
-            seen.append(payload)
-            return {'choices': [{'message': {'content': 'Queue is clean.'}}]}
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop('OPENAI_REASONING_EFFORT', None)
-            llm.answer(lk, 'hows the queue', post=post, model='gpt-6.1-sol')
-        self.assertEqual(seen[0]['reasoning_effort'], 'none')
-        self.assertIn('tools', seen[0])
-
-    def test_self_check_tools_request_matches_answer_path(self):
-        seen = []
-        llm.self_check(post=lambda p: seen.append(p) or {'model': 'gpt-6.1-sol'}, model='gpt-6.1-sol',
-                       log_=mock.Mock())
-        self.assertNotIn('reasoning_effort', seen[0])
-        self.assertEqual(seen[1]['reasoning_effort'], 'none')
-        self.assertIn('tools', seen[1])
+    def test_self_check_plain_chat_and_tools_responses(self):
+        plain, tools = [], []
+        res = llm.self_check(post=lambda p: plain.append(p) or {'model': 'gpt-6.1-sol'},
+                             tools_post=lambda p: tools.append(p) or {'model': 'gpt-6.1-sol'},
+                             model='gpt-6.1-sol', log_=mock.Mock())
+        self.assertEqual(res, {'plain': 'ok', 'tools': 'ok'})
+        self.assertIn('messages', plain[0])
+        self.assertNotIn('tools', plain[0])
+        self.assertIn('input', tools[0])
+        self.assertEqual(len(tools[0]['tools']), 5)
 
     def test_override_and_omit(self):
-        with mock.patch.dict(os.environ, {'OPENAI_REASONING_EFFORT': 'low'}):
-            self.assertEqual(llm.with_tools({})['reasoning_effort'], 'low')
+        with mock.patch.dict(os.environ, {'OPENAI_REASONING_EFFORT': 'medium'}):
+            self.assertEqual(llm.responses_payload('m', [])['reasoning'], {'effort': 'medium'})
         with mock.patch.dict(os.environ, {'OPENAI_REASONING_EFFORT': ''}):
-            self.assertNotIn('reasoning_effort', llm.with_tools({}))
+            self.assertNotIn('reasoning', llm.responses_payload('m', []))
+
+
+class StartupCheckTest(unittest.TestCase):
+    def test_round_trip_ok_and_fail(self):
+        lk = Lookups(FakeApi([]), clock=lambda: NOW)
+        self.assertTrue(sw_app.startup_check(lk, answer=lambda l, t: 'Yeah, 118 done.', check=lambda: None))
+
+        def boom(l, t):
+            raise llm.LlmError('OpenAI HTTP 400', 400, {'param': 'tools'})
+        with self.assertLogs('amy.slack', 'ERROR') as cm:
+            self.assertFalse(sw_app.startup_check(lk, answer=boom, check=lambda: None))
+        self.assertIn("param='tools'", cm.output[0])
