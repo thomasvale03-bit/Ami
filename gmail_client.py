@@ -90,6 +90,7 @@ LABEL_TO_FIELD = {
     "submission date": "submitted_at",
     "source": "source",  # GuestlistGo form notices: "Source: guestlistgo"
     "ref": "form_ref",
+    "nightly plan": "itinerary",  # one request, many nights (request_plan.py)
 }
 
 LINE_RE = re.compile(r"^[ \t]*([A-Za-z][A-Za-z \t\(\)/\-]*?)[ \t]*:[ \t]*(.*?)[ \t]*$", re.MULTILINE)
@@ -486,6 +487,22 @@ def parse_request(message_id, body_text):
         ]
     else:
         fields["venues"] = []
+
+    # One date-range request = one job (Thomas, Nov 19 2026). A "Nightly plan"
+    # line names the venue(s) per date; it never guesses on a bad line.
+    if fields.get("itinerary"):
+        import request_plan
+        try:
+            plan = request_plan.parse_plan(fields["itinerary"])
+        except ValueError as exc:
+            fields.pop("itinerary", None)
+            fields["_action_needed"] = (f"Nightly plan could not be read ({exc}).",
+                                        "Check the request and book the nights by hand.")
+        else:
+            fields["itinerary"] = plan
+            for v in request_plan.plan_venues(plan):
+                if v not in fields["venues"]:
+                    fields["venues"].append(v)
 
     missing = [f for f in ("email", "start_date", "end_date") if not fields.get(f)]
     if missing:

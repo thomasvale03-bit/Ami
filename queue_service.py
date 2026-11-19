@@ -76,6 +76,10 @@ def source_policy(ref, raw, today):
         return 'Held Shanequa/Ashley exception; awaiting Thomas decision, no remediation'
     if raw.get('_missing_required') or raw.get('_action_needed'):
         return 'Source request requires review; do not guess'
+    import request_plan
+    plan_reason = request_plan.plan_problem(raw)
+    if plan_reason:
+        return plan_reason
     try:
         start, end = date.fromisoformat(raw['start_date']), date.fromisoformat(raw['end_date'])
         if (end - start).days > 13:
@@ -178,8 +182,15 @@ def validate_completion(raw, metadata, require_team_receipt=True):
         raise Conflict('Actual booking/order records required')
     try:
         venues = {rules.normalize_venue_name(v) for v in raw['venues']}
-        start, end = date.fromisoformat(raw['start_date']), date.fromisoformat(raw['end_date'])
-        expected = {(v, date.fromordinal(day).isoformat()) for v in venues for day in range(start.toordinal(), end.toordinal() + 1)}
+        # Every requested venue/night, or exactly the nightly plan's pairs when
+        # the request carries one (one job for a whole date-range trip).
+        import request_plan
+        expected = set(request_plan.requested_pairs(raw))
+        open_on = getattr(rules, 'venue_open_on', None)
+        if open_on:
+            # Verified-dark daylife/Drai's dates are never booked by the worker.
+            expected = {(v, n) for v, n in expected
+                        if v in rules.NIGHTCLUBS or open_on(v, date.fromisoformat(n)) is not False}
         requested_nights = {night for _v, night in expected}
         actual = set()
         fallbacks = []

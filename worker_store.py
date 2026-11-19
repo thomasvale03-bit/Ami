@@ -328,7 +328,12 @@ class Store:
             elif action == 'retry':
                 if state != 'assigned' or metadata.get('submission_attempted') is not False or not reason:
                     raise Conflict('Retry allowed only for explicit pre-submit failure')
-                state = 'retry' if row['attempts'] < 3 else 'manual'
+                # A guest list that is simply not posted yet keeps waiting
+                # (hourly) until it opens; the source date policy still moves
+                # it to manual once the night has passed. Other pre-submit
+                # failures keep the 3-claim limit.
+                waiting = metadata.get('kind') == 'unposted'
+                state = 'retry' if (waiting or row['attempts'] < 3) else 'manual'
                 due = (int(now // 3600) + 1) * 3600
                 saved['last_retry'] = {'reason': reason, 'at': now}
             elif action == 'progress':
