@@ -135,7 +135,8 @@ def team_email(ref, raw, request, bookings, update=False, pending=None):
         f"Name: {name}",
         f"Email: {request['email']}",
         f"Party: {_party(request['female_count'], request['male_count'])} (free)",
-        f"Promoter: {request.get('promoter') or 'Not provided'}",
+        f"Promoter: {request.get('promoter') or raw.get('promoter') or 'Not provided'}",
+        *_promoter_contact(raw),
         f"Source: {source}",
         "",
         "— Nights —",
@@ -153,6 +154,13 @@ def team_email(ref, raw, request, bookings, update=False, pending=None):
         _html.escape(text) + "</pre>"
     return {"to": TEAM_TO, "subject": subject, "text": text, "html": html,
             "dedupe_query": f'to:{TEAM_TO} subject:"{subject}" "Amy Ref: {ref}"'}
+
+
+def _promoter_contact(raw):
+    """The promoter's own email/phone from the intake form, when given (never
+    the guest's phone)."""
+    return ([f"Promoter email: {raw['promoter_email']}"] if raw.get("promoter_email") else []) + \
+        ([f"Promoter phone: {raw['promoter_phone']}"] if raw.get("promoter_phone") else [])
 
 
 def alert_email(ref, state, reason, raw):
@@ -224,7 +232,9 @@ def drais_team_email(ref, raw, request, bookings):
     posh = raw.get("posh") or {}
     source = f"Posh order {posh['order_number']}" if posh.get("order_number") else (raw.get("source") or "website")
     lines = ["ALREADY SIGNED UP — NO ACTION NEEDED", f"Guest: {name}", f"Email: {request['email']}",
-             f"Party: {f} women, {m} men"]
+             f"Party: {f} women, {m} men",
+             f"Promoter: {request.get('promoter') or raw.get('promoter') or 'Not provided'}",
+             *_promoter_contact(raw)]
     # Thomas: no phone numbers in emails; Drai's is confirmation-email only (no Speakeasy).
     for b in sorted(bookings, key=lambda b: b["date"]):
         lines.append(f"{DRAIS_VENUE}, {date.fromisoformat(b['date']).strftime('%a')} {b['date']} "

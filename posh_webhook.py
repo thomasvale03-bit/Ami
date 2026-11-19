@@ -870,6 +870,13 @@ def normalize_website_payload(p):
         plan_val = bf.get("nightly plan")
     if plan_val is not None:
         out["plan"] = plan_val
+    for key, alts, label in (("promoter_email", ("promoterEmail",), "promoter email"),
+                             ("promoter_phone", ("promoterPhone",), "promoter phone")):
+        if not str(out.get(key) or "").strip():
+            val = next((p.get(a) for a in alts if p.get(a)), None) or d.get(label.title()) or bf.get(label) or ""
+            if val:
+                out[key] = val
+
     raw_venue = p.get("venue") if "venue" in p else (p.get("venues") if "venues" in p else (d.get("Venues") or bf.get("requested venues") or ""))
     if isinstance(raw_venue, list):
         raw_venue = ", ".join(str(x).strip() for x in raw_venue if str(x).strip())
@@ -984,6 +991,14 @@ def validate_website(p):
     promo = re.sub(r"\s+", " ", re.sub(r"[^\w .'&-]", "", g("promoter", 60))).strip()
     if src != "playmaker" or promo.lower().replace(" ", "") == "guestlistgo":
         promo = ""  # GuestlistGo keeps its fixed promoter; never let a guest pick the GuestlistGo brand
+    promo_email = g("promoter_email", 120).lower()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]{2,}", promo_email):
+        promo_email = ""
+    promo_phone = re.sub(r"[^\d+]", "", g("promoter_phone", 30))
+    if not 10 <= len(re.sub(r"\D", "", promo_phone)) <= 15:
+        promo_phone = ""
+    if src != "playmaker":
+        promo_email = promo_phone = ""  # GuestlistGo has no guest-picked promoter
     ig = re.sub(r"^@", "", g("instagram", 31))
     if ig and not re.fullmatch(r"[A-Za-z0-9._]{1,30}", ig):
         ig = ""
@@ -992,6 +1007,7 @@ def validate_website(p):
             "name": full_name, "email": email, "phone": phone, "city": city, "venue": venue,
             "event": f"{venue} | Guest List", "night": night, "end": end, "women": women, "men": men,
             "party": women + men, "instagram": ig, "promoter_name": promo, "notes": g("notes", 500),
+            "promoter_email": promo_email, "promoter_phone": promo_phone,
             "ref": re.sub(r"[^\w-]", "", g("ref", 40)),
             "plan": plan, "venues": plan_venues_list(plan) if plan else [venue]}, None
 
@@ -1039,7 +1055,22 @@ def _promoter_lines(c):
     """Playmaker: the guest's optional promoter, split like the Airo form
     (first word / rest). Blank stays blank (no promoter)."""
     parts = (c.get("promoter_name") or "").split(" ", 1)
-    return [f"Promoter first name: {parts[0]}", f"Promoter last name: {parts[1] if len(parts) > 1 else ''}"]
+    return [f"Promoter first name: {parts[0]}", f"Promoter last name: {parts[1] if len(parts) > 1 else ''}",
+            *_promoter_contact_lines(c)]
+
+
+def _promoter_contact_lines(c):
+    """Promoter's own contact fields, only when the form sent them (the
+    promoter's details, never the guest's phone)."""
+    return ([f"Promoter email: {c['promoter_email']}"] if c.get("promoter_email") else []) + \
+        ([f"Promoter phone: {c['promoter_phone']}"] if c.get("promoter_phone") else [])
+
+
+def promoter_label(c):
+    """Who the guest named as their promoter (GuestlistGo keeps its brand)."""
+    if c.get("source") != "playmaker":
+        return c.get("promoter") or "Not provided"
+    return c.get("promoter_name") or "Not provided"
 
 
 def to_website_text(c):
@@ -1281,6 +1312,8 @@ def notify_only_text(clean):
         f"Date: {when}",
         f"Female guests: {clean['women']}",
         f"Male guests: {clean['men']}",
+        f"Promoter: {promoter_label(clean)}",
+        *_promoter_contact_lines(clean),
         f"Source: {clean['source']}",
         f"Ref: {clean['ref'] or '-'}",
         "",
