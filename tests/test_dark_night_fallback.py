@@ -150,7 +150,11 @@ def test_operating_venue_unposted_retries_when_other_nights_booked(tmp_path):
     assert result["status"] == "retry", result
     assert "guest list not posted" in result["reason"]
     assert "other nights already booked" not in (result.get("reason") or "")
-    assert api.sent == []
+    # Thomas (Nov 19 2026): the booked night is confirmed now in ONE guest and
+    # ONE team email that also says which night is still to come.
+    assert [p["to"] for p in api.sent] == ["guest@example.invalid", "team@playmakerentertainment.com"]
+    assert "Still to come: Thursday November 26 - Hakkasan Nightclub" in api.sent[0]["text"]
+    assert "Waiting (list not posted yet" in api.sent[1]["text"]
     assert len(worker.tao.submits) == 1
 
 

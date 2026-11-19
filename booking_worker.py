@@ -231,12 +231,14 @@ def _sha256(path):
 def source_nights(raw):
     from config import rules
     from rules_engine import date_range
-    venues = [rules.normalize_venue_name(v) for v in raw.get("venues") or []]
-    nights = list(date_range(raw["start_date"], raw["end_date"]))
+    import request_plan
+    # Every requested venue on every night, or exactly the request's nightly
+    # plan (one job for a whole date-range trip, Thomas Nov 19 2026).
+    pairs = request_plan.requested_pairs(raw)
     # Nightclubs still appear on dark nights so DEFAULT_ROUTING can cover them.
     # Verified-dark daylife / Drai's dates are dropped (no lookup, no retry).
-    return [(v, d.isoformat()) for d in nights for v in venues
-            if v in rules.NIGHTCLUBS or rules.venue_open_on(v, d) is not False]
+    return [(v, n) for v, n in pairs
+            if v in rules.NIGHTCLUBS or rules.venue_open_on(v, date.fromisoformat(n)) is not False]
 
 
 def drais_offset():
@@ -629,9 +631,29 @@ class Worker:
             raise Stop("manual", reason)
         if self.duplicate_check:
             self._check_duplicates(ref, raw)
-        bookings = self._book_all(job, raw, rehearse=False, token=token)
         from config import rules
         drais = any(rules.is_drais(v) for v in raw.get("venues") or [])
+        waiting = []
+        bookings = self._book_all(job, raw, rehearse=False, token=token, waiting=waiting)
+        if waiting:
+            # Some nights of this request are only waiting for their guest list
+            # to be posted. Confirm everything booked so far in ONE guest and
+            # ONE team email now; the nights booked later go out together in
+            # one "Updated:" email (Thomas, Nov 19 2026: one email per request,
+            # never one per venue/night). Nothing is submitted for the
+            # waiting nights, so this stays a pre-submit retry.
+            already = (self.ledger.get(f"{ref}|emails") or {}).get("receipts") or \
+                ((job.get("metadata") or {}).get("progress") or {}).get("emails")
+            # Only the first partial confirmation goes out early; nights booked
+            # later wait until the whole request is done (one Updated email).
+            if bookings and not drais and not already:
+                self._send_emails(job, ref, token, raw, bookings, drais=False,
+                                  pending=[(v, n) for v, n, _ in waiting])
+            first = waiting[0][2]
+            reason = first.reason if len(waiting) == 1 else (
+                f"{len(waiting)} night(s) waiting for their guest list to be posted ("
+                + "; ".join(f"{v} {n}" for v, n, _ in waiting) + "); nothing submitted for them")
+            raise Stop("retry", reason, kind="unposted")
         evidence = {"verified": True, "worker": "railway", "bookings": [b["record"] for b in bookings]}
         evidence["email_receipts"] = self._send_emails(job, ref, token, raw, bookings, drais=drais)
         code, body = self.api.update(ref, token, "complete", {"evidence": evidence}, "Booked by Railway worker")
@@ -658,7 +680,10 @@ class Worker:
                 v, n = sorted(overlap)[0]
                 raise Stop("manual", f"Duplicate suspicion: {email} already booked {v} on {n} (job {other['ref']})")
 
-    def _book_all(self, job, raw, *, rehearse, token=None):
+    def _book_all(self, job, raw, *, rehearse, token=None, waiting=None):
+        """Book every requested venue/night. With `waiting` (a list), a night
+        whose list is simply not posted yet is recorded there and the other
+        nights still book; without it the first such night stops the job."""
         from config import rules
         from rules_engine import ActionNeeded, normalize_guest_request
         try:
@@ -694,8 +719,15 @@ class Worker:
                     continue
                 item = self._book_drais(job["ref"], venue, night, request, rehearse, token)
             else:
-                item = self._book_requested_or_fallback(
-                    job["ref"], venue, night, request, rehearse, token, partial=bool(out), booked=out)
+                try:
+                    item = self._book_requested_or_fallback(
+                        job["ref"], venue, night, request, rehearse, token, partial=bool(out), booked=out)
+                except Stop as stop:
+                    if (waiting is None or stop.action != "retry"
+                            or stop.extra.get("kind") != "unposted"):
+                        raise
+                    waiting.append((venue, night, stop))
+                    continue
             if item:
                 out.append(item)
         self._add_marquee_dayclub(job["ref"], nights, request, rehearse, token, out)
@@ -893,18 +925,19 @@ class Worker:
         self._checkpoint(ref, token, key, {"state": "email_only", "record": record, "meta": {}})
         return {"record": record, "meta": {}}
 
-    def _send_emails(self, job, ref, token, raw, bookings, drais=False):
+    def _send_emails(self, job, ref, token, raw, bookings, drais=False, pending=None):
         import worker_emails
         from rules_engine import normalize_guest_request
         request = normalize_guest_request(raw)
         rows = [{**b["record"], **(b.get("meta") or {})} for b in bookings]
+        pending = list(pending or [])
 
         def build(update=False):
             if drais:
                 return (("guest", worker_emails.drais_guest_email(request, rows)),
                         ("team", worker_emails.drais_team_email(ref, raw, request, rows)))
-            return (("guest", worker_emails.guest_email(request, rows, update=update)),
-                    ("team", worker_emails.team_email(ref, raw, request, rows, update=update)))
+            return (("guest", worker_emails.guest_email(request, rows, update=update, pending=pending)),
+                    ("team", worker_emails.team_email(ref, raw, request, rows, update=update, pending=pending)))
 
         order_ids = sorted({str(r["order_id"]) for r in rows if r.get("order_id")})
         entry = self.ledger.get(f"{ref}|emails") or {}

@@ -44,9 +44,33 @@ def _party(female, male):
     return " and ".join(parts) or "0 guests"
 
 
-def guest_email(request, bookings):
-    """bookings: [{venue, date, event, event_time, order_id}] (TAO only)."""
+UPDATE_NOTE = "Updated confirmation: this adds your newest booking to anything we sent you before. All orders listed stay active."
+
+
+def update_subject(subject, bookings):
+    """'Updated:' repeat subject (owner rule) made unique by the order IDs it
+    covers, so /send-branded never mistakes a new order for an already-sent
+    confirmation, while a retry of the same update is still deduped."""
+    ids = sorted({str(b.get("order_id"))[:8] for b in bookings if b.get("order_id")})
+    tail = f" (Order {' + '.join(ids)})" if ids else ""
+    return ("Updated: " + subject + tail).replace(",", "").replace(";", "")
+
+
+def pending_note(pending):
+    """Guest-facing line for nights of the same request still waiting for
+    their guest list to open (they follow in one Updated confirmation)."""
+    if not pending:
+        return ""
+    items = "; ".join(f"{_long(n)} - {v}" for v, n in sorted(pending, key=lambda p: (p[1], p[0])))
+    return (f"Still to come: {items}. That guest list isn't posted yet. We'll sign you up as soon as "
+            "it opens and send you one updated confirmation.")
+
+
+def guest_email(request, bookings, update=False, pending=None):
+    """bookings: [{venue, date, event, event_time, order_id}] (TAO only).
+    pending: [(venue, iso)] nights of this request not bookable yet."""
     first = request.get("first_name") or "there"
+    waiting = pending_note(pending)
     label = date_label(request["start_date"], request["end_date"])
     notice = html_emails.FALLBACK_NOTICE
     lines = []
@@ -58,7 +82,9 @@ def guest_email(request, bookings):
             lines.append(notice)
     text = "\n\n".join([
         f"Hi {first},",
-        "You're on the Playmaker Entertainment guest list. Here's what you're set for:\n" + "\n".join(lines),
+        ((UPDATE_NOTE + "\n\n") if update else "")
+        + "You're on the Playmaker Entertainment guest list. Here's what you're set for:\n" + "\n".join(lines)
+        + (("\n\n" + waiting) if waiting else ""),
         "Arrive early and bring a valid, government-issued 21+ photo ID. Guest-list admission is "
         "subject to each venue's rules, dress code, and capacity.",
         "Questions? Email info@playmakerentertainment.com",
@@ -69,13 +95,16 @@ def guest_email(request, bookings):
     fallback_nights = [html_emails._short_date(b["date"]) for b in bookings if b.get("fallback")]
     html = html_emails.render_confirmation(
         first, rows, html_emails.party_size(request["female_count"], request["male_count"]),
+        " ".join(x for x in ((UPDATE_NOTE if update else ""), waiting) if x) or None,
         fallback_nights=fallback_nights or None)
     subject = f"You're on the Playmaker Entertainment guest list for {label}"
+    if update:
+        subject = update_subject(subject, bookings)
     return {"to": request["email"], "subject": subject, "text": text, "html": html,
             "dedupe_query": f'to:{request["email"]} subject:"{subject}"'}
 
 
-def team_email(ref, raw, request, bookings):
+def team_email(ref, raw, request, bookings, update=False, pending=None):
     name = f"{request.get('first_name', '')} {request.get('last_name', '')}".strip() or raw.get("name", "")
     label = date_label(request["start_date"], request["end_date"])
     source = raw.get("source") or "website"
@@ -90,7 +119,9 @@ def team_email(ref, raw, request, bookings):
                       + f"\n✅ Signed up — Order ID {b['order_id']}"
                       + (f"\n{b['confirmation_url']}" if b.get("confirmation_url") else ""))
     text = "\n".join([
-        "Signed up — no action needed. AMY's Railway booking worker submitted the night(s) below.",
+        ("Updated — no action needed. Another order was added for this guest (new order, added venue or "
+         "second sign-up for the same night); every order below is active."
+         if update else "Signed up — no action needed. AMY's Railway booking worker submitted the night(s) below."),
         "",
         "— Guest details —",
         f"Name: {name}",
@@ -101,10 +132,15 @@ def team_email(ref, raw, request, bookings):
         "",
         "— Nights —",
         "\n\n".join(nights),
+        *(["", "— Waiting (list not posted yet; booked later in one Updated email) —",
+            "\n".join(f"{_long(n)} — {v}" for v, n in sorted(pending, key=lambda p: (p[1], p[0])))]
+          if pending else []),
         "",
         f"Amy Ref: {ref}",
     ])
     subject = f"Signed up: {name} — {label}"
+    if update:
+        subject = update_subject(subject, bookings)
     html = "<pre style=\"font-family:Helvetica,Arial,sans-serif;white-space:pre-wrap\">" + \
         _html.escape(text) + "</pre>"
     return {"to": TEAM_TO, "subject": subject, "text": text, "html": html,
@@ -181,11 +217,11 @@ def drais_team_email(ref, raw, request, bookings):
     posh = raw.get("posh") or {}
     source = f"Posh order {posh['order_number']}" if posh.get("order_number") else (raw.get("source") or "website")
     lines = ["ALREADY SIGNED UP — NO ACTION NEEDED", f"Guest: {name}", f"Email: {request['email']}",
-             f"Phone: {raw.get('phone') or '(none)'}", f"Party: {f} women, {m} men"]
+             f"Party: {f} women, {m} men"]
+    # Thomas: no phone numbers in emails; Drai's is confirmation-email only (no Speakeasy).
     for b in sorted(bookings, key=lambda b: b["date"]):
-        listed = b.get("speakeasy_date") or b["date"]
-        lines.append(f"{date.fromisoformat(b['date']).strftime('%a')} {b['date']} (night) - {DRAIS_VENUE} - "
-                     f"Added in Speakeasy (listed under {listed})")
+        lines.append(f"{DRAIS_VENUE}, {date.fromisoformat(b['date']).strftime('%a')} {b['date']} "
+                     f"(confirmation email sent, no Speakeasy signup)")
     lines += [f"Source: {source}", f"AMY ref: {ref}"]
     text = "\n".join(lines)
     label = date_label(request["start_date"], request["end_date"])

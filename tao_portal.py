@@ -529,10 +529,16 @@ def catalog_snapshot():
 
 def requires_access_code(page):
     """True when the live listing is gated by an access code (never submit)."""
+    # Only a VISIBLE code input gates the list. Since Nov 15 2026 TAO pages
+    # carry a collapsed, optional "Have a promo code? Enter Code" field
+    # (#OrderAccessCode, hidden) on open free guest lists; counting hidden
+    # inputs marked every open list as access-code and nothing was booked.
     for sel in ACCESS_CODE_INPUTS:
         try:
-            if page.locator(sel).count():
-                return True
+            loc = page.locator(sel)
+            for i in range(loc.count()):
+                if loc.nth(i).is_visible():
+                    return True
         except Exception:  # noqa: BLE001
             continue
     try:
@@ -540,6 +546,32 @@ def requires_access_code(page):
     except Exception:  # noqa: BLE001
         return False
     return bool(ACCESS_CODE_TEXT.search(body or ""))
+
+
+def gender_options_selectable(page):
+    """True when a Women or Men guest-list quantity can actually be chosen:
+    the select is visible and enabled and offers a quantity of 1 or more."""
+    for select in _selects_by_gender(page).values():
+        if not select.get("selector") or max_quantity(select.get("options") or []) < 1:
+            continue
+        try:
+            field = page.locator(select["selector"]).first
+            if field.count() and field.is_visible() and field.is_enabled():
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def is_code_gated(page):
+    """Thomas (Nov 15 2026): on a TAO Group guest-list page a promo/access-code
+    box (even a visible one) does NOT mean the list is closed. If the Women or
+    Men options at the bottom can be selected, the list is open and is booked.
+    It is code-gated only when no Women/Men option can be selected AND a code
+    is required."""
+    if gender_options_selectable(page):
+        return False
+    return requires_access_code(page)
 
 
 def check_availability(venue, date_obj):
@@ -555,7 +587,7 @@ def check_availability(venue, date_obj):
             if not _open_via_promoter(page, url):
                 return None
             body = page.locator("body").inner_text()
-            if requires_access_code(page):
+            if is_code_gated(page):
                 title = (page.locator("h1, h2").first.text_content() or "").strip()
                 return {
                     "event": entry.get("event") or title or f"{venue} Guest List",
@@ -656,7 +688,7 @@ def submit_registration(listing, guest, rehearse=False, screenshot_path=None, be
         try:
             if not _open_via_promoter(page, url):
                 return stop("Pass link is no longer on the Playmaker promoter page")
-            if requires_access_code(page):
+            if is_code_gated(page):
                 return stop("listing requires an access code")
             selects = _selects_by_gender(page)
             for gender, count in (("female", guest["female_count"]), ("male", guest["male_count"])):

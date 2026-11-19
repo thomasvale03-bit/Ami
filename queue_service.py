@@ -72,6 +72,10 @@ def source_policy(ref, raw, today):
         return 'Held Shanequa/Ashley exception; awaiting Thomas decision, no remediation'
     if raw.get('_missing_required') or raw.get('_action_needed'):
         return 'Source request requires review; do not guess'
+    import request_plan
+    plan_reason = request_plan.plan_problem(raw)
+    if plan_reason:
+        return plan_reason
     try:
         start, end = date.fromisoformat(raw['start_date']), date.fromisoformat(raw['end_date'])
         if (end - start).days > 13:
@@ -138,9 +142,11 @@ def validate_completion(raw, metadata):
     try:
         venues = {rules.normalize_venue_name(v) for v in raw['venues']}
         start, end = date.fromisoformat(raw['start_date']), date.fromisoformat(raw['end_date'])
-        expected = {(v, date.fromordinal(day).isoformat())
-                    for v in venues for day in range(start.toordinal(), end.toordinal() + 1)
-                    if v in rules.NIGHTCLUBS or rules.venue_open_on(v, date.fromordinal(day)) is not False}
+        import request_plan
+        pairs = request_plan.requested_pairs(raw)
+        requested_nights = {n for _v, n in pairs}
+        expected = {(v, n) for v, n in pairs
+                    if v in rules.NIGHTCLUBS or rules.venue_open_on(v, date.fromisoformat(n)) is not False}
         covered = set()
         drais = any(rules.is_drais(v) for v in venues)
         for record in records:
@@ -160,6 +166,7 @@ def validate_completion(raw, metadata):
                         covered.add((v, n))
             elif (venue == "Marquee Dayclub"
                   and start.isoformat() <= night <= end.isoformat()
+                  and night in requested_nights
                   and night <= rules.MARQUEE_DAYCLUB_PUSH_END
                   and record.get('order_id')):
                 # Auto-added when Marquee Dayclub is open; not a source venue.

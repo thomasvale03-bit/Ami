@@ -16,9 +16,15 @@ AMY_BROWSER_PROXY              optional http(s) proxy WITHOUT credentials
                                (Chrome flags cannot carry proxy auth)
 No DISPLAY -> starts a private Xvfb so the window never appears on a desktop.
 
-Chrome can crash between pickups (it did after the Nov 9 4 AM and 9 AM runs).
-ensure() / restart() bring it back; the worker retries a job once instead of
-sending it to manual on the first connection refused.
+The booking Chrome also gets its own D-Bus session and XDG runtime, not the
+box desktop's. Sharing the desktop session bus made Chrome abort with
+"D-Bus connection was disconnected" when that session refreshed (seen after
+the Nov 9 12:20 PM run at 2:24 PM MST).
+
+Chrome can still crash between pickups for other reasons (it did after the
+Nov 9 4 AM and 9 AM runs). ensure() / restart() bring it back; the worker
+retries a job once instead of sending it to manual on the first connection
+refused.
 """
 import atexit
 import logging
@@ -100,9 +106,59 @@ def _stop_tracked():
     _procs = []
 
 
+def _session_runtime():
+    return os.path.abspath(os.environ.get("AMY_BROWSER_RUNTIME_DIR") or "/tmp/amy-worker-runtime")
+
+
+def _stop_session_bus():
+    """Stop only the worker's private session bus, never a desktop dbus-daemon."""
+    bus = os.path.join(_session_runtime(), "bus")
+    try:
+        subprocess.run(
+            ["pkill", "-f", f"dbus-daemon --session --nofork --address=unix:path={bus}"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    for leftover in (bus, bus + "-pid"):
+        try:
+            os.remove(leftover)
+        except FileNotFoundError:
+            pass
+
+
+def _start_session_bus(env, logf):
+    """Give Chrome a session bus that outlives desktop session refreshes."""
+    runtime = _session_runtime()
+    os.makedirs(runtime, mode=0o700, exist_ok=True)
+    bus = os.path.join(runtime, "bus")
+    _stop_session_bus()
+    env["XDG_RUNTIME_DIR"] = runtime
+    env.pop("DBUS_SESSION_BUS_ADDRESS", None)
+    env.pop("DBUS_SYSTEM_BUS_ADDRESS", None)
+    binary = shutil.which("dbus-daemon")
+    if not binary:
+        raise RuntimeError("dbus-daemon is required so booking Chrome is not tied to the desktop session")
+    proc = subprocess.Popen(
+        [binary, "--session", "--nofork", f"--address=unix:path={bus}"],
+        env=env, stdout=logf, stderr=logf,
+    )
+    _procs.append(proc)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError("worker session bus exited immediately")
+        if os.path.exists(bus):
+            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
+            return
+        time.sleep(0.05)
+    raise RuntimeError("worker session bus did not start")
+
+
 def stop():
-    """Stop only the worker's plain Chrome and its private Xvfb."""
+    """Stop only the worker's plain Chrome, private Xvfb, and session bus."""
     _stop_tracked()
+    _stop_session_bus()
     profile = os.path.abspath(os.environ.get("AMY_BROWSER_PROFILE") or "/data/worker/profile")
     if profile and not any(profile.startswith(p) for p in FORBIDDEN_PROFILES):
         try:
@@ -172,6 +228,8 @@ def start(force=False):
     env = dict(os.environ)
     global _procs
     _procs = []
+    logf = _log_file()
+    _start_session_bus(env, logf)
     if not env.get("DISPLAY"):
         display = _free_display()
         logf = _log_file()
