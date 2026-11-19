@@ -17,6 +17,8 @@ import time
 
 from . import commands, llm
 from .amy_api import AmyApi
+from .guardrails import apply_guardrails
+from .history import load_conversation
 from .lookups import Lookups
 from .views import scrub
 from .watcher import Watcher
@@ -147,23 +149,45 @@ def allowed(user):
     return not raw or user in {u.strip() for u in raw.split(',') if u.strip()}
 
 
-def reply_text(lookups, text, *, use_llm=None, llm_answer=None):
+LLM_FAIL_FALLBACK = "Couldn't reach ChatGPT right now. Try me again in a minute?"
+VAGUE_FALLBACK = "Not sure I follow — want the queue status, a guest lookup, or a night's bookings?"
+
+
+def _call_answer(fn, lookups, text, history=None, context=None, meta=None):
+    try:
+        return fn(lookups, text, history=history, context=context, meta=meta)
+    except TypeError:
+        return fn(lookups, text)
+
+
+def reply_text(lookups, text, *, use_llm=None, llm_answer=None, history=None, context=None):
     """Answer one message. Exact keyword commands are answered directly; free
-    text goes to the OpenAI model when configured, else the keyword parser."""
+    text goes to the OpenAI model when configured, else a short clarifying
+    question. Never dump the command list on a vague message. Guardrails run
+    on every outgoing line (no phones, secrets, or unconfirmed 'booked')."""
     cmd, arg = commands.parse(text)
     use_llm = llm.configured() if use_llm is None else use_llm
     try:
         if cmd and (cmd != 'help' or not use_llm or not commands.strip_mentions(text)):
-            return commands.run(lookups, cmd, arg)
+            out = commands.run(lookups, cmd, arg)
+            safe, _flags = apply_guardrails(out, amy_confirmed=True, source='command')
+            return safe
         if use_llm:
             try:
-                return (llm_answer or llm.answer)(lookups, commands.strip_mentions(text))
+                meta = {}
+                raw = _call_answer(llm_answer or llm.answer, lookups, commands.strip_mentions(text),
+                                   history=history, context=context, meta=meta)
+                safe, _flags = apply_guardrails(
+                    raw, amy_confirmed=bool(meta.get('amy_confirmed')), source='llm')
+                return safe
             except Exception as exc:  # noqa: BLE001
                 log.error('OpenAI answer failed: %s', llm.describe(exc))
                 if cmd:
-                    return commands.run(lookups, cmd, arg)
-                return "Couldn't reach ChatGPT right now. Try a command:\n" + commands.HELP
-        return "Not sure what you mean. Here's what I can do:\n" + commands.HELP
+                    out = commands.run(lookups, cmd, arg)
+                    safe, _flags = apply_guardrails(out, amy_confirmed=True, source='command')
+                    return safe
+                return LLM_FAIL_FALLBACK
+        return VAGUE_FALLBACK
     except Exception as exc:  # noqa: BLE001
         log.warning('lookup failed: %s', scrub(str(exc), 120))
         return "Couldn't reach AMY right now, try again in a minute."
@@ -195,7 +219,9 @@ def build_app():
         if not allowed(user):
             say(text="Sorry, I only answer the Playmaker team.", thread_ts=thread)
             return
-        say(text=reply_text(lookups, event.get('text') or ''), thread_ts=thread)
+        history, context = load_conversation(app.client, event, thread)
+        say(text=reply_text(lookups, event.get('text') or '', history=history, context=context),
+            thread_ts=thread)
 
     @app.event('app_mention')
     def on_mention(event, say):

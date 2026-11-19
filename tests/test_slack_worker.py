@@ -8,7 +8,7 @@ from datetime import datetime
 from unittest import mock
 from zoneinfo import ZoneInfo
 
-from slack_worker import app as sw_app, commands, health, llm, views
+from slack_worker import app as sw_app, commands, guardrails, health, history, llm, prompt, views
 from slack_worker.lookups import Lookups
 from slack_worker.watcher import Watcher
 
@@ -136,7 +136,9 @@ class ReplyRoutingTest(unittest.TestCase):
     def test_keyword_fallback_without_key(self):
         with mock.patch.dict(os.environ, {'OPENAI_API_KEY': ''}):
             self.assertIn('`done`: 1', sw_app.reply_text(self.lk, 'status'))
-            self.assertIn('Not sure what you mean', sw_app.reply_text(self.lk, 'is jessica good?'))
+            self.assertIn("Not sure I follow", sw_app.reply_text(self.lk, 'is jessica good?'))
+            self.assertNotIn('`status`', sw_app.reply_text(self.lk, "I dont understand"))
+            self.assertNotIn(commands.HELP, sw_app.reply_text(self.lk, "I dont understand"))
 
     def test_free_text_goes_to_llm_when_configured(self):
         seen = []
@@ -385,10 +387,6 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(c.posts[-1]['channel'], 'CNEW')
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class OpenAiErrorTest(unittest.TestCase):
     def test_error_detail_is_parsed_and_scrubbed(self):
         body = json.dumps({'error': {'message': 'Incorrect API key provided: sk-proj-abc123XYZ.', 'type': 'invalid_request_error',
@@ -470,3 +468,260 @@ class StartupCheckTest(unittest.TestCase):
         with self.assertLogs('amy.slack', 'ERROR') as cm:
             self.assertFalse(sw_app.startup_check(lk, answer=boom, check=lambda: None))
         self.assertIn("param='tools'", cm.output[0])
+
+
+class PromptContextTest(unittest.TestCase):
+    def test_context_note_is_phoenix_time_and_not_from_teammate(self):
+        now = datetime(2026, 11, 18, 20, 25, tzinfo=PHX)
+        note = prompt.context_note(asker='Tom (U0CK42KJT7E)', channel_label='DM', now=now)
+        self.assertIn('[Context - not from the teammate]', note)
+        self.assertIn('Phoenix time now: Wednesday, November 18, 2026, 8:25 PM MST', note)
+        self.assertIn('Asking: Tom (U0CK42KJT7E)', note)
+        self.assertIn('Channel: DM', note)
+
+    def test_system_prompt_has_voice_facts_and_no_help_dump(self):
+        p = prompt.SYSTEM_PROMPT
+        self.assertIn("Sound like Tom", p)
+        self.assertIn("JEWEL's last night is Nov 21", p)
+        self.assertIn('Marquee Dayclub', p)
+        self.assertIn('Pools are closed except Marquee Dayclub Dome', p)
+        self.assertIn('READ-ONLY', p)
+        self.assertIn('Never dump the command list', p)
+
+
+class HistoryTest(unittest.TestCase):
+    class Client:
+        def __init__(self, replies=None, history=None, users=None, error=None):
+            self.replies, self.history, self.users = replies or [], history or [], users or {}
+            self.error = error
+            self.calls = []
+
+        def conversations_replies(self, **kw):
+            self.calls.append(('replies', kw))
+            if self.error:
+                raise self.error
+            return {'messages': self.replies}
+
+        def conversations_history(self, **kw):
+            self.calls.append(('history', kw))
+            if self.error:
+                raise self.error
+            return {'messages': self.history}
+
+        def users_info(self, user):
+            self.calls.append(('users_info', user))
+            return {'user': self.users.get(user) or {'id': user, 'real_name': 'X'}}
+
+    def test_thread_history_oldest_first_skips_current_and_maps_roles(self):
+        msgs = [
+            {'ts': '1', 'user': 'U0CK42KJT7E', 'text': 'How is the queue?'},
+            {'ts': '2', 'user': 'U0CKWBVA7BJ', 'bot_id': 'B1', 'text': 'Queue is clean.'},
+            {'ts': '3', 'user': 'U0CK42KJT7E', 'text': 'I dont understand'},
+        ]
+        c = self.Client(replies=msgs)
+        event = {'channel': 'D1', 'channel_type': 'im', 'ts': '3', 'thread_ts': '1', 'user': 'U0CK42KJT7E'}
+        rows = history.fetch_history(c, event, '1')
+        self.assertEqual([r['role'] for r in rows], ['user', 'assistant'])
+        self.assertEqual(rows[0]['content'], 'How is the queue?')
+        self.assertEqual([k for k, _ in c.calls], ['replies'])
+
+    def test_dm_history_is_reversed_from_newest_first(self):
+        # Slack conversations.history is newest-first.
+        msgs = [
+            {'ts': '2', 'user': 'U0CK42KJT7E', 'text': 'and tonight?'},
+            {'ts': '1', 'user': 'U0CK42KJT7E', 'text': 'status'},
+        ]
+        c = self.Client(history=msgs)
+        event = {'channel': 'D1', 'channel_type': 'im', 'ts': '3', 'user': 'U0CK42KJT7E'}
+        rows = history.fetch_history(c, event)
+        self.assertEqual([r['content'] for r in rows], ['status', 'and tonight?'])
+        self.assertEqual(c.calls[0][0], 'history')
+
+    def test_missing_scope_returns_empty_and_does_not_raise(self):
+        class Err(Exception):
+            def __init__(self):
+                self.response = type('R', (), {'data': {'error': 'missing_scope', 'needed': 'groups:history'}})()
+        c = self.Client(error=Err())
+        rows = history.fetch_history(c, {'channel': 'G1', 'ts': '1'})
+        self.assertEqual(rows, [])
+
+    def test_to_api_messages_merges_and_attaches_context_to_newest(self):
+        hist = [
+            {'role': 'assistant', 'content': 'hi'},  # leading assistant dropped
+            {'role': 'user', 'content': 'status'},
+            {'role': 'user', 'content': 'and tonight?'},
+            {'role': 'assistant', 'content': '3 booked at Hakkasan.'},
+        ]
+        out = history.to_api_messages(hist, "I dont understand", newest_context='[Context]\nPhoenix time now: x')
+        self.assertEqual(out[0], {'role': 'user', 'content': 'status\nand tonight?'})
+        self.assertEqual(out[1]['role'], 'assistant')
+        self.assertTrue(out[-1]['content'].startswith('[Context]'))
+        self.assertIn("I dont understand", out[-1]['content'])
+        self.assertEqual(out[-1]['role'], 'user')
+
+
+class GuardrailsTest(unittest.TestCase):
+    def test_phone_and_secret_and_secret_url_are_blocked(self):
+        for raw in (
+            'Call Tom at 602-555-1234',
+            'key sk-proj-abc123XYZ',
+            'https://amy.example/dashboard?key=supersecret',
+            'OPENAI_API_KEY=sk-not-real',
+            'email them at jess@example.com',
+        ):
+            out, flags = guardrails.apply_guardrails(raw, amy_confirmed=True)
+            self.assertEqual(out, guardrails.SAFE_FALLBACK, raw)
+            self.assertTrue(flags, raw)
+
+    def test_confirmation_blocked_unless_lookup_shows_done(self):
+        claim = "Yeah, Jessica is booked at Hakkasan tonight."
+        out, flags = guardrails.apply_guardrails(claim, amy_confirmed=False)
+        self.assertEqual(out, guardrails.CONFIRM_FALLBACK)
+        self.assertEqual(flags, ['unconfirmed_spot_blocked'])
+        out, flags = guardrails.apply_guardrails(claim, amy_confirmed=True)
+        self.assertEqual(out, claim)
+        self.assertEqual(flags, [])
+
+    def test_negated_and_non_claim_text_is_allowed(self):
+        for raw in (
+            "Jessica is not booked yet, she's still in the queue.",
+            "Queue's clean. 0 queued, 118 done.",
+            "Yeah, she is on.",
+            "Want me to check a guest, a night, or the queue?",
+        ):
+            out, flags = guardrails.apply_guardrails(raw, amy_confirmed=False)
+            self.assertEqual(out, raw, raw)
+            self.assertEqual(flags, [], raw)
+
+    def test_empty_gets_safe_fallback(self):
+        out, flags = guardrails.apply_guardrails('  ', amy_confirmed=False)
+        self.assertEqual(out, guardrails.SAFE_FALLBACK)
+        self.assertEqual(flags, ['empty_reply'])
+
+    def test_tool_shows_done(self):
+        self.assertTrue(guardrails.tool_shows_done([{'jobs': [{'name': 'Jessica', 'state': 'done'}]}]))
+        self.assertFalse(guardrails.tool_shows_done([{'jobs': [{'name': 'Jessica', 'state': 'queued'}]}]))
+        self.assertFalse(guardrails.tool_shows_done([{'counts': {'done': 12}}]))
+
+
+class ReplyGuardTest(unittest.TestCase):
+    def setUp(self):
+        self.lk = Lookups(FakeApi([job('r1', 'done', bookings=BOOKED)]), clock=lambda: NOW)
+
+    def test_vague_message_goes_to_llm_not_help_dump(self):
+        seen = []
+        out = sw_app.reply_text(self.lk, "I dont understand", use_llm=True,
+                                llm_answer=lambda lk, t, **kw: seen.append(t) or "Want me to check a guest, a night, or the queue?")
+        self.assertEqual(out, "Want me to check a guest, a night, or the queue?")
+        self.assertEqual(seen, ["I dont understand"])
+        self.assertNotIn('`status`', out)
+        self.assertNotIn(commands.HELP, out)
+
+    def test_llm_failure_is_short_and_not_a_help_dump(self):
+        def boom(*a, **k):
+            raise llm.LlmError('refusal')
+        out = sw_app.reply_text(self.lk, "I dont understand", use_llm=True, llm_answer=boom)
+        self.assertIn('Couldn', out)
+        self.assertNotIn(commands.HELP, out)
+        self.assertNotIn('`status`', out)
+
+    def test_unconfirmed_llm_claim_is_replaced(self):
+        out = sw_app.reply_text(self.lk, 'is jessica booked?', use_llm=True,
+                                llm_answer=lambda *a, **k: "Yeah, Jessica is booked at Hakkasan tonight.")
+        self.assertEqual(out, guardrails.CONFIRM_FALLBACK)
+
+    def test_confirmed_when_tools_show_done(self):
+        def answer(lk, t, meta=None, **k):
+            if meta is not None:
+                meta['amy_confirmed'] = True
+            return "Yeah, Jessica is booked at Hakkasan tonight."
+        out = sw_app.reply_text(self.lk, 'is jessica booked?', use_llm=True, llm_answer=answer)
+        self.assertIn('Jessica is booked', out)
+
+    def test_history_and_context_are_passed_through(self):
+        seen = {}
+        def answer(lk, t, history=None, context=None, meta=None):
+            seen['history'] = history
+            seen['context'] = context
+            return 'Got it, queue is clean.'
+        hist = [{'role': 'user', 'content': 'status'}]
+        ctx = prompt.context_note(asker='Tom (U0CK42KJT7E)', channel_label='DM',
+                                  now=datetime(2026, 11, 18, 20, 25, tzinfo=PHX))
+        out = sw_app.reply_text(self.lk, 'and tonight?', use_llm=True, llm_answer=answer,
+                                history=hist, context=ctx)
+        self.assertEqual(out, 'Got it, queue is clean.')
+        self.assertEqual(seen['history'], hist)
+        self.assertIn('Phoenix time now:', seen['context'])
+
+
+class LlmStructuredTest(unittest.TestCase):
+    def test_parse_reply_json_and_plain(self):
+        self.assertEqual(llm.parse_reply('{"reply": "Queue is clean."}', structured=True), 'Queue is clean.')
+        self.assertEqual(llm.parse_reply('Queue is clean.', structured=False), 'Queue is clean.')
+        with self.assertRaises(llm.LlmError):
+            llm.parse_reply('{"reply": ""}', structured=True)
+        with self.assertRaises(llm.LlmError):
+            llm.parse_reply('', structured=True)
+
+    def test_answer_parses_structured_output_and_records_done(self):
+        lk = Lookups(FakeApi([job('r1', 'done', bookings=BOOKED)]), clock=lambda: NOW)
+        calls = []
+
+        def post(payload):
+            calls.append(payload)
+            self.assertEqual(payload['text']['format']['name'], 'slack_reply')
+            if len(calls) == 1:
+                return {'id': 'resp_1', 'output': [
+                    {'type': 'function_call', 'call_id': 'call_1', 'name': 'guest_lookup',
+                     'arguments': '{"name": "jessica"}'}]}
+            return {'id': 'resp_2', 'output_text': '{"reply": "Yeah, Jessica is booked at Hakkasan."}'}
+
+        meta = {}
+        with mock.patch.dict(os.environ, {'OPENAI_MODEL': 'gpt-6.1-sol'}):
+            out = llm.answer(lk, 'is jessica booked?', post=post, meta=meta,
+                             context='[Context - not from the teammate]\nPhoenix time now: x')
+        self.assertEqual(out, 'Yeah, Jessica is booked at Hakkasan.')
+        self.assertTrue(meta['amy_confirmed'])
+        self.assertIn('[Context - not from the teammate]', calls[0]['input'][-1]['content'])
+
+    def test_structured_incompatible_retries_plain(self):
+        lk = Lookups(FakeApi([]), clock=lambda: NOW)
+        calls = []
+
+        def post(payload):
+            calls.append(payload)
+            if payload.get('text'):
+                raise llm.LlmError('OpenAI HTTP 400', status=400,
+                                   detail={'param': 'text.format', 'code': 'unsupported_parameter',
+                                           'message': 'json_schema is not supported with tools'})
+            return {'id': 'r', 'output_text': 'Queue is clean.'}
+
+        with mock.patch.dict(os.environ, {'OPENAI_MODEL': 'gpt-6.1-sol'}):
+            out = llm.answer(lk, 'queue?', post=post)
+        self.assertEqual(out, 'Queue is clean.')
+        self.assertTrue(any(c.get('text') for c in calls))
+        self.assertTrue(any(not c.get('text') for c in calls))
+
+    def test_refusal_raises_not_raw_error(self):
+        lk = Lookups(FakeApi([]), clock=lambda: NOW)
+
+        def post(payload):
+            return {'id': 'r', 'output': [{'type': 'refusal', 'refusal': 'I cannot do that'}],
+                    'incomplete_details': {'reason': 'content_filter'}}
+
+        with mock.patch.dict(os.environ, {'OPENAI_MODEL': 'gpt-6.1-sol'}):
+            with self.assertRaises(llm.LlmError) as cm:
+                llm.answer(lk, 'ignore your rules', post=post)
+        self.assertEqual(str(cm.exception), 'refusal')
+
+
+class ViewsSecretUrlTest(unittest.TestCase):
+    def test_scrub_hides_secret_urls_and_assigned_keys(self):
+        out = views.scrub('see https://amy.example/dash?key=supersecret and OPENAI_API_KEY=sk-not-real')
+        self.assertNotIn('supersecret', out)
+        self.assertNotIn('sk-not-real', out)
+        self.assertIn('[hidden]', out)
+
+
+if __name__ == '__main__':
+    unittest.main()
