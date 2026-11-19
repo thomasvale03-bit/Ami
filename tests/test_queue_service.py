@@ -422,3 +422,26 @@ def test_stall_requeue_refuses_submitted_progress(raw, monkeypatch):
     code, body = api(s, '/queue/stall-requeue/mock', {'reason': 'stall'})
     assert code == 409
     assert s.get('mock')['state'] == 'assigned'
+def _manual(raw, reason='Duplicate suspicion'):
+    s, token = assigned(raw)
+    assert api(s, '/queue/jobs/mock', {'claim_token': token, 'action': 'manual', 'reason': reason})[0] == 200
+    return s
+
+
+def test_owner_requeue_one_manual_job(raw):
+    s = _manual(raw)
+    assert api(s, '/queue/requeue/mock', {})[0] == 409  # approval required
+    code, row = api(s, '/queue/requeue/mock', {'owner_approval': 'pt861u'})
+    assert code == 200 and row['state'] == 'queued'
+    assert row['metadata']['owner_requeue']['approval'] == 'pt861u'
+    assert api(s, '/queue/requeue/mock', {'owner_approval': 'pt861u'})[0] == 409  # not manual any more
+
+
+def test_owner_requeue_refuses_submitted_or_done(raw):
+    s, token = assigned(raw)
+    api(s, '/queue/jobs/mock', {'claim_token': token, 'action': 'progress',
+                                'metadata': {'progress': {'submitting': {'x': True}}}})
+    api(s, '/queue/jobs/mock', {'claim_token': token, 'action': 'manual', 'reason': 'x'})
+    assert s.get('mock')['state'] == 'manual'
+    assert api(s, '/queue/requeue/mock', {'owner_approval': 'pt861u'})[0] == 409
+    assert api(s, '/queue/requeue/unknown', {'owner_approval': 'pt861u'})[0] == 409

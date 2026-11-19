@@ -17,7 +17,7 @@ import re
 import sys
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 
 from rules_engine import (
@@ -56,7 +56,12 @@ PHOENIX = ZoneInfo("America/Phoenix")
 
 def _send_branded_or_gmail(service, message_id, to, subject, text, html, dedupe_query=None):
     """Send from info@playmakerentertainment.com via Zoho SMTP (send_branded)
-    when Zoho is configured, falling back to gmail_client.send_once."""
+    when Zoho is configured, falling back to gmail_client.send_once.
+
+    A prior matching send (Gmail Sent, branded_sent log, or send_branded's
+    "duplicate" reply) counts as success so a retry never raises SEND FAILED
+    after the guest already got the email.
+    """
     dq = dedupe_query or f'to:{to} subject:"{subject}" newer_than:7d'
     if posh_webhook.zoho_configured():
         code, res = posh_webhook.send_branded(service, {
@@ -66,11 +71,42 @@ def _send_branded_or_gmail(service, message_id, to, subject, text, html, dedupe_
             "html": html,
             "dedupe_query": dq,
         })
-        return code == 200 and isinstance(res, dict) and bool(res.get("sent"))
-    return gmail_client.send_once(
+        if code == 200 and isinstance(res, dict) and bool(res.get("sent")):
+            return True
+        if code == 200 and isinstance(res, str) and "duplicate" in res.lower():
+            return True
+        return False
+    # send_once returns False when the dedupe query already matches Sent.
+    if gmail_client.send_once(
         service, message_id, to, subject, text,
         sender=posh_webhook.branded_from(), html=html, dedupe_query=dq,
-    )
+    ):
+        return True
+    try:
+        return gmail_client.already_sent(service, dq) is True
+    except Exception:
+        return False
+
+
+def _posh_order_already_confirmed(service, order_id, message_id):
+    """True if this Posh order already got a Scottsdale confirmation.
+
+    Checks a prior intake message labeled processed/exception, and Sent or
+    branded-send records that mention the order number (the team summary
+    includes "Posh order: {id}"; the guest text part does too).
+    """
+    if not order_id:
+        return False
+    try:
+        if gmail_client.posh_order_already_handled(service, order_id, message_id) is True:
+            return True
+    except Exception:
+        log.exception("posh_order_already_handled failed for %s", order_id)
+    try:
+        return gmail_client.already_sent(service, f'"Posh order: {order_id}"') is True
+    except Exception:
+        log.exception("already_sent check failed for Posh order %s", order_id)
+        return False
 
 
 def handle_scottsdale_request(service, message_id, raw, dry_run):
@@ -114,19 +150,31 @@ def handle_scottsdale_request(service, message_id, raw, dry_run):
         return gmail_client.PROCESSED_LABEL
 
     order_id = (raw.get("posh") or {}).get("order_number") or ""
+    if _posh_order_already_confirmed(service, order_id, message_id):
+        log.info("%s: Posh order %s already confirmed; not sending again", message_id, order_id)
+        return gmail_client.PROCESSED_LABEL
+
     _track(message_id, name=full_name, email=email, venue=canonical, dates=nights, order_id=order_id)
+
+    # Order # is on the text part only, for dedupe; the HTML template is unchanged.
+    guest_text = text if not order_id else f"{text.rstrip()}\n\nPosh order: {order_id}"
+    guest_dq = (
+        f'to:{email} "Posh order: {order_id}" newer_than:30d'
+        if (email and order_id) else
+        f'to:{email} subject:"{subject}" newer_than:7d'
+    )
 
     sent_ok = False
     if email:
         try:
             sent_ok = bool(_send_branded_or_gmail(
                 service,
-                f"amy-scottsdale-{message_id}@playmakerentertainment.com",
+                f"amy-scottsdale-{order_id or message_id}@playmakerentertainment.com",
                 email,
                 subject,
-                text,
+                guest_text,
                 html,
-                dedupe_query=f'to:{email} subject:"{subject}" newer_than:7d',
+                dedupe_query=guest_dq,
             ))
         except Exception:
             log.exception("%s: Scottsdale confirmation send raised", message_id)
@@ -161,7 +209,11 @@ def handle_scottsdale_request(service, message_id, raw, dry_run):
             tsub,
             tbody,
             thtml,
-            dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Ref: {message_id}"',
+            dedupe_query=(
+                f'to:{rules.PLAYMAKER_EMAIL} "Posh order: {order_id}" newer_than:30d'
+                if order_id else
+                f'to:{rules.PLAYMAKER_EMAIL} "Ref: {message_id}"'
+            ),
         )
     except Exception:
         log.exception("%s: Scottsdale team summary send failed", message_id)
@@ -169,6 +221,136 @@ def handle_scottsdale_request(service, message_id, raw, dry_run):
         return gmail_client.EXCEPTION_LABEL
     job_tracker.mark_done(message_id)
     return gmail_client.PROCESSED_LABEL
+
+
+def scottsdale_door_list_query(q_term):
+    """Gmail query for Scottsdale door-list source mail.
+
+    Posh webhook signups are inserted From=To the intake inbox, so Gmail
+    also applies the SENT label. A bare ``-in:sent`` therefore drops them
+    and the list goes out as "Posh shows 0 orders". Keep ``-in:sent`` for
+    other mail (confirmations, prior door lists) and always include
+    ``NEW POSH SIGNUP`` messages, including Sent. Callers still dedupe
+    parsed orders by Posh order number.
+    """
+    return (
+        f'(({q_term}) newer_than:14d -in:sent) '
+        f'OR (subject:"NEW POSH SIGNUP" ({q_term}) newer_than:14d)'
+    )
+
+
+DOOR_LIST_MAX_MESSAGES = int(os.environ.get("SCOTTSDALE_DOOR_LIST_MAX_MESSAGES", "2000"))
+DOOR_LIST_PAGE_SIZE = 500  # Gmail API maximum per page
+
+
+def door_list_message_refs(service, query, cap=None, stats=None):
+    """Every Gmail search hit for `query`, following nextPageToken until the
+    results are exhausted (a single page holds at most 500, and Riot House
+    alone gets ~200 webhook emails in the 14-day window). Stops at a safety
+    cap and logs loudly if it is hit. Newest first, as Gmail returns them."""
+    cap = DOOR_LIST_MAX_MESSAGES if cap is None else cap
+    refs, token, pages = [], None, 0
+    while True:
+        kwargs = {"userId": "me", "q": query, "maxResults": min(DOOR_LIST_PAGE_SIZE, max(1, cap - len(refs)))}
+        if token:
+            kwargs["pageToken"] = token
+        resp = service.users().messages().list(**kwargs).execute()
+        pages += 1
+        refs.extend(resp.get("messages", []) or [])
+        token = resp.get("nextPageToken")
+        if len(refs) >= cap:
+            if token or len(refs) > cap:
+                log.error("Scottsdale door list: Gmail search hit the %d-message safety cap; "
+                          "older matching emails were NOT read (query: %s)", cap, query)
+                if stats is not None:
+                    stats["cap_hit"] = True
+            refs = refs[:cap]
+            break
+        if not token:
+            break
+    if stats is not None:
+        stats["pages"] = stats.get("pages", 0) + pages
+        stats["emails_read"] = stats.get("emails_read", 0) + len(refs)
+    return refs
+
+
+def collect_scottsdale_door_orders(service, venue, tonight, cutoff=None, stats=None):
+    """Unique Posh orders for `venue` on `tonight` (read-only; sends nothing).
+
+    Signups that arrived after `cutoff` (the 7:43 PM send) are never added.
+    Orders are deduped by Posh order number (else guest email + date)."""
+    q_term = '"Riot House" OR "riothouse"' if venue == "Riot House" else '"Almost Famous"'
+    refs = door_list_message_refs(service, scottsdale_door_list_query(q_term), stats=stats)
+    cutoff_ms = int(cutoff.timestamp() * 1000) if cutoff is not None else None
+    orders = []
+    seen_keys = set()
+    for ref in reversed(refs):
+        mid = ref["id"]
+        msg, body = gmail_client.get_plain_text_body(service, mid)
+        if cutoff_ms is not None and int((msg or {}).get("internalDate") or 0) > cutoff_ms:
+            if stats is not None:
+                stats["after_cutoff"] = stats.get("after_cutoff", 0) + 1
+            continue
+        subj = gmail_client.get_subject(msg or {})
+        if posh.is_posh_signup(subj, body):
+            raw = posh.parse_signup(mid, body)
+        elif any(m.lower() in (subj or "").lower() for m in rules.SUBJECT_MARKERS):
+            raw = gmail_client.parse_request(mid, body)
+        else:
+            continue
+        ev = ((raw.get("posh") or {}).get("event_name") or "").strip()
+        if rules.scottsdale_venue([ev] + list(raw.get("venues") or [])) != venue:
+            continue
+        sd = (raw.get("start_date") or "").strip()
+        ed = (raw.get("end_date") or sd).strip()
+        if sd and not (sd <= tonight.isoformat() <= ed):
+            continue
+        if stats is not None:
+            stats["matching_emails"] = stats.get("matching_emails", 0) + 1
+        order_no = ((raw.get("posh") or {}).get("order_number") or "").strip()
+        guest_email = (raw.get("email") or "").strip().lower()
+        guest_name = (raw.get("name") or "").strip() or guest_email
+        dedupe_key = order_no or f"{guest_email}:{sd}"
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        try:
+            w = int(raw.get("female_count") or 0)
+        except (TypeError, ValueError):
+            w = 0
+        try:
+            m = int(raw.get("male_count") or 0)
+        except (TypeError, ValueError):
+            m = 0
+        ticket = ((raw.get("posh") or {}).get("ticket") or "").strip()
+        orders.append({
+            "name": guest_name,
+            "email": guest_email,
+            "women": w,
+            "men": m,
+            "ticket": ticket,
+            "order_number": order_no,
+        })
+    return orders
+
+
+def scottsdale_door_list_preview(service, night):
+    """DRY RUN for one door-list night: counts only, sends NO email.
+    Uses the same collection as the real 7:43 PM send, cut off at 7:43 PM."""
+    cutoff = datetime.combine(night, dtime(19, 43), tzinfo=PHOENIX)
+    out = {"night": night.isoformat(), "cutoff": cutoff.isoformat(), "venues": {}}
+    for venue in ("Riot House", "Almost Famous"):
+        stats = {}
+        orders = collect_scottsdale_door_orders(service, venue, night, cutoff=cutoff, stats=stats)
+        out["venues"][venue] = {
+            **stats,
+            "unique_orders": len(orders),
+            "order_numbers": [o["order_number"] for o in orders],
+            "women": sum(o["women"] for o in orders),
+            "men": sum(o["men"] for o in orders),
+            "tickets": sum(o["women"] + o["men"] for o in orders),
+        }
+    return out
 
 
 def send_scottsdale_door_lists(service, mode, now=None):
@@ -194,54 +376,7 @@ def send_scottsdale_door_lists(service, mode, now=None):
         if mode != "dry-run" and gmail_client.already_sent(service, dedupe_q):
             continue
 
-        q_term = '"Riot House" OR "riothouse"' if venue == "Riot House" else '"Almost Famous"'
-        resp = service.users().messages().list(
-            userId="me", q=f"({q_term}) newer_than:14d -in:sent", maxResults=100
-        ).execute()
-        orders = []
-        seen_keys = set()
-        for ref in reversed(resp.get("messages", [])):
-            mid = ref["id"]
-            msg, body = gmail_client.get_plain_text_body(service, mid)
-            subj = gmail_client.get_subject(msg or {})
-            if posh.is_posh_signup(subj, body):
-                raw = posh.parse_signup(mid, body)
-            elif any(m.lower() in (subj or "").lower() for m in rules.SUBJECT_MARKERS):
-                raw = gmail_client.parse_request(mid, body)
-            else:
-                continue
-            ev = ((raw.get("posh") or {}).get("event_name") or "").strip()
-            if rules.scottsdale_venue([ev] + list(raw.get("venues") or [])) != venue:
-                continue
-            sd = (raw.get("start_date") or "").strip()
-            ed = (raw.get("end_date") or sd).strip()
-            if sd and not (sd <= tonight.isoformat() <= ed):
-                continue
-            order_no = ((raw.get("posh") or {}).get("order_number") or "").strip()
-            guest_email = (raw.get("email") or "").strip().lower()
-            guest_name = (raw.get("name") or "").strip() or guest_email
-            dedupe_key = order_no or f"{guest_email}:{sd}"
-            if dedupe_key in seen_keys:
-                continue
-            seen_keys.add(dedupe_key)
-            try:
-                w = int(raw.get("female_count") or 0)
-            except (TypeError, ValueError):
-                w = 0
-            try:
-                m = int(raw.get("male_count") or 0)
-            except (TypeError, ValueError):
-                m = 0
-            ticket = ((raw.get("posh") or {}).get("ticket") or "").strip()
-            orders.append({
-                "name": guest_name,
-                "email": guest_email,
-                "women": w,
-                "men": m,
-                "ticket": ticket,
-                "order_number": order_no,
-            })
-
+        orders = collect_scottsdale_door_orders(service, venue, tonight, cutoff=now)
         if orders:
             lines = []
             tot_w = sum(o["women"] for o in orders)
@@ -490,6 +625,55 @@ def team_alert(service, message_id, raw, problems, dry_run):
         rules.PLAYMAKER_EMAIL, subject, body, sender=rules.SENDER_EMAIL,
         dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "Gmail message ID: {message_id}"',
     )
+
+
+HELD_ALERT_SKIP = ("Legacy job completed",)
+
+
+def held_signup_alert(service, message_id, raw, row, since=None):
+    """Queue mode (Thomas, Nov 15 2026): a signup that lands held/manual at
+    intake gets ONE "needs attention" email to team@ from info@ (branded
+    sender). Sent even with concierge mode on; no phone numbers; once per ref
+    (only for a job created by this intake, plus a Sent/branded dedupe)."""
+    if not row or row.get("state") != "manual":
+        return False
+    reason = row.get("reason") or ""
+    if any(reason.startswith(s) for s in HELD_ALERT_SKIP):
+        return False
+    if since is not None and float(row.get("created") or 0) < since - 1:
+        return False  # job existed before this intake: already alerted
+    name = raw.get("name") or " ".join(x for x in (raw.get("first_name"), raw.get("last_name")) if x) or "(unknown)"
+    venues = ", ".join(raw.get("venues") or []) or "(none specified)"
+    start, end = raw.get("start_date") or "?", raw.get("end_date") or raw.get("start_date") or "?"
+    dates = start if start == end else f"{start} to {end}"
+    p = raw.get("posh") or {}
+    issue, action = (raw.get("_action_needed") or (reason, "Review the request and book it by hand if it is valid."))[:2]
+    lines = [
+        "NEEDS ATTENTION: this signup was saved but NOT booked automatically.",
+        "",
+        f"Guest: {name}",
+        f"Email: {raw.get('email') or '(none)'}",
+        f"Venue(s): {venues}",
+        f"Date(s): {dates}",
+        f"Party: {raw.get('female_count') or 0} women, {raw.get('male_count') or 0} men",
+        f"Source: {'Posh order ' + p['order_number'] if p.get('order_number') else (raw.get('source') or 'website')}",
+    ]
+    if p.get("event_name"):
+        lines.append(f"Posh event: {p['event_name']}")
+    lines += ["", f"Why it is held: {reason}"]
+    if issue and issue != reason:
+        lines.append(f"Detail: {issue}")
+    lines += [f"What to do: {action}", "", f"AMY ref: {message_id}"]
+    text = "\n".join(lines)
+    text = re.sub(r"(?im)^.*phone.*$\n?", "", text)  # never include phone numbers
+    subject = f"Amy — needs attention: {name}, {dates} (held, not booked)"
+    html = '<html><body><pre style="font-family:inherit;white-space:pre-wrap">' + \
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</pre></body></html>"
+    return bool(_send_branded_or_gmail(
+        service, f"amy-held-{message_id}@playmakerentertainment.com", rules.PLAYMAKER_EMAIL,
+        subject, text, html,
+        dedupe_query=f'to:{rules.PLAYMAKER_EMAIL} "AMY ref: {message_id}" "NEEDS ATTENTION"',
+    ))
 
 
 def posh_summary(raw):
@@ -996,12 +1180,36 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
             log.info("[test mode] leaving %s untouched (not from an allowlisted address)", message_id)
             return None
 
+    # Riot House / Almost Famous (and other Scottsdale clubs) are email-only:
+    # send the guest confirmation immediately, including in queue mode, and
+    # do not enqueue a Vegas booking job. Recurring-date review and missing
+    # TAO consent must not block these confirmations.
+    if non_vegas_venue_problem(raw) == "scottsdale":
+        if raw.get("source") == "Posh":
+            order = (raw.get("posh") or {}).get("order_number")
+            if gmail_client.posh_order_already_handled(service, order, message_id):
+                log.info("%s: POSH order %s was already processed; not confirming it again", message_id, order)
+                return gmail_client.PROCESSED_LABEL
+        if raw.get("form_ref") and raw.get("source") != "Posh":
+            if (raw["form_ref"] in _WEBSITE_REFS_SEEN
+                    or (not dry_run and gmail_client.website_ref_already_handled(service, raw["form_ref"], message_id))):
+                log.info("%s: website submission %s was already processed; not confirming it again", message_id, raw["form_ref"])
+                return gmail_client.PROCESSED_LABEL
+            _WEBSITE_REFS_SEEN.add(raw["form_ref"])
+        log.info("%s: Scottsdale venue %s; sending Scottsdale confirmation (no TAO Vegas)", message_id, raw.get("venues"))
+        return handle_scottsdale_request(service, message_id, raw, dry_run)
+
     # Intake remains active. Persist source before routing/browser/email.
     # Existing operational ledger rows are deliberately NOT migrated.
     if queue_service.enabled():
         if dry_run:
             return None
-        queue_service.enqueue(message_id, raw)
+        enqueued_at = time.time()
+        row = queue_service.enqueue(message_id, raw)
+        try:
+            held_signup_alert(service, message_id, raw, row, since=enqueued_at)
+        except Exception:  # noqa: BLE001 - the job is already saved; never fail intake on the alert
+            log.exception("%s: held-signup alert failed", message_id)
         return gmail_client.PROCESSED_LABEL
 
     if raw.get("form_ref") and raw.get("source") != "Posh":

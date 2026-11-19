@@ -168,6 +168,154 @@ class Store:
                 (reason, json.dumps(meta), now, now, ref))
         return self.get(ref)
 
+
+    def owner_requeue(self, ref, approval, now):
+        """Owner-approved: put ONE manual job back to queued. Only for a job
+        that was never submitted (no booking/submitting progress), so it can
+        never cause a rebook of completed work. The approval is recorded."""
+        approval = str(approval or '').strip()
+        if not approval:
+            raise Conflict('owner approval (message id) required')
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone()
+            if row is None:
+                raise Conflict('Unknown job')
+            # Owner may also pull a pre-submit retry job forward (Thomas, Nov 15
+            # 2026: list opened tonight, don't wait for the hourly retry).
+            if row['state'] not in ('manual', 'retry'):
+                raise Conflict('Only a manual or retry job can be requeued')
+            meta = json.loads(row['metadata'] or '{}')
+            progress = meta.get('progress') or {}
+            if progress.get('submitting') or progress.get('bookings') or meta.get('evidence'):
+                raise Conflict('Job has submission progress; manual review required')
+            meta['owner_requeue'] = {'approval': approval[:200], 'at': now, 'previous_reason': row['reason']}
+            db.execute("UPDATE queue_jobs SET state='queued',reason=?,metadata=?,updated=?,due=?,claim_token=NULL WHERE ref=?",
+                       ('Owner requeue ' + approval[:200], json.dumps(meta), now, now, ref))
+        return self.get(ref)
+
+    def owner_complete(self, ref, approval, now):
+        """Owner-approved: mark ONE manual job done from the verified receipts
+        the worker already saved when completion was refused. No booking and
+        no email happens here. The saved evidence must pass the same
+        validate_completion check a live completion would (exact requested
+        venue/date receipts, party counts, order ids, guest+team email ids), so
+        a venue fallback (e.g. Hakkasan->JEWEL) is still refused."""
+        approval = str(approval or '').strip()
+        if not approval:
+            raise Conflict('owner approval (message id) required')
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone()
+            if row is None:
+                raise Conflict('Unknown job')
+            if row['state'] != 'manual':
+                raise Conflict('Only a manual job can be owner-completed')
+            meta = json.loads(row['metadata'] or '{}')
+            evidence = (meta.get('resolution') or {}).get('evidence')
+            if not isinstance(evidence, dict):
+                raise Conflict('No saved worker receipts on this job')
+            from queue_service import validate_completion
+            checked = validate_completion(json.loads(row['raw']), {'evidence': evidence})
+            meta['evidence'] = evidence
+            meta['venue_changes'] = checked['venue_changes']
+            meta['completed_at'] = now
+            meta['owner_complete'] = {'approval': approval[:200], 'at': now, 'previous_reason': row['reason']}
+            db.execute("UPDATE queue_jobs SET state='done',reason=?,metadata=?,updated=?,claim_token=NULL WHERE ref=?",
+                       ('Completed from saved receipts (owner ' + approval[:200] + ')', json.dumps(meta), now, ref))
+        return self.get(ref)
+
+    def all_jobs(self, states=None):
+        """Every job (optionally only these states), oldest first. No claim tokens."""
+        with self.connect() as db:
+            if states:
+                marks = ','.join('?' * len(states))
+                rows = db.execute(f'SELECT * FROM queue_jobs WHERE state IN ({marks}) ORDER BY created,ref',
+                                  tuple(states)).fetchall()
+            else:
+                rows = db.execute('SELECT * FROM queue_jobs ORDER BY created,ref').fetchall()
+            return [self.decode(r) for r in rows]
+
+    def set_meta(self, ref, key, value):
+        """Record bookkeeping (e.g. the flag alert result) without a state change."""
+        with self.connect() as db:
+            row = db.execute('SELECT metadata FROM queue_jobs WHERE ref=?', (ref,)).fetchone()
+            if row is None:
+                raise Conflict('Unknown job')
+            meta = json.loads(row['metadata'] or '{}')
+            meta[key] = value
+            db.execute('UPDATE queue_jobs SET metadata=? WHERE ref=?', (json.dumps(meta), ref))
+
+    @staticmethod
+    def saved_bookings(meta):
+        """Verified booking records the worker saved (final evidence, the
+        refused-completion evidence, or per-night progress checkpoints)."""
+        out, seen = [], set()
+        sources = [(meta.get('evidence') or {}).get('bookings'),
+                   ((meta.get('resolution') or {}).get('evidence') or {}).get('bookings'),
+                   list(((meta.get('progress') or {}).get('bookings') or {}).values())]
+        for records in sources:
+            for rec in records or []:
+                if not isinstance(rec, dict) or rec.get('verified') is not True:
+                    continue
+                key = rec.get('order_id') or (rec.get('venue'), rec.get('date'), rec.get('system'))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(rec)
+        return out
+
+    def owner_reconcile(self, ref, approval, now, lookup_prior=None):
+        """Owner-approved: mark ONE manual/submission_uncertain job done from the
+        verified bookings the worker already recorded (refused-completion
+        evidence or per-night progress). Never books and never sends email.
+
+        The bookings must pass validate_completion (exact requested dates,
+        party counts, order ids; approved same-night venue fallbacks only), so
+        a partial job (a night not booked yet) stays manual. A guest receipt is
+        required: the saved send id, or the earlier identical email found by
+        lookup_prior(raw, 'guest') when /send-branded refused it as a
+        duplicate. A missing team receipt is recorded, not invented."""
+        approval = str(approval or '').strip()
+        if not approval:
+            raise Conflict('owner approval (message id) required')
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone()
+            if row is None:
+                raise Conflict('Unknown job')
+            if row['state'] not in ('manual', 'submission_uncertain'):
+                raise Conflict('Only a manual or submission_uncertain job can be reconciled')
+            meta = json.loads(row['metadata'] or '{}')
+            raw = json.loads(row['raw'])
+            bookings = self.saved_bookings(meta)
+            if not bookings:
+                raise Conflict('No verified booking saved on this job')
+            receipts = {}
+            for source in (((meta.get('resolution') or {}).get('evidence') or {}).get('email_receipts') or []):
+                if isinstance(source, dict) and source.get('id') and source.get('kind') in ('guest', 'team'):
+                    receipts.setdefault(source['kind'], {'kind': source['kind'], 'id': source['id']})
+            for kind, mid in ((meta.get('progress') or {}).get('emails') or {}).items():
+                if mid and kind in ('guest', 'team'):
+                    receipts.setdefault(kind, {'kind': kind, 'id': mid})
+            if 'guest' not in receipts and lookup_prior:
+                prior = lookup_prior(raw, 'guest')
+                if prior and prior.get('id'):
+                    receipts['guest'] = {'kind': 'guest', 'id': prior['id'], 'prior_send': prior}
+            if 'guest' not in receipts:
+                raise Conflict('No guest email receipt saved or found in the send log; stays manual')
+            evidence = {'verified': True, 'worker': 'owner-reconcile', 'bookings': bookings,
+                        'email_receipts': [receipts[k] for k in ('guest', 'team') if k in receipts]}
+            from queue_service import validate_completion
+            checked = validate_completion(raw, {'evidence': evidence}, require_team_receipt=False)
+            meta['evidence'] = evidence
+            meta['venue_changes'] = checked['venue_changes']
+            meta['completed_at'] = now
+            meta['owner_reconcile'] = {'approval': approval[:200], 'at': now, 'previous_state': row['state'],
+                                       'previous_reason': row['reason'],
+                                       'team_receipt_missing': 'team' not in receipts}
+            db.execute("UPDATE queue_jobs SET state='done',reason=?,metadata=?,updated=?,claim_token=NULL WHERE ref=?",
+                       ('Reconciled from saved verified bookings (owner ' + approval[:200] + '); no booking/email',
+                        json.dumps(meta), now, ref))
+        return self.get(ref)
+
     def update(self, ref, token, action, metadata, now, reason=''):
         if not isinstance(metadata, dict):
             raise Conflict('metadata must be an object')
@@ -205,7 +353,8 @@ class Store:
                     raise Conflict('Retry allowed only for explicit pre-submit failure')
                 # A guest list that is simply not posted yet keeps waiting
                 # (hourly) until it opens; the source date policy still moves
-                # it to manual once the night has passed.
+                # it to manual once the night has passed. Other pre-submit
+                # failures keep the 3-claim limit.
                 waiting = metadata.get('kind') == 'unposted'
                 state = 'retry' if (waiting or row['attempts'] < 3) else 'manual'
                 due = (int(now // 3600) + 1) * 3600
@@ -231,9 +380,10 @@ class Store:
                 if state != 'assigned':
                     raise Conflict('Paused verification cannot be marked complete')
                 from queue_service import validate_completion
-                validate_completion(json.loads(row['raw']), metadata)
+                checked = validate_completion(json.loads(row['raw']), metadata)
                 state = 'done'
                 saved['evidence'] = metadata['evidence']
+                saved['venue_changes'] = checked['venue_changes']
                 saved['completed_at'] = now
             else:
                 raise Conflict('Unknown action')

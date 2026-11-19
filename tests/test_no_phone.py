@@ -78,3 +78,13 @@ class TeamEmailNoPhoneTests(unittest.TestCase):
         import main
         summary = main.posh_summary({"posh": {"phone": "+17025550111", "order_number": "9"}})
         self.assertNotIn("7025550111", summary)
+
+    def test_worker_team_email(self):
+        import worker_emails
+        raw = {"phone": "+15625550123"}
+        req = {"first_name": "Mia", "last_name": "Test", "email": "mia@example.com",
+               "female_count": "1", "male_count": "1", "start_date": "2026-11-14", "end_date": "2026-11-14"}
+        out = worker_emails.team_email("ref1", raw, req, [{"date": "2026-11-14", "venue": "TAO Nightclub",
+                                                           "order_id": "abc"}])
+        self.assertNotIn("5625550123", out["text"])
+        self.assertNotIn("Phone", out["text"])

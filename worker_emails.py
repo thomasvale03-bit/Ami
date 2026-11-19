@@ -44,6 +44,14 @@ def _party(female, male):
     return " and ".join(parts) or "0 guests"
 
 
+def guest_subject(start, end):
+    return f"You're on the Playmaker Entertainment guest list for {date_label(start, end)}"
+
+
+def drais_guest_subject(start, end):
+    return f"You're on the list: Drai's After Hours — Playmaker Entertainment ({date_label(start, end)})"
+
+
 UPDATE_NOTE = "Updated confirmation: this adds your newest booking to anything we sent you before. All orders listed stay active."
 
 
@@ -97,7 +105,7 @@ def guest_email(request, bookings, update=False, pending=None):
         first, rows, html_emails.party_size(request["female_count"], request["male_count"]),
         " ".join(x for x in ((UPDATE_NOTE if update else ""), waiting) if x) or None,
         fallback_nights=fallback_nights or None)
-    subject = f"You're on the Playmaker Entertainment guest list for {label}"
+    subject = guest_subject(request["start_date"], request["end_date"])
     if update:
         subject = update_subject(subject, bookings)
     return {"to": request["email"], "subject": subject, "text": text, "html": html,
@@ -205,8 +213,7 @@ def drais_guest_email(request, bookings):
         low = body.lower()
         if "skip the line" in low or "discount" in low:
             raise ValueError("Drai's email must not promise skip-the-line or discounts")
-    label = date_label(request["start_date"], request["end_date"])
-    subject = f"You're on the list: Drai's After Hours — Playmaker Entertainment ({label})"
+    subject = drais_guest_subject(request["start_date"], request["end_date"])
     return {"to": request["email"], "subject": subject, "text": text, "html": html,
             "dedupe_query": f'to:{request["email"]} subject:"{subject}"'}
 

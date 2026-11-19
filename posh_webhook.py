@@ -554,11 +554,24 @@ def send_branded(service, payload, _sleep=None):
     else:
         dedupe_q = (f"to:{to} {gmail_client.FOLLOW_UP_SEARCH} newer_than:60d"
                     if is_followup else f'to:{to} subject:"{subject}"')
-    if _gmail_call(lambda: gmail_client.already_sent(service, dedupe_q), _sleep=_sleep):
-        return 200, "duplicate (already in Sent)"
-    with _branded_lock:
-        if (to.lower(), subject) in _zoho_sent or (is_followup and (to.lower(), "__followup__") in _zoho_sent):
+    def _duplicate():
+        # Booking worker (report_prior): say which earlier email matched so the
+        # job can complete with that receipt instead of stopping at manual.
+        if not payload.get("report_prior"):
             return 200, "duplicate (already in Sent)"
+        try:
+            prior = gmail_client.prior_sent(service, dedupe_q)
+        except Exception:  # noqa: BLE001
+            log.exception("prior_sent lookup failed")
+            prior = None
+        return 200, {"sent": False, "duplicate": True, "detail": "duplicate (already in Sent)", "prior": prior}
+
+    if _gmail_call(lambda: gmail_client.already_sent(service, dedupe_q), _sleep=_sleep):
+        return _duplicate()
+    with _branded_lock:
+        dup = (to.lower(), subject) in _zoho_sent or (is_followup and (to.lower(), "__followup__") in _zoho_sent)
+    if dup:
+        return _duplicate()
     if zoho_configured() and not from_name:
         try:
             mid = _zoho_send(to, subject, text, html, sender)
@@ -566,7 +579,7 @@ def send_branded(service, payload, _sleep=None):
                 _zoho_sent.add((to.lower(), subject))
                 if is_followup:
                     _zoho_sent.add((to.lower(), "__followup__"))
-            gmail_client.record_branded_sent(to, subject, text)
+            gmail_client.record_branded_sent(to, subject, text, message_id=mid)
             log.info("Branded email sent via zoho to %s from %s (id %s)", to, sender, mid)
             return 200, {"sent": True, "id": mid, "from": sender, "via": "zoho"}
         except Exception as e:  # noqa: BLE001
@@ -593,6 +606,37 @@ WEBSITE_VENUES = {
                   "Palm Tree Beach Club", "LAVO Party Brunch"},
     "Scottsdale": {"Almost Famous", "Riot House", "Cake", "El Hefe", "Maya Day Club", "Maya Night Club"},
 }
+# Notify-only website venues (Thomas, Nov 14 2026): accepted by intake, but the
+# only action is one branded team@ email. No Gmail intake insert (so no parse,
+# booking job, OMNIA/closed-night fallback, Marquee Dayclub add or guest email).
+WEBSITE_NOTIFY_ONLY = {
+    "Las Vegas": {"ZOUK", "Ghostbar", "XS", "Encore Beach Club", "LIV", "LIV Beach"},
+}
+WEBSITE_NOTIFY_ONLY_ALIASES = (
+    ("zouk nightclub", "Las Vegas", "ZOUK"),
+    ("zouk", "Las Vegas", "ZOUK"),
+    ("ghostbar", "Las Vegas", "Ghostbar"),
+    ("ghost bar", "Las Vegas", "Ghostbar"),
+    ("xs nightclub", "Las Vegas", "XS"),
+    ("xs", "Las Vegas", "XS"),
+    ("encore beach club", "Las Vegas", "Encore Beach Club"),
+    ("encore beach", "Las Vegas", "Encore Beach Club"),
+    ("ebc", "Las Vegas", "Encore Beach Club"),
+    ("liv beach", "Las Vegas", "LIV Beach"),
+    ("liv nightclub", "Las Vegas", "LIV"),
+    ("liv las vegas", "Las Vegas", "LIV"),
+    ("liv", "Las Vegas", "LIV"),
+)
+
+
+def is_notify_only(city, venue):
+    return venue in WEBSITE_NOTIFY_ONLY.get(city, ())
+
+
+def _website_venue_ok(city, venue):
+    return venue in WEBSITE_VENUES.get(city, ()) or is_notify_only(city, venue)
+
+
 WEBSITE_SOURCES = {"guestlistgo": "GuestlistGo", "playmaker": "Playmaker"}
 # Playmaker site (preview + production) is always allowed next to the env list.
 PLAYMAKER_ORIGINS = {"https://playmaker-web-production.up.railway.app",
@@ -680,6 +724,17 @@ def _match_website_venue(raw_text):
     best = None
     best_idx = 10**9
     for alias, v_city, canonical in WEBSITE_VENUE_ALIASES:
+        m = re.search(r"(?:^|[^a-z0-9])" + re.escape(alias) + r"(?:[^a-z0-9]|$)", low, re.I)
+        if m and m.start() < best_idx:
+            best_idx = m.start()
+            best = (v_city, canonical)
+    if best:
+        return best
+    # Notify-only venues: only when no bookable venue is named (existing behavior unchanged).
+    for alias, v_city, canonical in WEBSITE_NOTIFY_ONLY_ALIASES:
+        if low == alias or (prio and prio.group(1).strip().lower() == alias):
+            return v_city, canonical
+    for alias, v_city, canonical in WEBSITE_NOTIFY_ONLY_ALIASES:
         m = re.search(r"(?:^|[^a-z0-9])" + re.escape(alias) + r"(?:[^a-z0-9]|$)", low, re.I)
         if m and m.start() < best_idx:
             best_idx = m.start()
@@ -810,13 +865,18 @@ def normalize_website_payload(p):
         if pf or pl:
             out["promoter"] = f"{pf} {pl}".strip()
 
+    plan_val = next((p.get(k) for k in ("nights", "itinerary", "nightly_plan", "plan") if p.get(k)), None)
+    if plan_val is None and bf.get("nightly plan"):
+        plan_val = bf.get("nightly plan")
+    if plan_val is not None:
+        out["plan"] = plan_val
     raw_venue = p.get("venue") if "venue" in p else (p.get("venues") if "venues" in p else (d.get("Venues") or bf.get("requested venues") or ""))
     if isinstance(raw_venue, list):
         raw_venue = ", ".join(str(x).strip() for x in raw_venue if str(x).strip())
     raw_venue = str(raw_venue or "").strip()
 
     explicit_city = str(p.get("city") or d.get("City") or "").strip()
-    if explicit_city in WEBSITE_VENUES and raw_venue in WEBSITE_VENUES[explicit_city]:
+    if explicit_city in WEBSITE_VENUES and _website_venue_ok(explicit_city, raw_venue):
         out["city"] = explicit_city
         out["venue"] = raw_venue
     elif explicit_city and explicit_city not in WEBSITE_VENUES:
@@ -826,7 +886,7 @@ def normalize_website_payload(p):
         matched_city, matched_venue = _match_website_venue(raw_venue)
         is_open_pref = bool(re.search(r"open to (?:all |other )?venues|any venue|all venues", raw_venue, re.I)) or ("venue" not in p and not raw_venue)
         city = explicit_city or ("Scottsdale" if ("scottsdale" in raw_venue.lower() or matched_city == "Scottsdale") else "Las Vegas")
-        if matched_venue and matched_venue in WEBSITE_VENUES.get(city, ()):
+        if matched_venue and _website_venue_ok(city, matched_venue):
             out["city"] = city
             out["venue"] = matched_venue
         elif is_open_pref and city in WEBSITE_VENUES:
@@ -871,6 +931,17 @@ def validate_website(p):
     src = g("source", 40).lower()
     if src not in WEBSITE_SOURCES:
         return None, "unknown source"
+    plan, plan_err = _website_plan(p)
+    if plan_err:
+        return None, plan_err
+    if plan:
+        # The whole trip is one submission: range = first..last planned date,
+        # first planned venue stands in for the single-venue fields.
+        p = dict(p, venue=plan[min(plan)][0], city=p.get("city") or _plan_city(plan))
+        if not str(p.get("date") or "").strip():
+            p["date"] = min(plan)
+        if not str(p.get("end_date") or "").strip():
+            p["end_date"] = max(plan)
     first, last, email, city, venue, date = g("first_name", 60), g("last_name", 60), g("email", 120).lower(), g("city"), g("venue"), g("date", 10)
     phone = re.sub(r"[^\d+]", "", g("phone", 30))
     if not (first and last):
@@ -879,7 +950,7 @@ def validate_website(p):
         return None, "bad email"
     if not 10 <= len(re.sub(r"\D", "", phone)) <= 15:
         return None, "bad phone"
-    if venue not in WEBSITE_VENUES.get(city, ()):
+    if not _website_venue_ok(city, venue):
         return None, "bad city/venue"
     try:
         night = datetime.strptime(date, "%Y-%m-%d").date()
@@ -896,6 +967,12 @@ def validate_website(p):
             return None, "bad end date"
         if not night <= end <= today + timedelta(days=90) or (end - night).days >= WEBSITE_MAX_NIGHTS:
             return None, "end date out of range"
+    if plan:
+        if min(plan) < night.isoformat() or max(plan) > end.isoformat():
+            return None, "nightly plan outside the date range"
+        cities = {c for c, vs in WEBSITE_VENUES.items() for v in plan_venues_list(plan) if v in vs}
+        if len(cities) != 1 or city not in cities:
+            return None, "nightly plan venues must all be in one city"
     try:
         women, men = int(p.get("women") or 0), int(p.get("men") or 0)
     except (TypeError, ValueError):
@@ -915,7 +992,47 @@ def validate_website(p):
             "name": full_name, "email": email, "phone": phone, "city": city, "venue": venue,
             "event": f"{venue} | Guest List", "night": night, "end": end, "women": women, "men": men,
             "party": women + men, "instagram": ig, "promoter_name": promo, "notes": g("notes", 500),
-            "ref": re.sub(r"[^\w-]", "", g("ref", 40))}, None
+            "ref": re.sub(r"[^\w-]", "", g("ref", 40)),
+            "plan": plan, "venues": plan_venues_list(plan) if plan else [venue]}, None
+
+
+def plan_venues_list(plan):
+    import request_plan
+    return request_plan.plan_venues(plan)
+
+
+def _plan_city(plan):
+    for c, vs in WEBSITE_VENUES.items():
+        if all(v in vs for v in plan_venues_list(plan)):
+            return c
+    return ""
+
+
+def _website_plan(p):
+    """Nightly plan for a multi-night / multi-venue request -> ({iso: [website
+    venue names]}, None) or ({}, error). Thomas (Nov 19 2026): a date-range
+    request is ONE submission and ONE confirmation, not one per venue/night."""
+    import request_plan
+    value = p.get("plan")
+    if value in (None, "", [], {}):
+        return {}, None
+    try:
+        plan = request_plan.parse_plan(value, normalize=False)
+    except ValueError as exc:
+        return {}, f"bad nightly plan ({exc})"
+    out = {}
+    for day, names in plan.items():
+        for name in names:
+            canon = name if any(name in vs for vs in WEBSITE_VENUES.values()) else _match_website_venue(name)[1]
+            if not canon or not any(canon in vs for vs in WEBSITE_VENUES.values()):
+                if canon and any(is_notify_only(c, canon) for c in WEBSITE_NOTIFY_ONLY):
+                    return {}, "notify-only venues must be their own request"
+                return {}, "bad nightly plan venue"
+            if canon not in out.setdefault(day, []):
+                out[day].append(canon)
+    if len(out) > WEBSITE_MAX_NIGHTS:
+        return {}, "nightly plan too long"
+    return out, None
 
 
 def _promoter_lines(c):
@@ -943,7 +1060,8 @@ def to_website_text(c):
         "Message: New guest list request submission", "",
         f"Full name: {c['name']}", f"Email: {c['email']}", f"Phone: {c['phone']}", "ZIP code:",
         f"Visit start date: {night}", f"Visit end date: {end}",
-        f"Requested venues: {c['venue']}",
+        f"Requested venues: {', '.join(c.get('venues') or [c['venue']])}",
+        *([f"Nightly plan: {_format_plan(c['plan'])}"] if c.get("plan") else []),
         f"Female guests: {c['women']}", f"Male guests: {c['men']}",
         *(_promoter_lines(c) if pm else [f"Promoter first name: {c['promoter']}", "Promoter last name:"]),
         f"Additional comments: {comments.replace(chr(10), ' ')}",
@@ -988,15 +1106,29 @@ def _mark_delivered(key):
         fh.write("|".join(key) + "\n")
 
 
+def _format_plan(plan):
+    import request_plan
+    return request_plan.format_plan(plan)
+
+
+def _venue_label(clean):
+    """Subject label: the venue, or 'Hakkasan +3' for a multi-venue trip."""
+    venues = clean.get("venues") or [clean["venue"]]
+    return clean["venue"] if len(venues) <= 1 else f"{venues[0]} +{len(venues) - 1}"
+
+
 def _website_key(clean):
-    return ("web", clean["ref"] or clean["email"], clean["night"].isoformat(), clean["end"].isoformat(), clean["venue"])
+    venue = clean["venue"]
+    if clean.get("plan"):
+        venue = _format_plan(clean["plan"])
+    return ("web", clean["ref"] or clean["email"], clean["night"].isoformat(), clean["end"].isoformat(), venue)
 
 
 def _deliver_website(intake, clean):
     msg = EmailMessage()
     msg["To"] = intake.intake_email
     msg["From"] = intake.intake_email
-    msg["Subject"] = f"{WEBSITE_SUBJECT} - {clean['promoter']} {clean['venue']} {clean['night'].isoformat()}"
+    msg["Subject"] = f"{WEBSITE_SUBJECT} - {clean['promoter']} {_venue_label(clean)} {clean['night'].isoformat()}"
     msg.set_content(to_website_text(clean))
     import base64
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
@@ -1023,6 +1155,8 @@ def accept_website(intake, payload, _sleep=None):
     clean, err = validate_website(payload)
     if err:
         return 400, err
+    if is_notify_only(clean["city"], clean["venue"]):
+        return notify_only_website(intake, clean)
     import queue_service
     receipt = None
     if queue_service.enabled() and not intake.dry_run:
@@ -1134,6 +1268,66 @@ def retry_pending_website(intake):
     return done, left
 
 
+def notify_only_text(clean):
+    """Team notice for a notify-only venue: no phone number (team rule)."""
+    night, end = clean["night"].isoformat(), clean.get("end", clean["night"]).isoformat()
+    when = night if end == night else f"{night} to {end}"
+    return "\n".join([
+        "Website guest list sign-up (notify only: no booking, no guest email sent).",
+        "",
+        f"Guest: {clean['name']}",
+        f"Email: {clean['email']}",
+        f"Venue: {clean['venue']}",
+        f"Date: {when}",
+        f"Female guests: {clean['women']}",
+        f"Male guests: {clean['men']}",
+        f"Source: {clean['source']}",
+        f"Ref: {clean['ref'] or '-'}",
+        "",
+        "Handle this request manually with the venue.",
+    ])
+
+
+def notify_only_subject(clean):
+    # Must not match gmail_client.SEARCH_QUERY phrases, so Amy never parses it as a request.
+    return f"Notify-only website signup: {clean['venue']} {clean['night'].isoformat()} - {clean['name']}"
+
+
+def notify_only_website(intake, clean):
+    """Notify-only venue: one branded email to team@ from info@ and nothing else."""
+    from config import rules
+    import html as _html
+    key = _website_key(clean)
+    with intake._lock:
+        if key in intake._seen:
+            return 200, "duplicate (this run)"
+        if intake.dry_run:
+            intake._seen.add(key)
+            log.info("[dry run] would send notify-only team email %s:\n%s", key, notify_only_text(clean))
+            return 200, "dry run (notify only)"
+        if _delivered(key):
+            intake._seen.add(key)
+            return 200, "duplicate"
+        text = notify_only_text(clean)
+        body = "<br>".join(_html.escape(line) for line in text.split("\n"))
+        subject = notify_only_subject(clean)
+        tag = clean["ref"] or re.sub(r"[^\w-]", "", clean["email"])
+        code, result = send_branded(intake.service(), {
+            "to": rules.PLAYMAKER_EMAIL, "subject": subject, "text": text,
+            "html": f"<div style=\"font-family:Arial,sans-serif;font-size:15px;line-height:1.5\">{body}</div>",
+            "dedupe_query": f'to:{rules.PLAYMAKER_EMAIL} subject:"{subject}" "Ref: {tag}"'})
+        if code != 200:
+            log.error("Website form: notify-only team email failed for %s: %s %s", key, code, result)
+            return 503, "could not notify team, try again"
+        intake._seen.add(key)
+        try:
+            _mark_delivered(key)
+        except OSError:
+            log.exception("Website form: could not record delivered %s", key)
+        log.info("Website form: notify-only %s -> team email (%s)", key, result)
+        return 200, "team notified"
+
+
 def notify_team_website(service, clean, subject):
     """Also send the same notice to the team inbox (team@playmakerentertainment.com)
     via Amy's normal send path. Best effort: a failure here never breaks intake."""
@@ -1154,12 +1348,14 @@ def notify_team_website(service, clean, subject):
 
 def make_handler(intake, store=None):
     class Handler(BaseHTTPRequestHandler):
-        def _send(self, code, ctype, data):
+        def _send(self, code, ctype, data, headers=None):
             data = data.encode() if isinstance(data, str) else data
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(data)
 
@@ -1207,6 +1403,10 @@ def make_handler(intake, store=None):
 
         def do_GET(self):
             path = urlparse(self.path).path.rstrip("/")
+            if path == "/dashboard":
+                import queue_dashboard
+                code, ctype, body, extra = queue_dashboard.handle("GET", self.path, self.headers)
+                return self._send(code, ctype, body, extra)
             if path.startswith("/queue/"):
                 import queue_service
                 code, result = queue_service.handle("GET", self.path, self.headers, None)
@@ -1417,6 +1617,6 @@ def serve(intake, port=None, host="0.0.0.0", store=None):
     port = int(port if port is not None else os.environ.get("PORT", "8080"))
     server = ThreadingHTTPServer((host, port), make_handler(intake, store))
     threading.Thread(target=server.serve_forever, name="posh-webhook", daemon=True).start()
-    log.info("Posh webhook listening on :%d (POST /webhooks/posh, GET /healthz, /newsletter/optin, /unsubscribe, /newsletter/export)%s", server.server_address[1],
+    log.info("Posh webhook listening on :%d (POST /webhooks/posh, GET /healthz, /dashboard, /newsletter/optin, /unsubscribe, /newsletter/export)%s", server.server_address[1],
              "" if expected_token() else " - POSH_WEBHOOK_TOKEN not set, every webhook will be rejected")
     return server

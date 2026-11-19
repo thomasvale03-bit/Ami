@@ -458,17 +458,20 @@ TAO_AUTOMATION_AUTHORIZATION = (
 # Posh recurring series: child events can be RENAMED ("R&BAE | Hakkasan"),
 # but their slugs keep the series' original name. Known series, keyed by the
 # first 18 hex chars of the child event ids (ids in one series share them),
-# with their slug base and UTC end-time slug parts. Amy also learns new ones
+# with their slug base, UTC end-time slug parts and (optional) the weekday(s)
+# of the slug's UTC end date (Mon=0). Amy also learns new ones
 # from every Posh page she reads. Extra entries: env POSH_SERIES_SEEDS as
 # "prefix=base:8-30/9-30;prefix2=base2:11-30".
 POSH_SERIES_SEEDS = {
     "6a682ff9374ee034d5": ("guest-list-hakkasan", ("11-30", "12-30")),
     "6a80e79648e2b4a133": ("guestlist-tao-nc", ("8-30", "9-30")),
     "6acab072b53cd5b9c2": ("guestlist-omnia", ("8-0", "9-0")),
-    "6aae53d9c6a734a4ef": ("deseo-omnia", ("8-30", "9-30", "11-30", "12-30")),
+    # DESEO (Sundays 10:30 PM-4 AM): slug ends Monday 12-0 UTC (PST) / 11-0 (PDT).
+    "6aae53d9c6a734a4ef": ("deseo-omnia", ("12-0", "11-0", "8-30", "9-30", "11-30", "12-30"), (0,)),
     "6a68319ec56e69cb61": ("guest-list-marquee-night-club", ("8-30", "9-30")),
     "6acab3e683cace41fb": ("guestlist-jewel-night-club", ("8-0", "9-0")),
-    "69733fedd067ffc440": ("lavo-brunch-party-guest-list", ("1-0", "2-0")),
+    # LAVO brunch (Saturdays noon-6 PM): slug ends Sunday 2-0 UTC (PST) / 1-0 (PDT).
+    "69733fedd067ffc440": ("lavo-brunch-party-guest-list", ("2-0", "1-0"), (6,)),
     "6a4050b0457303250e": ("guest-list-riot-house", ("9-0",)),
     "6acbefeaa241f32320": ("almost-famous", ("6-0",)),
     "6a6be293c3e496d3a4": ("guestlist-drias-after-hours", ("11-0-1", "12-0-1", "11-0", "12-0")),

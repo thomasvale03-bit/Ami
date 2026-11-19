@@ -1,0 +1,549 @@
+PLAYMAKER ENTERTAINMENT
+
+Promoter Operations & Onboarding Knowledge Base
+
+Internal reference for Jacob and AMYI
+
+THE BASICS
+
+1. What is Playmaker Entertainment?
+
+Playmaker Entertainment is an independent nightlife promotions and entertainment company connecting guests with nightlife experiences, guest lists, tickets, and VIP table opportunities. We work with nightlife venues in Las Vegas and other markets, building relationships with venues, promoters, and customers.
+
+Our goal is simple: generate real customers, real attendance, and revenue through a reliable promoter network.
+
+Website: https://playmakerentertainment.com
+
+2. What does a promoter do?
+
+Promoters help Playmaker generate business by:
+
+* Finding potential customers.
+* Sharing approved Playmaker guest-list and ticket links.
+* Registering clients under their own promoter attribution.
+* Promoting approved nightlife venues and events.
+* Generating table and ticket inquiries.
+* Following up with customers before their night out.
+* Making sure clients actually attend.
+* Maintaining professional relationships with customers and venue staff.
+
+The goal isn’t just collecting signups. It’s generating verified attendance and sales.
+
+3. Is it a job, contract work, or commission only?
+
+Playmaker operates with an independent promoter network.
+
+Promoters work on a performance-based arrangement. Exact contractual classification, agreements, and onboarding paperwork must be confirmed by management before being represented as finalized policy.
+
+4. Who do promoters report to?
+
+* Tom Vale: Owner/operator and final management authority.
+* Angelica: Interim administrative support.
+* Jacob: Promoter operations, onboarding, questions, and internal knowledge assistance.
+* AMYI: Automated communication and administrative assistance.
+
+Promoters should use the designated Slack channels for team communication and contact management when something requires approval.
+
+⸻
+
+PAY AND COMMISSIONS
+
+5. How do promoters get paid?
+
+Compensation may involve verified guest-list attendance, ticket sales, and table sales.
+
+Signup numbers alone should not be treated as completed paid attendance.
+
+6. What are the actual rates?
+
+Current approved rates have not been established in this knowledge base.
+
+Do not share any historical, estimated, or unofficial compensation figures with promoters. There are no approved numbers to quote.
+
+Jacob must refer all rate, payout schedule, payment method, bonus, and contract questions to Tom until an updated compensation schedule is provided.
+
+7. How often are promoters paid?
+
+Current official payout schedule needs management confirmation.
+
+Do not promise weekly, biweekly, or monthly payouts without an approved schedule.
+
+8. How do promoters receive payment?
+
+Approved payment methods need management confirmation.
+
+Do not collect sensitive financial information through public Slack channels.
+
+9. Is there a minimum payout or quota?
+
+No confirmed minimum payout or mandatory promoter quota is currently documented.
+
+10. What counts toward pay?
+
+Verified attendance and completed sales are the important performance metrics.
+
+A customer submitting a signup does not automatically mean the promoter earned a commission.
+
+11. How do promoters check their numbers?
+
+Playmaker is developing its promoter tracking system, including:
+
+* Performance dashboard.
+* Daily check-in reporting.
+* Calendar and historical attendance.
+* Promoter attribution.
+* Separate table and ticket sales tracking.
+
+For missing credit:
+
+1. Provide the client’s full name.
+2. Provide the venue and event date.
+3. Identify the promoter associated with the signup.
+4. Submit the issue for review.
+
+Jacob and AMYI must never automatically approve disputed credit.
+
+12. Are there bonuses?
+
+No confirmed bonus program is documented.
+
+Any special incentives, contests, or bonuses must be announced by management.
+
+⸻
+
+GETTING CLIENTS SIGNED UP
+
+13. How do clients sign up?
+
+The official starting point is:
+
+https://playmakerentertainment.com
+
+The process should be:
+
+1. Direct the customer to the appropriate venue or event page.
+2. Have them select the correct event date.
+3. Complete the guest-list registration.
+4. Make sure the correct promoter is selected or credited.
+5. Verify that the submission was completed.
+6. Keep the customer informed about their registration.
+
+Promoters should never register customers under another promoter’s name to manipulate credit.
+
+For TAO-related venues, remember:
+
+* Passes = Guest List.
+* Tickets = Paid Tickets.
+
+14. What’s the signup deadline?
+
+Deadlines depend on the venue and event.
+
+Do not advertise a guaranteed cutoff time unless it has been confirmed for that specific night.
+
+Encourage customers to register as early as possible.
+
+15. What information does a client need?
+
+The exact required customer fields depend on the website’s registration form.
+
+Promoters should be prepared to collect:
+
+* Full name.
+* Email address.
+* Phone number, when requested.
+* Event date.
+* Venue.
+* Number of guests.
+* Gender breakdown, when required by the venue.
+* Promoter attribution.
+
+Never submit fabricated customer information.
+
+16. What happens at the door?
+
+Customers should follow the venue’s specific check-in instructions.
+
+They should:
+
+* Bring valid identification.
+* Follow the venue’s entry instructions.
+* Confirm their guest-list registration.
+* Arrive within the applicable guest-list window.
+* Be prepared to provide the name used during registration.
+
+A Playmaker signup is not an unconditional guarantee of entry.
+
+17. Age, ratios, and dress code
+
+These requirements vary by venue and event.
+
+Promoters should never assume that one venue’s rules apply to another.
+
+Unless otherwise specified:
+
+* Customers should expect nightclub age restrictions, generally 21+.
+* Valid government-issued identification is important.
+* Dress codes are determined by the individual venue.
+* Guest-list gender ratios may apply.
+* Management should verify specific requirements before they are communicated as guaranteed.
+
+⸻
+
+VENUES AND EVENTS
+
+18. Which venues should new promoters push first?
+
+Playmaker’s current and previously established nightlife relationships include:
+
+Las Vegas:
+
+* LIV Nightclub — approved promoter relationship.
+* OMNIA Nightclub.
+* Hakkasan.
+* JEWEL.
+* Marquee Nightclub.
+* TAO Nightclub.
+* LAVO.
+* TAO Beach.
+* Marquee Dayclub.
+* OMNIA and Marquee Washington, DC.
+
+Venue participation and availability must be verified before promoting an event.
+
+Start with the venues management has specifically authorized for the current promotional calendar.
+
+19. Which nights are best?
+
+Previously established Las Vegas promotional schedule:
+
+* Monday: Marquee.
+* Tuesday: OMNIA.
+* Wednesday/Thursday: Hakkasan.
+* Friday/Saturday: JEWEL.
+* Sunday: TAO.
+
+This is a historical promotional schedule, not a guarantee of current event availability.
+
+Always refer to the latest approved calendar.
+
+20. What’s the difference between guest lists, tickets, and tables?
+
+Guest List:
+Customers register for potential complimentary or venue-approved guest-list admission. Conditions, availability, and entry requirements apply.
+
+Tickets:
+Customers purchase admission through an authorized ticketing link. This is a paid admission option.
+
+VIP Tables:
+Customers purchase a reserved VIP experience, generally involving bottle service, minimum spends, and dedicated seating.
+
+Promoters should:
+
+* Offer guest lists to customers seeking guest-list admission.
+* Offer tickets when customers want guaranteed ticketed admission under the ticket terms.
+* Offer tables to groups looking for a VIP experience.
+
+Never represent a guest-list signup as a paid ticket or guaranteed admission.
+
+21. How are table requests handled?
+
+Table requests should be directed to Tom or the designated authorized booking contact.
+
+Promoters should collect:
+
+* Venue.
+* Event date.
+* Party size.
+* Budget.
+* Preferred experience.
+* Customer contact information.
+
+Do not guarantee pricing, availability, upgrades, or complimentary items without approval.
+
+22. What about Scottsdale?
+
+Playmaker has also explored and worked with Scottsdale nightlife opportunities, including:
+
+* Riot House.
+* Almost Famous.
+* El Hefe.
+* Cake.
+* Maya.
+
+These opportunities are separate from the Las Vegas promotional calendar.
+
+Promoters should only advertise Scottsdale events that have been approved by management.
+
+⸻
+
+HOW TO PROMOTE
+
+23. Where should promoters find clients?
+
+Promoters can develop customers through:
+
+* Instagram.
+* TikTok.
+* Facebook groups.
+* Personal networks.
+* Hotel and hospitality relationships.
+* In-person networking.
+* Local events.
+* Content creation.
+* Referrals from previous customers.
+
+The objective is to build a consistent customer base, not spam strangers.
+
+24. Are there approved flyers and content?
+
+Playmaker may distribute approved promotional graphics, event announcements, and marketing materials through Slack.
+
+Promoters should check the designated marketing/content channel once management confirms its name.
+
+Only use current event information and approved artwork.
+
+25. Can promoters use the Playmaker name and logo?
+
+Yes, for authorized promotional purposes.
+
+Promoters may identify themselves as Playmaker-affiliated promoters and share approved branding.
+
+They may not:
+
+* Claim to own Playmaker.
+* Claim to represent a venue’s management.
+* Create unauthorized partnerships.
+* Alter official branding in a misleading way.
+* Make promises on behalf of Playmaker.
+
+26. What should a first DM look like?
+
+Example:
+
+“Hey, what’s up? Are you planning on going out in Vegas this weekend? I work with Playmaker Entertainment and can help you with guest lists, tickets, or VIP tables at some of the top clubs. Let me know what you’re looking for.”
+
+Keep conversations natural. Don’t make every interaction feel like a sales pitch.
+
+27. What should promoters never do?
+
+* Spam customers.
+* Advertise fake promotions.
+* Promise guaranteed free entry.
+* Promise discounts without authorization.
+* Misrepresent guest-list availability.
+* Impersonate venue employees or management.
+* Submit fake signups.
+* Steal or manipulate another promoter’s credit.
+* Use outdated flyers or event information.
+* Make unauthorized financial promises.
+
+Protect the Playmaker brand and customer relationships.
+
+⸻
+
+RULES AND CONDUCT
+
+28. What gets a promoter removed?
+
+Conduct that can lead to removal includes:
+
+* Fraudulent signups.
+* Manipulating attendance or commission records.
+* Stealing another promoter’s customers.
+* Misrepresenting Playmaker or venue relationships.
+* Harassing customers or team members.
+* Repeatedly ignoring management instructions.
+* Unauthorized financial commitments.
+* Conduct that damages Playmaker’s reputation.
+
+Management makes final decisions regarding removal.
+
+29. Can promoters work with other companies?
+
+Playmaker’s exclusivity and conflict-of-interest policy needs management confirmation.
+
+Promoters must never misrepresent another company’s business as Playmaker’s or misuse Playmaker’s customer data.
+
+30. Rules about going out, drinking, and venue conduct
+
+Promoters represent Playmaker when interacting with customers and venue personnel.
+
+Expected conduct:
+
+* Be respectful.
+* Follow venue rules.
+* Don’t create problems for venue staff.
+* Don’t harass customers.
+* Don’t make promises outside your authority.
+* Maintain professional judgment.
+* Don’t allow personal activities to interfere with promotional responsibilities.
+
+31. What if a customer gets turned away?
+
+Stay professional.
+
+1. Ask what happened.
+2. Find out which venue and date.
+3. Get the customer’s name.
+4. Determine whether the issue involved dress code, identification, capacity, timing, or another venue policy.
+5. Notify management if necessary.
+
+Never argue with door staff or promise reimbursement.
+
+A guest-list registration does not override venue security or admission policies.
+
+⸻
+
+SLACK AND TOOLS
+
+32. Which Slack channels should promoters use?
+
+The final channel directory needs to be confirmed.
+
+Recommended organization:
+
+* #announcements — Official management updates.
+* #weekly-events — Current venue calendars and promotional material.
+* #promoter-support — General promoter questions.
+* #check-ins — Attendance and credit-related reporting.
+* #table-sales — VIP inquiries and sales.
+* #new-promoters — Onboarding and training.
+
+These are suggested channel purposes, not confirmed existing channel names.
+
+33. What should promoters bookmark?
+
+Official resources:
+
+* Playmaker website: https://playmakerentertainment.com
+* Promoter portal: Use the official dashboard link distributed by management.
+* Slack: Main communication and operations platform.
+* Approved promotional calendar.
+* Official venue guest-list and ticket links.
+
+The promoter portal is intended to support performance tracking, daily check-ins, calendar/history, onboarding, and separate table/ticket sales reporting.
+
+34. Jacob versus AMYI — what’s the difference?
+
+Jacob:
+The primary promoter operations assistant.
+
+Promoters should contact Jacob for:
+
+* Onboarding questions.
+* Understanding Playmaker policies.
+* Signup instructions.
+* General promoter training.
+* Understanding how attendance and credit work.
+* Finding the correct operational process.
+
+AMYI:
+The automated administrative and communication assistant.
+
+AMYI should help with:
+
+* Routine promoter communication.
+* Signup assistance.
+* Collecting missing information.
+* Basic status questions.
+* Administrative follow-ups.
+* Keeping promoters informed.
+* Routing issues that require human approval.
+
+Neither assistant can independently approve commissions, change compensation arrangements, promise free entry, or override management decisions.
+
+If either assistant doesn’t know the answer, it should escalate to Tom rather than guess.
+
+⸻
+
+FIRST WEEK
+
+35. What should a new promoter do during their first week?
+
+Day 1:
+
+* Complete promoter onboarding.
+* Get access to Slack.
+* Learn how Playmaker operates.
+* Review the website.
+* Understand guest lists, tickets, and tables.
+* Learn how promoter attribution works.
+
+Day 2:
+
+* Review approved venues.
+* Review the event calendar.
+* Learn the signup process.
+* Understand guest-list rules and restrictions.
+
+Day 3:
+
+* Set up social media promotional activity.
+* Connect with potential customers.
+* Learn how to use approved promotional material.
+
+Day 4:
+
+* Start generating customer signups.
+* Verify promoter attribution.
+* Practice customer follow-ups.
+
+Day 5–7:
+
+* Promote the approved weekend events.
+* Follow up with registered customers.
+* Monitor actual attendance.
+* Review performance.
+* Ask questions and improve.
+
+36. Is there a first-week goal?
+
+No mandatory numerical target has been officially established.
+
+The first objective is to learn the system and generate legitimate customer activity.
+
+Management can introduce performance targets once the promoter understands the process.
+
+Quality and verified attendance matter more than inflated signup numbers.
+
+37. Anything every new promoter should know on day one?
+
+Yes.
+
+Playmaker is built around actual business, not just names on a guest list.
+
+A signup is the beginning of the process. Getting the customer to attend is what matters.
+
+Every promoter should understand:
+
+* Your customers need to be registered correctly.
+* Your promoter attribution matters.
+* Guest lists are subject to venue rules.
+* Never promise something you cannot deliver.
+* Protect your customer relationships.
+* Communicate professionally.
+* Ask questions when you’re unsure.
+* Your reputation is just as important as your numbers.
+
+We want promoters who are consistent, reliable, and interested in building something long-term.
+
+Final message to new promoters:
+
+Welcome to Playmaker Entertainment. We’re here to build relationships, create opportunities, and generate real business. Learn the system, take care of your customers, stay consistent, and let’s get it.
+
+⸻
+
+KNOWLEDGE-BASE RULE FOR JACOB AND AMYI
+
+When answering promoter questions:
+
+1. Use this document as the primary operational reference.
+2. Never invent compensation rates, payout dates, policies, or venue availability.
+3. Distinguish historical information from current approved policies.
+4. If a question involves money, disputed credit, special treatment, or an exception, escalate to Tom.
+5. If information is missing, tell the promoter that management needs to confirm it.
+6. Never expose internal financial arrangements or private customer information.
+7. Always prioritize accurate attendance attribution and customer experience.
+
+Management authority: Tom Vale, Playmaker Entertainment.

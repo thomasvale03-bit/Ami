@@ -252,11 +252,13 @@ def test_jewel_after_nov_21_routes_to_fallback(tmp_path):
     tao = MapTao({("OMNIA Nightclub", "2026-11-22")})
     s, api, worker = make(tmp_path, tao=tao)
     s.enqueue("j", raw(venues=["JEWEL Nightclub"], start_date="2026-11-22", end_date="2026-11-22"), NOW)
+    # Merged with the deployed server policy (Nov 19 2026): a JEWEL request
+    # after Nov 21 is parked for review at claim, never auto-booked.
     result = worker.run_once()
-    assert result["status"] == "done", result
-    bookings = s.get("j")["metadata"]["evidence"]["bookings"]
-    assert bookings[0]["venue"] == "OMNIA Nightclub" and bookings[0]["date"] == "2026-11-22"
-    assert bookings[0].get("fallback") is True
+    assert result["status"] == "idle", result
+    assert s.get("j")["state"] == "manual"
+    assert "JEWEL after Nov 21" in s.get("j")["reason"]
+    assert worker.tao.submits == []
 
 
 def test_marquee_dayclub_added_when_open(tmp_path):
@@ -306,12 +308,14 @@ def test_source_policy_manual_clubs_and_omnia_jewel_rules():
     assert q.source_policy("r", xs, today)
     ebc = raw(venues=["EBC"], start_date="2026-11-14", end_date="2026-11-14")
     assert q.source_policy("r", ebc, today)
-    # OMNIA same-day Friday is not treated as closed.
+    # Deployed server policy kept (Nov 19 2026 merge): same-day OMNIA Fri/Sat
+    # and JEWEL after Nov 21 go to review; OMNIA on another day is fine.
     omnia = raw(venues=["OMNIA Nightclub"], start_date="2026-11-13", end_date="2026-11-13")
-    assert q.source_policy("r", omnia, today) == ""
-    # JEWEL after Nov 21 is no longer parked at intake; the worker falls back.
+    assert "Same-day OMNIA" in q.source_policy("r", omnia, today)
+    later = raw(venues=["OMNIA Nightclub"], start_date="2026-11-14", end_date="2026-11-14")
+    assert q.source_policy("r", later, today) == ""
     jewel = raw(venues=["JEWEL Nightclub"], start_date="2026-11-22", end_date="2026-11-22")
-    assert q.source_policy("r", jewel, today) == ""
+    assert "JEWEL after Nov 21" in q.source_policy("r", jewel, today)
 
 
 def test_fallback_venues_put_omnia_first_and_skip_jewel_after_cutoff():

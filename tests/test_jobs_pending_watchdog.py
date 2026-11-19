@@ -176,6 +176,7 @@ class ScottsdaleSendCheck(unittest.TestCase):
         with mock.patch.dict(os.environ, {"AMY_CONCIERGE": "true", "POSH_CONSENT_ON_FILE": "true"}), \
              mock.patch.object(gmail_client, "get_plain_text_body", return_value=({}, text)), \
              mock.patch.object(gmail_client, "posh_order_already_handled", return_value=False), \
+             mock.patch.object(gmail_client, "already_sent", return_value=False), \
              mock.patch.object(main, "_send_branded_or_gmail", side_effect=fake), \
              mock.patch.object(main, "_notify_exception") as ne, \
              mock.patch.object(main, "datetime") as dt:
