@@ -11,7 +11,7 @@ from .views import ASSIGNED_SECRET_RE, EMAIL_RE, PHONE_RE, SECRET_RE, SECRET_URL
 log = logging.getLogger('amy.slack.guardrails')
 
 SAFE_FALLBACK = "Let me double check and get right back to you."
-CONFIRM_FALLBACK = "I don't want to call that confirmed until AMY shows it as done. Want me to look the guest up?"
+CONFIRM_FALLBACK = "I don't want to call that confirmed until I check what we have. Send me the client's full name, the venue, and the date."
 
 # Confirmation claims. Negated wording ("not booked", "isn't confirmed") is allowed.
 CONFIRMATION_RES = [
@@ -63,6 +63,85 @@ def tool_shows_done(results):
     return False
 
 
+# Voice-guide banned phrases (rewrite out of the reply). "my guy" is in the
+# guide with a soft exception, so it is not blocked in code.
+BANNED_PHRASE_RES = [
+    re.compile(r'\bfam\b', re.I),
+    re.compile(r'\bvibes\b', re.I),
+    re.compile(r'\brockstars?\b', re.I),
+    re.compile(r'\bsynergy\b', re.I),
+    re.compile(r"\blet'?s crush it\b!?", re.I),
+    re.compile(r'\bamazing opportunity\b!?', re.I),
+    re.compile(r'\bdear valued\b[\w\s]*', re.I),
+    re.compile(r'\bwe sincerely appreciate your continued partnership\b', re.I),
+]
+# Unicode emoji + simple Slack :shortcodes:
+EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001F5FF"
+    "\U0001F600-\U0001F64F"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FAFF"
+    "\U00002700-\U000027BF"
+    "\U0001F1E0-\U0001F1FF"
+    "\U00002600-\U000026FF"
+    "\U0000FE00-\U0000FE0F"
+    "\U0000200D"
+    "]+"
+)
+SLACK_EMOJI_RE = re.compile(r':[a-z0-9_+-]{2,}:', re.I)
+
+# Incoming messages that should be flagged to Tom (not "I want credit").
+ESCALATION_RE = re.compile(
+    r"(?i)\b("
+    r"dispute|disputing|chargeback|refund|"
+    r"payment(?:s)? issue|haven't been paid|have not been paid|not been paid|"
+    r"unpaid|payout|paycheck|invoice|"
+    r"special request|need(?:s)? (?:your |tom'?s |management )?approval|"
+    r"manager(?:ial)? approval|talk to (?:a )?manager"
+    r")\b"
+)
+
+ESCALATION_REPLY = "I'll get this over to Tom. Let me know if anything else comes up."
+
+
+def needs_escalation(text):
+    """True when the incoming message should be flagged for Tom."""
+    return bool(ESCALATION_RE.search(text or ''))
+
+
+def tidy_voice(text):
+    """Strip banned phrases, emojis, and extra exclamation marks. -> (text, flags)."""
+    flags = []
+    out = text or ''
+    for pat in BANNED_PHRASE_RES:
+        if pat.search(out):
+            flags.append('banned_phrase_rewritten')
+            out = pat.sub('', out)
+    if EMOJI_RE.search(out) or SLACK_EMOJI_RE.search(out):
+        flags.append('emoji_stripped')
+        out = EMOJI_RE.sub('', out)
+        out = SLACK_EMOJI_RE.sub('', out)
+    if re.search(r'!{2,}', out):
+        flags.append('exclamation_trimmed')
+        out = re.sub(r'!{2,}', '!', out)
+    bangs = list(re.finditer(r'!', out))
+    if len(bangs) > 1:
+        flags.append('exclamation_trimmed')
+        first = bangs[0].start()
+        out = out[:first + 1] + out[first + 1:].replace('!', '.')
+    out = re.sub(r"[ \t]+", " ", out)
+    out = re.sub(r" *\n *", "\n", out)
+    out = re.sub(r" +([,.;:!?])", r"\1", out)
+    out = re.sub(r"([,.;:]){2,}", r"\1", out)
+    out = re.sub(r"\s{2,}", " ", out).strip(" ,;")
+    return out.strip(), flags
+
+
 def apply_guardrails(text, *, amy_confirmed=False, source='llm'):
     """-> (safe_text, flags). flags is empty when the original text is kept."""
     flags = []
@@ -82,4 +161,12 @@ def apply_guardrails(text, *, amy_confirmed=False, source='llm'):
         flags.append('unconfirmed_spot_blocked')
         log.warning('guardrails: unconfirmed_spot_blocked source=%s', source)
         return CONFIRM_FALLBACK, flags
-    return raw, flags
+    cleaned, voice_flags = tidy_voice(raw)
+    flags.extend(voice_flags)
+    if voice_flags:
+        log.info('guardrails: %s source=%s', ','.join(voice_flags), source)
+    if not cleaned:
+        flags.append('empty_after_rewrite')
+        log.warning('guardrails: empty_after_rewrite source=%s', source)
+        return SAFE_FALLBACK, flags
+    return cleaned, flags

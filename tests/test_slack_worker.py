@@ -173,7 +173,8 @@ class LlmTest(unittest.TestCase):
             calls.append(payload)
             if len(calls) == 1:
                 self.assertEqual(payload['model'], 'gpt-6.1-sol')
-                self.assertIn('Sound like Tom', payload['instructions'])
+                self.assertIn('PRIMARY voice', payload['instructions'])
+                self.assertIn('Send me the client\'s full name, the venue, and the date.', payload['instructions'])
                 self.assertEqual(payload['input'][-1], {'role': 'user', 'content': 'is jessica booked?'})
                 self.assertEqual({t['name'] for t in payload['tools']},
                                  {'queue_status', 'jobs_in_state', 'guest_lookup', 'bookings_on_date', 'worker_health'})
@@ -481,7 +482,9 @@ class PromptContextTest(unittest.TestCase):
 
     def test_system_prompt_has_voice_facts_and_no_help_dump(self):
         p = prompt.SYSTEM_PROMPT
-        self.assertIn("Sound like Tom", p)
+        self.assertIn("PRIMARY voice", p)
+        self.assertIn("Send me the client's full name, the venue, and the date.", p)
+        self.assertNotIn("PartyEveryDay voice guide", p)
         self.assertIn("JEWEL's last night is Nov 21", p)
         self.assertIn('Marquee Dayclub', p)
         self.assertIn('Pools are closed except Marquee Dayclub Dome', p)
@@ -724,31 +727,49 @@ class ViewsSecretUrlTest(unittest.TestCase):
 
 
 class PromptSignupTest(unittest.TestCase):
-    def test_prompt_explains_website_and_instagram_signup(self):
+    def test_prompt_explains_playmaker_link_signup(self):
         text = prompt.SYSTEM_PROMPT
         self.assertIn('playmakerentertainment.com', text)
-        self.assertIn('Instagram', text)
-        self.assertIn('Email', text)
-        self.assertIn('First & Last name', text)
-        self.assertIn('Number of Females/Males', text)
-        self.assertIn('Dates In Vegas', text)
+        self.assertIn('Playmaker link', text)
+        self.assertIn('select the right venue and date', text)
         self.assertIn('cannot book, cancel, requeue, change, approve, email, or sign anyone up', text)
 
 
 class PromptPromoterCreditTest(unittest.TestCase):
     def test_prompt_has_form_policy_and_no_checkin_promise(self):
         text = prompt.SYSTEM_PROMPT
+        self.assertIn(prompt.VOICE_GUIDE, text)
         self.assertIn('playmakerentertainment.com', text)
         self.assertIn('Promoter first name', text)
         self.assertIn('Promoter last name', text)
         self.assertIn('counted for the guest list', text)
-        self.assertIn('does NOT mean they are guaranteed credit for check-ins', text)
-        self.assertIn('Never promise check-in credit, commission, or payouts', text)
+        self.assertIn('does not mean guaranteed credit for check-ins', text)
+        self.assertIn('Never promise credit, check-in credit, commission, or a payout', text)
         self.assertIn('promoter (a teammate)', text)
+        self.assertIn("Send me the client's full name, the venue, and the date.", text)
+        self.assertIn("I'll check and let you know.", text)
+        self.assertIn("Let's crush it!", text)  # in the never-use list, not as advice
+        self.assertIn('Escalate disputes, payment issues, special requests', text)
+        self.assertIn("you'll get it to Tom", text)
         self.assertNotIn("I'll get Tom to sort out", text)
         self.assertNotIn('how they found the guests', text)
-        self.assertNotRegex(text, r'\d+%')
-        self.assertNotIn('commission rate', text)
+        self.assertNotIn('PartyEveryDay voice guide', text)
+
+    def test_voice_guide_file_has_examples_and_rules(self):
+        guide = prompt.VOICE_GUIDE
+        for phrase in (
+            'Just have them go through the Playmaker link',
+            "Send me the client's full name, the venue, and the date.",
+            "Send me their full name and which venue they're going to.",
+            "I can't guarantee that. Entry and pricing depend on the venue",
+            "Good work. I appreciate you putting in the effort.",
+            'Never use',
+            "Let's crush it!",
+            'Playmaker priorities',
+            'Never invent guest-list availability',
+            'Promoter credit policy',
+        ):
+            self.assertIn(phrase, guide)
 
 
 class FakeSlack:
@@ -1010,6 +1031,55 @@ class HandleThreadTest(unittest.TestCase):
             say(text=text, thread_ts=thread)
         self.assertEqual(said[0]['thread_ts'], '1795059293.490219')
         self.assertTrue(said[0]['text'])
+
+
+class VoiceGuardrailTest(unittest.TestCase):
+    def test_banned_phrases_are_rewritten(self):
+        for raw in (
+            "What's up fam, I'll check on that.",
+            "Love the vibes tonight.",
+            "You are rockstars.",
+            "Great synergy on this.",
+            "Let's crush it! Send it over.",
+            "This is an amazing opportunity!",
+            "Dear valued promoter, let me know.",
+        ):
+            out, flags = guardrails.apply_guardrails(raw, amy_confirmed=True)
+            self.assertIn('banned_phrase_rewritten', flags, raw)
+            low = out.lower()
+            for banned in ('fam', 'vibes', 'rockstars', 'synergy', "crush it",
+                           'amazing opportunity', 'dear valued'):
+                self.assertNotIn(banned, low, raw)
+            self.assertTrue(out)
+
+    def test_emojis_and_extra_exclamations_are_stripped(self):
+        out, flags = guardrails.apply_guardrails(
+            "Good work! Let's get it!! 🔥 :fire:", amy_confirmed=True)
+        self.assertIn('emoji_stripped', flags)
+        self.assertIn('exclamation_trimmed', flags)
+        self.assertNotIn('🔥', out)
+        self.assertNotIn(':fire:', out)
+        self.assertEqual(out.count('!'), 1)
+        self.assertIn('Good work!', out)
+
+    def test_needs_escalation_skips_plain_credit_questions(self):
+        self.assertFalse(guardrails.needs_escalation("I'm a promoter, i want to get credit"))
+        self.assertFalse(guardrails.needs_escalation('Is my client on the list?'))
+        self.assertTrue(guardrails.needs_escalation('We have a payment issue on last weekend.'))
+        self.assertTrue(guardrails.needs_escalation('This is a dispute about my payout.'))
+        self.assertTrue(guardrails.needs_escalation('Special request: can we get a table comped?'))
+        self.assertTrue(guardrails.needs_escalation('This needs management approval.'))
+
+    def test_escalation_note_is_scrubbed_and_names_tom(self):
+        note = sw_app.escalation_note(
+            {'user': 'U0CK42KJT7E', 'channel': 'C0CJK07GMHV',
+             'text': 'Payment issue, call 602-555-1234'},
+            guardrails.ESCALATION_REPLY,
+            channel_label='#generalchat')
+        self.assertIn("I'll get this to Tom", note)
+        self.assertIn('<@U0CK42KJT7E>', note)
+        self.assertIn('#generalchat', note)
+        self.assertNotIn('555-1234', note)
 
 
 if __name__ == '__main__':

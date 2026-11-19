@@ -18,7 +18,7 @@ import time
 from . import commands, llm
 from .amy_api import AmyApi
 from .catchup import Catchup, RepliedSet, should_answer_channel
-from .guardrails import apply_guardrails
+from .guardrails import apply_guardrails, needs_escalation, ESCALATION_REPLY
 from .history import load_conversation
 from .lookups import Lookups
 from .views import scrub
@@ -157,6 +157,31 @@ def slack_error(exc):
     return type(exc).__name__, None
 
 
+class FlagSink:
+    """Posts escalation notes to #amy-bookings once a Router.post is attached."""
+
+    def __init__(self):
+        self.post = None
+
+    def send(self, text):
+        if not self.post:
+            log.warning('escalation flagged but no #amy-bookings poster is attached')
+            return
+        self.post(text)
+
+
+def escalation_note(event, reply, channel_label=None):
+    user = event.get('user') or ''
+    where = channel_label or event.get('channel') or 'Slack'
+    snippet = scrub(event.get('text') or '', 200)
+    answered = scrub(reply or '', 200)
+    return (
+        "Escalation \u2014 I'll get this to Tom.\n"
+        f"From <@{user}> in {where}: {snippet}\n"
+        f"Reply: {answered}"
+    )
+
+
 LLM_FAIL_FALLBACK = "Couldn't reach ChatGPT right now. Try me again in a minute?"
 VAGUE_FALLBACK = "Not sure I follow — want the queue status, a guest lookup, or a night's bookings?"
 
@@ -209,6 +234,12 @@ def startup_check(lookups, answer=None, check=None):
         text = (answer or llm.answer)(lookups, 'How many jobs are in done right now? Use the queue_status tool.')
         log.info('OpenAI self-check (round trip): ok, %d chars, has number=%s', len(text),
                  any(ch.isdigit() for ch in text))
+        try:
+            voice = (answer or llm.answer)(lookups, "I'm a promoter, i want to get credit")
+            safe, _flags = apply_guardrails(voice, amy_confirmed=False, source='voice-check')
+            log.info('OpenAI voice-check (promoter credit): %s', scrub(safe, 500))
+        except Exception as exc:  # noqa: BLE001
+            log.error('OpenAI voice-check (promoter credit): FAIL %s', llm.describe(exc))
         return True
     except Exception as exc:  # noqa: BLE001
         log.error('OpenAI self-check (round trip): FAIL %s', llm.describe(exc))
@@ -223,6 +254,7 @@ def build_app():
     lookups = Lookups(api)
 
     replied = RepliedSet()
+    flagsink = FlagSink()
 
     def handle(event, say, thread=None):
         user = event.get('user') or ''
@@ -241,10 +273,21 @@ def build_app():
                     replied.mark(channel, ts)
                 return
             history, context = load_conversation(app.client, event, thread)
-            say(text=reply_text(lookups, event.get('text') or '', history=history, context=context),
-                thread_ts=thread)
+            incoming = event.get('text') or ''
+            outgoing = reply_text(lookups, incoming, history=history, context=context)
+            if needs_escalation(incoming):
+                outgoing = apply_guardrails(
+                    ESCALATION_REPLY, amy_confirmed=True, source='escalation')[0]
+            say(text=outgoing, thread_ts=thread)
             if channel and ts:
                 replied.mark(channel, ts)
+            if needs_escalation(incoming):
+                log.warning('escalation flagged channel=%s ts=%s user=%s', channel, ts, user)
+                try:
+                    flagsink.send(escalation_note(event, outgoing, channel_label=event.get('channel_name')))
+                except Exception as exc:  # noqa: BLE001
+                    err, needed = slack_error(exc)
+                    log.error('escalation post failed: %s needed=%s', err, needed)
         except Exception as exc:  # noqa: BLE001
             if channel and ts:
                 replied.release(channel, ts)
@@ -288,7 +331,7 @@ def build_app():
         log.info('ignore untagged channel message channel=%s ts=%s',
                  event.get('channel') or '', event.get('ts') or '')
 
-    return app, api, lookups, replied, say_reply
+    return app, api, lookups, replied, say_reply, flagsink
 
 
 def main():
@@ -300,9 +343,10 @@ def main():
             raise SystemExit(f'{name} is not set')
     from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-    app, api, lookups, replied, say_reply = build_app()
+    app, api, lookups, replied, say_reply, flagsink = build_app()
     router = Router(app.client)
     router.resolve()
+    flagsink.post = router.post
     log.info('updates go to %s; answers via %s', router.note or '?',
              'OpenAI ' + (os.environ.get('OPENAI_MODEL') or llm.DEFAULT_MODEL) if llm.configured() else 'keyword commands')
     if llm.configured():

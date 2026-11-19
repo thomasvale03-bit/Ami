@@ -24,16 +24,21 @@ Exact commands are answered directly: `status`, `state <name>`,
 `guest <name>`, `tonight`, `tomorrow`, `date 11/21`, `health`, `help`.
 Free text goes to the OpenAI model (`OPENAI_API_KEY`, `OPENAI_MODEL`, default
 `gpt-6.1-sol`) with tool calls over the same read-only lookups. The prompt
-uses Tom's PartyEveryDay voice (short, warm, plain), Phoenix time + who is
-asking as a context note, and the last 20–30 messages of the DM or thread
+uses Tom's Slack promoter style guide (`slack_worker/voice_guide.md`,
+loaded into the system prompt) as the primary voice and rules — not the
+older PartyEveryDay guest-facing tone. Phoenix time + who is asking go
+in as a context note, with the last 20–30 messages of the DM or thread
 (`conversations.history` / `conversations.replies`; scopes already on the
 app: `channels:history`, `groups:history`, `im:history`, `users:read`).
 Vague messages ("I dont understand") get a short helpful reply or a
 clarifying question, never the command-list dump. After every reply,
-guardrails strip or replace phones, emails, tokens, and URLs with secrets,
-and block "booked / confirmed / on the list" wording unless an AMY lookup
-in that turn showed state `done`. Refusal, empty, or bad model output
-becomes a short safe fallback; raw errors are never posted.
+guardrails strip or replace phones, emails, tokens, and URLs with secrets;
+block "booked / confirmed / on the list" wording unless an AMY lookup in
+that turn showed state `done`; rewrite banned voice-guide phrases (fam,
+vibes, rockstars, synergy, "let's crush it", "amazing opportunity",
+"dear valued"); and strip emojis and extra exclamation marks. Refusal,
+empty, or bad model output becomes a short safe fallback; raw errors are
+never posted.
 
 Venue facts in the prompt: JEWEL's last night is Nov 21 2026; Marquee
 Dayclub (the Dome) is the push through Mar 31 2027; pools are closed
@@ -51,19 +56,22 @@ the bot already answered, or one that started with an @mention of the
 bot). Other untagged channel messages are ignored, so #generalchat and
 #weeklyevents stay quiet.
 
-If someone asks about promoter credit: everyone in the Slack workspace
-is a promoter. They get credit by going to playmakerentertainment.com,
-filling out their client's information, and putting their own promoter
-info (Promoter first name / Promoter last name) on that same form. Only
-then are they counted for the guest list. Being counted does not
-guarantee check-in credit; the bot must never promise check-in credit
-or payouts, and cannot submit the form from Slack.
+If someone asks about promoter credit or whether a client is on the
+list: everyone in the Slack workspace is a promoter. The bot asks for
+the client's full name, venue, and date, then uses the read-only AMY
+lookups to check. It never promises credit. To get counted for the guest
+list, the promoter goes to playmakerentertainment.com, fills out the
+client's information, and puts their own promoter info (Promoter first
+name / Promoter last name) on that same form. Being counted does not
+guarantee check-in credit. The bot cannot submit the form from Slack.
 
-If someone asks how to sign clients or guests up, the bot explains that
-it cannot sign anyone up from Slack (read-only). Guests sign up on
-playmakerentertainment.com or by DMing Playmaker on Instagram, with the
-intake fields Email / First & Last name / Number of Females/Males /
-Dates In Vegas.
+For disputes, payment issues, special requests, or anything that needs
+management approval, the bot says it will get it to Tom and posts a
+short flag in `#amy-bookings`.
+
+If someone asks how to sign clients up, the voice-guide reply is to have
+them go through the Playmaker link, select the right venue and date, and
+complete the signup so attendance can be tracked.
 
 Incoming Slack events are logged (type, channel, ts, user only). If
 Socket Mode misses an `app_mention` or DM, a catch-up loop scans
