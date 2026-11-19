@@ -1,16 +1,24 @@
-"""Free-text answers through an OpenAI chat model with read-only tool calls.
+"""Free-text answers through an OpenAI model with read-only tool calls.
 
 Key from OPENAI_API_KEY, model from OPENAI_MODEL (same setup as
 PARTYEVERYDAY). The key is never logged or echoed. The model only sees the
 safe projections from lookups.py (no phone numbers, emails or raw payloads),
-and its final text is scrubbed again before posting.
+and its final text is guardrailed again before posting.
+
+Tool calls go through the Responses API (required for gpt-6.1-sol). When
+json_schema structured output is compatible with tools, the final message is
+{"reply": "..."}; otherwise we fall back to plain text.
 """
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 
+from .guardrails import tool_shows_done
+from .history import to_api_messages
+from .prompt import REPLY_SCHEMA, SYSTEM_PROMPT
 from .views import scrub
 
 log = logging.getLogger('amy.slack.llm')
@@ -18,30 +26,6 @@ API_URL = 'https://api.openai.com/v1/chat/completions'  # plain self-check (same
 RESPONSES_URL = 'https://api.openai.com/v1/responses'  # function tools (required for gpt-6.1-sol)
 DEFAULT_MODEL = 'gpt-6.1-sol'
 MAX_ROUNDS = 5
-
-SYSTEM_PROMPT = """You are AMY Worker, the Slack side of AMY, the booking system for Tom (Thomas Vale) of Playmaker Entertainment, a Las Vegas nightlife promoter. The Playmaker team messages you in Slack to check on guest list bookings.
-
-## Voice (Tom's, from the PartyEveryDay voice guide)
-Sound like Tom: short, warm, direct, casual, confident. Texting style, no corporate tone, no long paragraphs. Get to the point and give the answer first.
-- Words he uses: "yeah", "got it", "cool", "let me know", "I got you".
-- Rhythm: short statements. Energy from wording, an occasional exclamation point. Emojis rare (🔥 🍾 🪩 at most once, only for good news like a booking).
-- No formal goodbye. Close with the answer, a short question, or "Let me know".
-Examples:
-- "Is Jessica booked?" -> "Yeah, Jessica's on Hakkasan Fri Nov 20, 2F/1M, order #f5882f28. 🔥"
-- "How's the queue?" -> "Queue's clean. 0 queued, 3 uncertain, 115 manual, 118 done."
-- "Anything stuck?" -> "Yeah, 1 in flight past its lease: Mike, OMNIA Sat. Worth a look."
-
-## What you can do
-You are READ-ONLY. Use the tools to look things up: queue counts by state, jobs in a state, a guest's jobs, a night's bookings by venue, worker health. Always call a tool before stating facts; never guess or invent names, dates, venues, counts or order numbers. If a tool errors, say you couldn't reach AMY right now.
-You cannot book, cancel, requeue, change, approve or email anything. If asked, say so in one line and that Tom or the team handles it outside Slack.
-
-## Hard rules
-- Never include phone numbers, email addresses, tokens, keys or links to the dashboard.
-- Double bookings and venue changes are normal and need no warning.
-- Times are Arizona time (MST). "Tonight" means today's date in Phoenix.
-- States: queued, retry, claimed/assigned/running (in flight), awaiting_human_verification, submission_uncertain, needs_review, manual (needs a person), done (booked).
-- Use Slack formatting (*bold*, bullets) and keep it short. For long lists give the count and the first few.
-"""
 
 TOOLS = [
     {'type': 'function', 'function': {
@@ -81,7 +65,7 @@ def responses_tools():
              'parameters': t['function']['parameters']} for t in TOOLS]
 
 
-def responses_payload(model, input_items, *, instructions=None, previous=None, max_tokens=4000):
+def responses_payload(model, input_items, *, instructions=None, previous=None, max_tokens=4000, structured=True):
     payload = {'model': model, 'input': input_items, 'tools': responses_tools(), 'max_output_tokens': max_tokens}
     if instructions:
         payload['instructions'] = instructions
@@ -90,6 +74,15 @@ def responses_payload(model, input_items, *, instructions=None, previous=None, m
     effort = reasoning_effort()
     if effort:
         payload['reasoning'] = {'effort': effort}
+    if structured:
+        payload['text'] = {
+            'format': {
+                'type': 'json_schema',
+                'name': 'slack_reply',
+                'strict': True,
+                'schema': REPLY_SCHEMA,
+            },
+        }
     return payload
 
 
@@ -107,6 +100,55 @@ def output_text(resp):
 
 def function_calls(resp):
     return [i for i in resp.get('output') or [] if i.get('type') == 'function_call']
+
+
+def refusal_reason(resp):
+    """Responses API refusal / cutoff -> a short reason, or None."""
+    reason = (resp.get('incomplete_details') or {}).get('reason')
+    if reason == 'content_filter':
+        return 'refusal'
+    if reason == 'max_output_tokens':
+        return 'max_tokens'
+    for item in resp.get('output') or []:
+        if item.get('type') == 'refusal' or item.get('refusal'):
+            return 'refusal'
+        for c in item.get('content') or []:
+            if c.get('type') == 'refusal' or c.get('refusal'):
+                return 'refusal'
+    return None
+
+
+def parse_reply(text, *, structured=False):
+    """Extract the assistant's Slack text from a structured or plain response."""
+    raw = (text or '').strip()
+    if not raw:
+        raise LlmError('empty reply')
+    body = raw
+    if body.startswith('```'):
+        body = re.sub(r'^```(?:json)?\s*', '', body)
+        body = re.sub(r'\s*```$', '', body).strip()
+    if body.startswith('{'):
+        try:
+            data = json.loads(body)
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and isinstance(data.get('reply'), str):
+            reply = data['reply'].strip()
+            if not reply:
+                raise LlmError('empty reply')
+            return reply
+        if structured:
+            raise LlmError('invalid structured reply')
+    return raw
+
+
+def structured_incompatible(exc):
+    blob = ' '.join(str(v) for v in (getattr(exc, 'detail', None) or {}).values()) + ' ' + str(exc)
+    low = blob.lower()
+    return any(s in low for s in (
+        'json_schema', 'text.format', 'unsupported_parameter', 'incompatible',
+        'not supported', 'unknown parameter', 'unrecognized key',
+    ))
 
 
 def configured():
@@ -180,19 +222,33 @@ def responses_post(payload):
     return http_post(payload, url=RESPONSES_URL)
 
 
-def answer(lookups, text, *, history=None, post=responses_post, model=None):
+def _post_structured(post, payload_fn):
+    """Try json_schema + tools; if the model rejects that combo, retry plain."""
+    try:
+        return post(payload_fn(True)), True
+    except LlmError as exc:
+        if not structured_incompatible(exc):
+            raise
+        log.warning('structured output not compatible with tools, retrying plain: %s', describe(exc))
+        return post(payload_fn(False)), False
+
+
+def answer(lookups, text, *, history=None, context=None, meta=None, post=responses_post, model=None):
     """Responses API tool loop over the read-only lookups."""
     model = model or os.environ.get('OPENAI_MODEL', '').strip() or DEFAULT_MODEL
-    items = [{'role': m['role'], 'content': m['content']} for m in (history or [])
-             if m.get('role') in ('user', 'assistant') and isinstance(m.get('content'), str)]
-    items.append({'role': 'user', 'content': text})
-    resp = post(responses_payload(model, items, instructions=SYSTEM_PROMPT))
+    items = to_api_messages(history, text, newest_context=context)
+    resp, structured = _post_structured(
+        post, lambda s: responses_payload(model, items, instructions=SYSTEM_PROMPT, structured=s))
+    results = []
     for _ in range(MAX_ROUNDS):
+        why = refusal_reason(resp)
+        if why:
+            raise LlmError(why)
         calls = function_calls(resp)
         if not calls:
-            content = output_text(resp).strip()
-            if not content:
-                raise LlmError('empty reply')
+            content = parse_reply(output_text(resp), structured=structured)
+            if meta is not None:
+                meta['amy_confirmed'] = tool_shows_done(results)
             return scrub(content, 3500)
         outputs = []
         for call in calls:
@@ -201,9 +257,11 @@ def answer(lookups, text, *, history=None, post=responses_post, model=None):
             except ValueError:
                 args = {}
             result = call_tool(lookups, call.get('name'), args if isinstance(args, dict) else {})
+            results.append(result)
             outputs.append({'type': 'function_call_output', 'call_id': call.get('call_id'),
                             'output': json.dumps(result, default=str)[:30000]})
-        resp = post(responses_payload(model, outputs, instructions=SYSTEM_PROMPT, previous=resp.get('id')))
+        resp = post(responses_payload(model, outputs, instructions=SYSTEM_PROMPT,
+                                      previous=resp.get('id'), structured=structured))
     raise LlmError('too many tool rounds')
 
 
@@ -220,7 +278,8 @@ def self_check(post=None, model=None, log_=None, tools_post=None):
         ('plain', post, {'model': model, 'max_completion_tokens': 400, 'messages': [
             {'role': 'system', 'content': 'Reply with the single word ok.'}, {'role': 'user', 'content': 'ping'}]}),
         ('tools', tools_post, responses_payload(model, [{'role': 'user', 'content': 'ping'}],
-                                                instructions='Reply with the single word ok.', max_tokens=400)),
+                                                instructions='Reply with the single word ok.', max_tokens=400,
+                                                structured=False)),
     )
     for name, fn, payload in checks:
         try:

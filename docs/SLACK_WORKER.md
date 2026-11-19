@@ -23,8 +23,38 @@ books, cancels or emails, and it does not change booking behaviour.
 Exact commands are answered directly: `status`, `state <name>`,
 `guest <name>`, `tonight`, `tomorrow`, `date 11/21`, `health`, `help`.
 Free text goes to the OpenAI model (`OPENAI_API_KEY`, `OPENAI_MODEL`, default
-`gpt-6.1-sol`, Tom's PartyEveryDay voice) with tool calls over the same
-read-only lookups. Without a key, the keyword commands are the fallback.
+`gpt-6.1-sol`) with tool calls over the same read-only lookups. The prompt
+uses Tom's PartyEveryDay voice (short, warm, plain), Phoenix time + who is
+asking as a context note, and the last 20–30 messages of the DM or thread
+(`conversations.history` / `conversations.replies`; scopes already on the
+app: `channels:history`, `groups:history`, `im:history`, `users:read`).
+Vague messages ("I dont understand") get a short helpful reply or a
+clarifying question, never the command-list dump. After every reply,
+guardrails strip or replace phones, emails, tokens, and URLs with secrets,
+and block "booked / confirmed / on the list" wording unless an AMY lookup
+in that turn showed state `done`. Refusal, empty, or bad model output
+becomes a short safe fallback; raw errors are never posted.
+
+Venue facts in the prompt: JEWEL's last night is Nov 21 2026; Marquee
+Dayclub (the Dome) is the push through Mar 31 2027; pools are closed
+except the MDC Dome. The bot stays read-only.
+
+Without a key, a vague message gets a short clarifying question; keyword
+commands still work.
+
+Booking updates still go only to `#amy-bookings`. The once-per-channel
+hello posts only to that updates channel, never to `#generalchat`,
+`#weeklyevents`, or `#random`. In channels the bot answers only when
+@mentioned.
+
+## Joining public channels
+The bot is already in `#amy-bookings`. Joining other public channels
+(`#generalchat`, `#weeklyevents`, `#random` — there is no `#general`)
+needs the `channels:join` bot scope, which the current install does not
+have. Add `channels:join` to the app manifest and reinstall, or `/invite
+@AMY Worker` from a member already in each channel (AMYI can do this in
+the browser). Do not expect the worker to join by itself until that
+scope is granted.
 
 ## Variables
 | Variable | Value |

@@ -16,10 +16,20 @@ ATTENTION = frozenset({'manual', 'needs_review', 'submission_uncertain'})
 PHONE_RE = re.compile(r'(?:\+?\(?\d[\d \t().-]{6,}\d)')
 EMAIL_RE = re.compile(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+')
 SECRET_RE = re.compile(r'(?:xox[abposr]-|xapp-|sk-|Bearer\s+)[\w-]+', re.I)
+SECRET_URL_RE = re.compile(
+    r'https?://[^\s<>]+[?&#](?:access_token|api[_-]?key|token|key|secret|password|auth|dashboard[_-]?key)=[^\s<>&]+',
+    re.I,
+)
+ASSIGNED_SECRET_RE = re.compile(
+    r'\b(?:api[_-]?key|access_token|secret|password|dashboard[_-]?key|OPENAI_API_KEY|AMY_QUEUE_API_TOKEN|SLACK_(?:BOT|APP)_TOKEN)\s*[:=]\s*\S+',
+    re.I,
+)
 
 
 def scrub(text, limit=300):
     text = SECRET_RE.sub('[hidden]', str(text or ''))
+    text = SECRET_URL_RE.sub('[hidden]', str(text or ''))
+    text = ASSIGNED_SECRET_RE.sub('[hidden]', text)
     text = EMAIL_RE.sub('[email]', text)
     text = PHONE_RE.sub(lambda m: m.group(0) if _not_phone(m.group(0)) else '[phone]', text)
     text = '\n'.join(' '.join(line.split()) for line in text.splitlines()).strip()
