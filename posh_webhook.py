@@ -865,6 +865,11 @@ def normalize_website_payload(p):
         if pf or pl:
             out["promoter"] = f"{pf} {pl}".strip()
 
+    plan_val = next((p.get(k) for k in ("nights", "itinerary", "nightly_plan", "plan") if p.get(k)), None)
+    if plan_val is None and bf.get("nightly plan"):
+        plan_val = bf.get("nightly plan")
+    if plan_val is not None:
+        out["plan"] = plan_val
     raw_venue = p.get("venue") if "venue" in p else (p.get("venues") if "venues" in p else (d.get("Venues") or bf.get("requested venues") or ""))
     if isinstance(raw_venue, list):
         raw_venue = ", ".join(str(x).strip() for x in raw_venue if str(x).strip())
@@ -926,6 +931,17 @@ def validate_website(p):
     src = g("source", 40).lower()
     if src not in WEBSITE_SOURCES:
         return None, "unknown source"
+    plan, plan_err = _website_plan(p)
+    if plan_err:
+        return None, plan_err
+    if plan:
+        # The whole trip is one submission: range = first..last planned date,
+        # first planned venue stands in for the single-venue fields.
+        p = dict(p, venue=plan[min(plan)][0], city=p.get("city") or _plan_city(plan))
+        if not str(p.get("date") or "").strip():
+            p["date"] = min(plan)
+        if not str(p.get("end_date") or "").strip():
+            p["end_date"] = max(plan)
     first, last, email, city, venue, date = g("first_name", 60), g("last_name", 60), g("email", 120).lower(), g("city"), g("venue"), g("date", 10)
     phone = re.sub(r"[^\d+]", "", g("phone", 30))
     if not (first and last):
@@ -951,6 +967,12 @@ def validate_website(p):
             return None, "bad end date"
         if not night <= end <= today + timedelta(days=90) or (end - night).days >= WEBSITE_MAX_NIGHTS:
             return None, "end date out of range"
+    if plan:
+        if min(plan) < night.isoformat() or max(plan) > end.isoformat():
+            return None, "nightly plan outside the date range"
+        cities = {c for c, vs in WEBSITE_VENUES.items() for v in plan_venues_list(plan) if v in vs}
+        if len(cities) != 1 or city not in cities:
+            return None, "nightly plan venues must all be in one city"
     try:
         women, men = int(p.get("women") or 0), int(p.get("men") or 0)
     except (TypeError, ValueError):
@@ -970,7 +992,47 @@ def validate_website(p):
             "name": full_name, "email": email, "phone": phone, "city": city, "venue": venue,
             "event": f"{venue} | Guest List", "night": night, "end": end, "women": women, "men": men,
             "party": women + men, "instagram": ig, "promoter_name": promo, "notes": g("notes", 500),
-            "ref": re.sub(r"[^\w-]", "", g("ref", 40))}, None
+            "ref": re.sub(r"[^\w-]", "", g("ref", 40)),
+            "plan": plan, "venues": plan_venues_list(plan) if plan else [venue]}, None
+
+
+def plan_venues_list(plan):
+    import request_plan
+    return request_plan.plan_venues(plan)
+
+
+def _plan_city(plan):
+    for c, vs in WEBSITE_VENUES.items():
+        if all(v in vs for v in plan_venues_list(plan)):
+            return c
+    return ""
+
+
+def _website_plan(p):
+    """Nightly plan for a multi-night / multi-venue request -> ({iso: [website
+    venue names]}, None) or ({}, error). Thomas (Nov 19 2026): a date-range
+    request is ONE submission and ONE confirmation, not one per venue/night."""
+    import request_plan
+    value = p.get("plan")
+    if value in (None, "", [], {}):
+        return {}, None
+    try:
+        plan = request_plan.parse_plan(value, normalize=False)
+    except ValueError as exc:
+        return {}, f"bad nightly plan ({exc})"
+    out = {}
+    for day, names in plan.items():
+        for name in names:
+            canon = name if any(name in vs for vs in WEBSITE_VENUES.values()) else _match_website_venue(name)[1]
+            if not canon or not any(canon in vs for vs in WEBSITE_VENUES.values()):
+                if canon and any(is_notify_only(c, canon) for c in WEBSITE_NOTIFY_ONLY):
+                    return {}, "notify-only venues must be their own request"
+                return {}, "bad nightly plan venue"
+            if canon not in out.setdefault(day, []):
+                out[day].append(canon)
+    if len(out) > WEBSITE_MAX_NIGHTS:
+        return {}, "nightly plan too long"
+    return out, None
 
 
 def _promoter_lines(c):
@@ -998,7 +1060,8 @@ def to_website_text(c):
         "Message: New guest list request submission", "",
         f"Full name: {c['name']}", f"Email: {c['email']}", f"Phone: {c['phone']}", "ZIP code:",
         f"Visit start date: {night}", f"Visit end date: {end}",
-        f"Requested venues: {c['venue']}",
+        f"Requested venues: {', '.join(c.get('venues') or [c['venue']])}",
+        *([f"Nightly plan: {_format_plan(c['plan'])}"] if c.get("plan") else []),
         f"Female guests: {c['women']}", f"Male guests: {c['men']}",
         *(_promoter_lines(c) if pm else [f"Promoter first name: {c['promoter']}", "Promoter last name:"]),
         f"Additional comments: {comments.replace(chr(10), ' ')}",
@@ -1043,15 +1106,29 @@ def _mark_delivered(key):
         fh.write("|".join(key) + "\n")
 
 
+def _format_plan(plan):
+    import request_plan
+    return request_plan.format_plan(plan)
+
+
+def _venue_label(clean):
+    """Subject label: the venue, or 'Hakkasan +3' for a multi-venue trip."""
+    venues = clean.get("venues") or [clean["venue"]]
+    return clean["venue"] if len(venues) <= 1 else f"{venues[0]} +{len(venues) - 1}"
+
+
 def _website_key(clean):
-    return ("web", clean["ref"] or clean["email"], clean["night"].isoformat(), clean["end"].isoformat(), clean["venue"])
+    venue = clean["venue"]
+    if clean.get("plan"):
+        venue = _format_plan(clean["plan"])
+    return ("web", clean["ref"] or clean["email"], clean["night"].isoformat(), clean["end"].isoformat(), venue)
 
 
 def _deliver_website(intake, clean):
     msg = EmailMessage()
     msg["To"] = intake.intake_email
     msg["From"] = intake.intake_email
-    msg["Subject"] = f"{WEBSITE_SUBJECT} - {clean['promoter']} {clean['venue']} {clean['night'].isoformat()}"
+    msg["Subject"] = f"{WEBSITE_SUBJECT} - {clean['promoter']} {_venue_label(clean)} {clean['night'].isoformat()}"
     msg.set_content(to_website_text(clean))
     import base64
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
