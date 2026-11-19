@@ -64,19 +64,35 @@ def update_subject(subject, bookings):
     return ("Updated: " + subject + tail).replace(",", "").replace(";", "")
 
 
-def guest_email(request, bookings, update=False):
-    """bookings: [{venue, date, event, event_time, order_id}] (TAO only)."""
+def pending_note(pending):
+    """Guest-facing line for nights of the same request still waiting for
+    their guest list to open (they follow in one Updated confirmation)."""
+    if not pending:
+        return ""
+    items = "; ".join(f"{_long(n)} - {v}" for v, n in sorted(pending, key=lambda p: (p[1], p[0])))
+    return (f"Still to come: {items}. That guest list isn't posted yet. We'll sign you up as soon as "
+            "it opens and send you one updated confirmation.")
+
+
+def guest_email(request, bookings, update=False, pending=None):
+    """bookings: [{venue, date, event, event_time, order_id}] (TAO only).
+    pending: [(venue, iso)] nights of this request not bookable yet."""
     first = request.get("first_name") or "there"
+    waiting = pending_note(pending)
     label = date_label(request["start_date"], request["end_date"])
+    notice = html_emails.FALLBACK_NOTICE
     lines = []
     for b in sorted(bookings, key=lambda b: (b["date"], b["venue"])):
         event = (b.get("event") or "").strip()
         inner = f"{event} — Order ID {b['order_id']}" if event else f"Order ID {b['order_id']}"
         lines.append(f"{_long(b['date'])} - {b['venue']} ({inner})")
+        if b.get("fallback"):
+            lines.append(notice)
     text = "\n\n".join([
         f"Hi {first},",
         ((UPDATE_NOTE + "\n\n") if update else "")
-        + "You're on the Playmaker Entertainment guest list. Here's what you're set for:\n" + "\n".join(lines),
+        + "You're on the Playmaker Entertainment guest list. Here's what you're set for:\n" + "\n".join(lines)
+        + (("\n\n" + waiting) if waiting else ""),
         "Arrive early and bring a valid, government-issued 21+ photo ID. Guest-list admission is "
         "subject to each venue's rules, dress code, and capacity.",
         "Questions? Email info@playmakerentertainment.com",
@@ -84,9 +100,11 @@ def guest_email(request, bookings, update=False):
     ])
     rows = [(html_emails._short_date(b["date"]), b["venue"], b.get("event"))
             for b in sorted(bookings, key=lambda b: (b["date"], b["venue"]))]
+    fallback_nights = [html_emails._short_date(b["date"]) for b in bookings if b.get("fallback")]
     html = html_emails.render_confirmation(
         first, rows, html_emails.party_size(request["female_count"], request["male_count"]),
-        UPDATE_NOTE if update else None)
+        " ".join(x for x in ((UPDATE_NOTE if update else ""), waiting) if x) or None,
+        fallback_nights=fallback_nights or None)
     subject = guest_subject(request["start_date"], request["end_date"])
     if update:
         subject = update_subject(subject, bookings)
@@ -94,7 +112,7 @@ def guest_email(request, bookings, update=False):
             "dedupe_query": f'to:{request["email"]} subject:"{subject}"'}
 
 
-def team_email(ref, raw, request, bookings, update=False):
+def team_email(ref, raw, request, bookings, update=False, pending=None):
     name = f"{request.get('first_name', '')} {request.get('last_name', '')}".strip() or raw.get("name", "")
     label = date_label(request["start_date"], request["end_date"])
     source = raw.get("source") or "website"
@@ -122,6 +140,9 @@ def team_email(ref, raw, request, bookings, update=False):
         "",
         "— Nights —",
         "\n\n".join(nights),
+        *(["", "— Waiting (list not posted yet; booked later in one Updated email) —",
+            "\n".join(f"{_long(n)} — {v}" for v, n in sorted(pending, key=lambda p: (p[1], p[0])))]
+          if pending else []),
         "",
         f"Amy Ref: {ref}",
     ])

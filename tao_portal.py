@@ -31,6 +31,7 @@ has succeeded. main.py refuses --live until then.
 import logging
 import os
 import re
+import time
 from datetime import date
 from urllib.parse import urlparse
 
@@ -59,6 +60,13 @@ VENUE_SLUGS = {
 }
 
 UNAVAILABLE_TEXT = re.compile(r"\b(sold out|guest list closed|passes unavailable|event unavailable)\b", re.I)
+ACCESS_CODE_TEXT = re.compile(
+    r"\b(access code|guest(?:\s|-)?list code|enter(?:\s+the)? code|password required|code required)\b", re.I)
+ACCESS_CODE_INPUTS = (
+    "#AccessCode", 'input[name="AccessCode"]', 'input[name="access_code"]',
+    'input[id*="AccessCode" i]', 'input[name*="accesscode" i]',
+    'input[name*="guestcode" i]', 'input[name*="guest-list-code" i]',
+)
 SUCCESS_TEXT = re.compile(
     r"order confirmation|registration confirmed|you(?:'|’)re on the guest list|thank you for your order", re.I)
 MARKETING_TEXT = re.compile(r"marketing|promotional|newsletter|offers|email updates|text messages|sms", re.I)
@@ -253,13 +261,78 @@ def _browser_page(playwright):
     return browser, page
 
 
+# Promoter and event pages are large and keep talking to analytics, so
+# networkidle often never comes. Give navigations a full minute, retry a
+# slow goto, and never fail a job just because a load state was late.
+PAGE_LOAD_TIMEOUT_MS = 60_000
+GOTO_RETRIES = 3
+
+
+def _dom_usable(page):
+    """True when the document is far enough along that Pass links can be read."""
+    try:
+        ready = page.evaluate("document.readyState")
+        if ready not in ("interactive", "complete"):
+            return False
+    except Exception:  # noqa: BLE001 - a broken evaluate does not decide this
+        pass
+    try:
+        return bool(page.locator("body").count())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _settle(page):
     """Give the (large) promoter page time to finish loading; its links are
-    usable before every background request finishes."""
+    usable before every background request finishes.
+
+    Never raises just because networkidle or load did not arrive. If the DOM
+    is already usable (as it was when load had fired but networkidle had not),
+    we continue. Later reads will fail on their own if the page is blank."""
     try:
-        page.wait_for_load_state("networkidle", timeout=45_000)
+        page.wait_for_load_state("networkidle", timeout=PAGE_LOAD_TIMEOUT_MS)
+        return
     except Exception:
-        page.wait_for_load_state("load")
+        log.info("TAO page did not reach networkidle; waiting for load")
+    try:
+        page.wait_for_load_state("load", timeout=PAGE_LOAD_TIMEOUT_MS)
+        return
+    except Exception:
+        log.info("TAO page did not reach load; continuing if the DOM is usable")
+    if _dom_usable(page):
+        log.info("TAO page DOM is usable without a finished load state")
+    else:
+        log.warning("TAO page load states did not arrive and the DOM may not be ready")
+
+
+def _goto_promoter(page, url=None):
+    """Open a URL (the promoter page by default) with a 60s timeout.
+
+    On failure, reload and back off, up to GOTO_RETRIES attempts, then raise
+    the last navigation error for the caller to handle."""
+    url = url or TAO_PROMOTER_URL
+    delay = 2
+    last = None
+    for attempt in range(1, GOTO_RETRIES + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
+            return
+        except Exception as exc:  # noqa: BLE001 - any navigation failure is retried here
+            last = exc
+            log.warning("TAO page.goto failed (%s: %s) attempt %d/%d",
+                        type(exc).__name__, str(exc)[:200], attempt, GOTO_RETRIES)
+            if attempt >= GOTO_RETRIES:
+                break
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
+                return
+            except Exception as reload_exc:  # noqa: BLE001
+                last = reload_exc
+                log.warning("TAO page.reload after failed goto also failed (%s: %s)",
+                            type(reload_exc).__name__, str(reload_exc)[:200])
+            time.sleep(delay)
+            delay *= 2
+    raise last
 
 
 def _open_promoter_page(page):
@@ -273,7 +346,7 @@ def _open_promoter_page(page):
     pause = max(int(os.environ.get("TAO_CHALLENGE_WAIT_SECONDS", "12")), 3)
     for attempt in range(waits):
         if attempt == 0:
-            page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
+            _goto_promoter(page)
         _settle(page)
         if not is_security_check(page.title(), page.locator("body").inner_text()):
             return
@@ -281,9 +354,9 @@ def _open_promoter_page(page):
                  pause, attempt + 1, waits)
         page.wait_for_timeout(pause * 1000)
         try:
-            page.reload(wait_until="domcontentloaded")
+            page.reload(wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
         except Exception:
-            page.goto(TAO_PROMOTER_URL, wait_until="domcontentloaded")
+            _goto_promoter(page)
     raise TaoBlocked("TAO's website kept showing a security check (Cloudflare) and it did not clear")
 
 
@@ -297,7 +370,7 @@ def _open_via_promoter(page, url):
         return False
     link = page.locator("a").nth(hrefs.index(url))
     link.evaluate("a => a.removeAttribute('target')")  # stay in this tab
-    with page.expect_navigation(wait_until="domcontentloaded"):
+    with page.expect_navigation(wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS):
         if link.is_visible():
             link.click()
         else:
@@ -454,6 +527,53 @@ def catalog_snapshot():
     return _snapshot
 
 
+def requires_access_code(page):
+    """True when the live listing is gated by an access code (never submit)."""
+    # Only a VISIBLE code input gates the list. Since Nov 15 2026 TAO pages
+    # carry a collapsed, optional "Have a promo code? Enter Code" field
+    # (#OrderAccessCode, hidden) on open free guest lists; counting hidden
+    # inputs marked every open list as access-code and nothing was booked.
+    for sel in ACCESS_CODE_INPUTS:
+        try:
+            loc = page.locator(sel)
+            for i in range(loc.count()):
+                if loc.nth(i).is_visible():
+                    return True
+        except Exception:  # noqa: BLE001
+            continue
+    try:
+        body = page.locator("body").inner_text()
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(ACCESS_CODE_TEXT.search(body or ""))
+
+
+def gender_options_selectable(page):
+    """True when a Women or Men guest-list quantity can actually be chosen:
+    the select is visible and enabled and offers a quantity of 1 or more."""
+    for select in _selects_by_gender(page).values():
+        if not select.get("selector") or max_quantity(select.get("options") or []) < 1:
+            continue
+        try:
+            field = page.locator(select["selector"]).first
+            if field.count() and field.is_visible() and field.is_enabled():
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def is_code_gated(page):
+    """Thomas (Nov 15 2026): on a TAO Group guest-list page a promo/access-code
+    box (even a visible one) does NOT mean the list is closed. If the Women or
+    Men options at the bottom can be selected, the list is open and is booked.
+    It is code-gated only when no Women/Men option can be selected AND a code
+    is required."""
+    if gender_options_selectable(page):
+        return False
+    return requires_access_code(page)
+
+
 def check_availability(venue, date_obj):
     entry = _load_catalog().get((venue, date_obj))
     if not entry:
@@ -467,6 +587,16 @@ def check_availability(venue, date_obj):
             if not _open_via_promoter(page, url):
                 return None
             body = page.locator("body").inner_text()
+            if is_code_gated(page):
+                title = (page.locator("h1, h2").first.text_content() or "").strip()
+                return {
+                    "event": entry.get("event") or title or f"{venue} Guest List",
+                    "event_time": entry.get("event_time"),
+                    "listing_type": "Passes",
+                    "price": 0,
+                    "listing_url": url,
+                    "access_code_required": True,
+                }
             if UNAVAILABLE_TEXT.search(body):
                 return None
             selects = _selects_by_gender(page)
@@ -558,6 +688,8 @@ def submit_registration(listing, guest, rehearse=False, screenshot_path=None, be
         try:
             if not _open_via_promoter(page, url):
                 return stop("Pass link is no longer on the Playmaker promoter page")
+            if is_code_gated(page):
+                return stop("listing requires an access code")
             selects = _selects_by_gender(page)
             for gender, count in (("female", guest["female_count"]), ("male", guest["male_count"])):
                 if count == 0:

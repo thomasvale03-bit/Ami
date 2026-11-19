@@ -23,8 +23,10 @@ service's authenticated HTTPS API (`/queue/*`, `/send-branded`).
 2. Re-checks the source rules (`queue_service.source_policy`: past dates, held
    Shanequa/Ashley refs, JEWEL after Nov 21, same-day OMNIA Fri/Sat, mixed
    Drai's, >14 nights, missing consent/party) -> manual.
-3. Duplicate suspicion: same email + venue + night already `done` in the queue -> manual
-   (`AMY_WORKER_DUPLICATE_CHECK=false` turns this off).
+3. Same-email sign-ups are booked (Thomas, Nov 11 2026). The per-job ledger
+   still skips a venue/night already booked for this job, so a crash/retry never
+   resubmits the same order. `AMY_WORKER_DUPLICATE_CHECK=true` restores the old
+   "duplicate suspicion" manual stop.
 4. For each exact source venue x night:
    * already booked (worker ledger or server `progress`) -> reuse, never resubmit;
    * ledger says `submitting` with no order -> **uncertain**, never resubmitted;
@@ -48,6 +50,19 @@ service's authenticated HTTPS API (`/queue/*`, `/send-branded`).
 6. `complete` with evidence (order IDs, party, receipt IDs). Refused -> manual, "DO NOT rebook".
 
 Unexpected errors -> uncertain if a submit had started, else manual. Never a retry loop.
+
+## Stall watchdog (box supervisor)
+
+If a pickup writes no heartbeat or ledger progress for 20 minutes
+(`AMY_WORKER_STALL_SECONDS`, default 1200), `stall_watchdog.py --supervise`
+kills the hung worker, releases a *worker-held* TAO lock, requeues claimed
+jobs that were never submitted, finishes emails for jobs the ledger already
+shows as booked (and never resubmits them), logs a `STALL_RESTART` line, and
+appends one JSON object to `$AMY_WORKER_DIR/stall_events.jsonl`. It then
+touches `run_now` so the skipped work runs immediately instead of waiting for
+the next scheduled slot. A long healthy run that keeps making progress is
+not treated as a stall.
+
 
 ## Server changes in this PR
 * Claims hand out the **soonest event date first**; past-dated/policy-failing jobs

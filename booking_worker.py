@@ -26,15 +26,17 @@ Modes (AMY_WORKER_MODE):
   live     claim, book, email, complete.
 """
 import argparse
+import stall_watchdog
 import hashlib
 import json
 import logging
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -44,6 +46,10 @@ log = logging.getLogger("amy.worker")
 PHOENIX = ZoneInfo("America/Phoenix")
 VEGAS = ZoneInfo("America/Los_Angeles")
 DEFAULT_BASE_URL = "https://amy-production-1616.up.railway.app"
+# One slow TAO page must not stall a whole pickup (the 4 PM Nov 12 hang
+# sat in page.goto for 74 minutes). About six minutes is enough for a
+# normal booking plus a couple of 60s page-load retries.
+JOB_TIME_CAP_SECONDS = 360
 
 
 class Stop(Exception):
@@ -96,6 +102,10 @@ class Api:
 
     def send_branded(self, payload):
         return self._call("POST", "/send-branded", payload, self.send_token)
+
+    def stall_requeue(self, ref, reason=""):
+        return self._call("POST", "/queue/stall-requeue/" + quote(ref, safe=""),
+                          {"reason": reason}, self.queue_token)
 
 
 # --- Local no-double-book ledger ---------------------------------------------
@@ -221,9 +231,14 @@ def _sha256(path):
 def source_nights(raw):
     from config import rules
     from rules_engine import date_range
-    venues = [rules.normalize_venue_name(v) for v in raw.get("venues") or []]
-    nights = [d.isoformat() for d in date_range(raw["start_date"], raw["end_date"])]
-    return [(v, n) for n in nights for v in venues]
+    import request_plan
+    # Every requested venue on every night, or exactly the request's nightly
+    # plan (one job for a whole date-range trip, Thomas Nov 19 2026).
+    pairs = request_plan.requested_pairs(raw)
+    # Nightclubs still appear on dark nights so DEFAULT_ROUTING can cover them.
+    # Verified-dark daylife / Drai's dates are dropped (no lookup, no retry).
+    return [(v, n) for v, n in pairs
+            if v in rules.NIGHTCLUBS or rules.venue_open_on(v, date.fromisoformat(n)) is not False]
 
 
 def drais_offset():
@@ -325,55 +340,118 @@ def pickup_step(worker, state, now, kicked=False):
         return None, None
     state.mark(slot)  # before running: a crash mid-run never re-runs the hour
     log.info("Pickup run %s starting (%s)", slot, "kick" if kicked else "schedule")
+    stall_watchdog.start_run(state.dir, slot)
+    _mark_pickup(state.dir, now)
     try:
-        result = worker.run_pickup()
-    except Exception:  # noqa: BLE001
-        log.exception("Pickup run failed")
-        result = {"status": "error"}
-    log.info("run %s: %s", slot, json.dumps(result, default=str)[:4000])
-    log.info("next run %s", next_slot_label(time.time()))
-    return slot, result
-
-
-def run_now(worker, max_batches=8):
-    """Owner-requested pickup outside the schedule: work through the whole
-    queue, one guest at a time, in batches of RUN_MAX_JOBS until a batch stops
-    early (queue empty, claim refused or error). Does not touch last_slot."""
-    log.info("Off-schedule pickup (run_now) starting")
-    batches = []
-    for _ in range(max_batches):
         try:
             result = worker.run_pickup()
         except Exception:  # noqa: BLE001
-            log.exception("run_now batch failed")
-            result = {"status": "error", "handled": 0, "results": [{"status": "error"}]}
-        batches.append(result)
-        log.info("run_now batch %d: %s", len(batches), json.dumps(result, default=str)[:4000])
-        last = (result.get("results") or [{}])[-1].get("status")
-        if result.get("handled", 0) < RUN_MAX_JOBS or last in ("idle", "claim_refused", "error"):
-            break
-    total = sum(b.get("handled", 0) for b in batches)
-    log.info("Off-schedule pickup done: %d batch(es), %d job(s) handled", len(batches), total)
-    return {"status": "run_now_done", "batches": len(batches), "handled": total}
+            log.exception("Pickup run failed")
+            result = {"status": "error"}
+        log.info("run %s: %s", slot, json.dumps(result, default=str)[:4000])
+        log.info("next run %s", next_slot_label(time.time()))
+        return slot, result
+    finally:
+        stall_watchdog.end_run(state.dir)
 
 
-def live_loop(worker, work_dir, loop=True, step=5, heartbeat=600, clock=time.time, sleep=time.sleep):
+def run_now(worker, max_batches=8, work_dir=None):
+    """Owner-requested pickup outside the schedule: work through the whole
+    queue, one guest at a time, in batches of RUN_MAX_JOBS until a batch stops
+    early (queue empty, claim refused or error). Does not touch last_slot."""
+    directory = Path(work_dir or os.environ.get("AMY_WORKER_DIR", "/data/worker"))
+    log.info("Off-schedule pickup (run_now) starting")
+    stall_watchdog.start_run(directory, "run_now")
+    _mark_pickup(directory)
+    try:
+        batches = []
+        for _ in range(max_batches):
+            try:
+                result = worker.run_pickup()
+            except Exception:  # noqa: BLE001
+                log.exception("run_now batch failed")
+                result = {"status": "error", "handled": 0, "results": [{"status": "error"}]}
+            batches.append(result)
+            log.info("run_now batch %d: %s", len(batches), json.dumps(result, default=str)[:4000])
+            last = (result.get("results") or [{}])[-1].get("status")
+            if result.get("handled", 0) < RUN_MAX_JOBS or last in ("idle", "claim_refused", "error"):
+                break
+        total = sum(b.get("handled", 0) for b in batches)
+        log.info("Off-schedule pickup done: %d batch(es), %d job(s) handled", len(batches), total)
+        return {"status": "run_now_done", "batches": len(batches), "handled": total}
+    finally:
+        stall_watchdog.end_run(directory)
+
+
+def _mark_pickup(directory, now=None):
+    """Record when a pickup started (the in-worker audit compares job creation
+    times against it)."""
+    try:
+        import worker_monitor
+        worker_monitor.mark_pickup(directory, now)
+    except Exception:  # noqa: BLE001
+        log.warning("could not record pickup start")
+
+
+def sweep_pickup(worker, work_dir):
+    """Fast intake sweep found due jobs: one normal pickup now, outside the
+    slot schedule. Same claim path, rules and per-job box lock as a scheduled
+    run; does not touch last_slot."""
+    directory = Path(work_dir)
+    log.info("Sweep pickup starting")
+    stall_watchdog.start_run(directory, "sweep")
+    _mark_pickup(directory)
+    try:
+        try:
+            result = worker.run_pickup()
+        except Exception:  # noqa: BLE001
+            log.exception("Sweep pickup failed")
+            result = {"status": "error"}
+        log.info("sweep run: %s", json.dumps(result, default=str)[:4000])
+        return result
+    finally:
+        stall_watchdog.end_run(directory)
+
+
+def build_monitor(worker, work_dir):
+    """In-worker sweep/health/audit (worker_monitor.py). AMY_WORKER_MONITOR=false
+    turns it off."""
+    if os.environ.get("AMY_WORKER_MONITOR", "true").lower() in ("0", "false", "no", "off"):
+        log.warning("In-worker monitor OFF (AMY_WORKER_MONITOR)")
+        return None
+    import worker_monitor
+    return worker_monitor.Monitor(worker.api, work_dir)
+
+
+def live_loop(worker, work_dir, loop=True, step=5, heartbeat=600, clock=time.time, sleep=time.sleep,
+              monitor=None):
     """Short sleeps, recomputed from wall-clock time every step (the box VM can
-    be paused mid-sleep), a kick file for an immediate pickup, a heartbeat."""
+    be paused mid-sleep), a kick file for an immediate pickup, a heartbeat.
+    `monitor` (worker_monitor.Monitor): fast intake sweep + self-health every
+    ~15 min and the stuck-sign-up audit every ~30 min, between pickups only."""
     state = SlotState(work_dir)
+    if monitor is not None:
+        log.info("Monitor on: intake sweep every %ss, audit every %ss (alerts via AMYI webhook)",
+                 monitor.sweep_every, monitor.audit_every)
     log.info("Pickup schedule (Phoenix): Mon-Wed %s; Thu-Sun %s; window :00-:%02d; next run %s",
              sorted(MON_WED_HOURS), sorted(THU_SUN_HOURS), RUN_WINDOW_MIN - 1, next_slot_label(clock()))
     last_beat = 0.0
     while True:
         now = clock()
         if state.take_run_now():
-            run_now(worker)
+            run_now(worker, work_dir=state.dir)
             now = clock()
         slot, result = pickup_step(worker, state, now, kicked=state.take_kick())
+        if monitor is not None:
+            try:
+                monitor.tick(lambda reason: sweep_pickup(worker, state.dir), now=clock())
+            except Exception:  # noqa: BLE001
+                log.exception("Monitor tick failed")
         if not loop:
             return result or {"status": "not_scheduled", "next": next_slot_label(now)}
         if now - last_beat >= heartbeat:
             last_beat = now
+            ensure_browser()
             log.info("heartbeat %s; last run %s; next run %s",
                      datetime.fromtimestamp(now, PHOENIX).strftime("%a %b %d %I:%M %p MST"),
                      state.last() or "none", next_slot_label(now))
@@ -393,14 +471,21 @@ def box_lock(ref):
 
 class Worker:
     def __init__(self, api, ledger, tao=None, drais=None, *, mode="dry-run", evidence_dir=None,
-                 now=None, sleep=time.sleep, email_wait_seconds=None, duplicate_check=None, alerts=None):
+                 now=None, sleep=time.sleep, email_wait_seconds=None, duplicate_check=None, alerts=None,
+                 job_time_cap=None):
         self.api, self.ledger, self.mode = api, ledger, mode
         self.tao, self.drais = tao or TaoBooker(), drais or DraisBooker()
         self.evidence_dir = Path(evidence_dir or os.environ.get("AMY_WORKER_DIR", "/data/worker")) / "evidence"
         self.now, self.sleep = now or time.time, sleep
         self.email_wait = (int(os.environ.get("AMY_WORKER_EMAIL_WAIT_SECONDS", "900"))
                            if email_wait_seconds is None else email_wait_seconds)
-        self.duplicate_check = (os.environ.get("AMY_WORKER_DUPLICATE_CHECK", "true").lower() == "true"
+        self.job_time_cap = (int(os.environ.get("AMY_WORKER_JOB_SECONDS", str(JOB_TIME_CAP_SECONDS)))
+                             if job_time_cap is None else job_time_cap)
+        # Thomas, Nov 11 2026: off by default so additional sign-ups with the
+        # same email/venue/night are booked. The per-job ledger still skips a
+        # night already submitted for this job. Set AMY_WORKER_DUPLICATE_CHECK=true
+        # to restore the old same-email manual stop.
+        self.duplicate_check = (os.environ.get("AMY_WORKER_DUPLICATE_CHECK", "false").lower() == "true"
                                 if duplicate_check is None else duplicate_check)
         self.alerts = (os.environ.get("AMY_WORKER_ALERTS", "").lower() == "true" if alerts is None else alerts)
 
@@ -432,6 +517,7 @@ class Worker:
     def run_pickup(self, max_jobs=RUN_MAX_JOBS):
         """One scheduled run: claim and finish one job at a time until the
         queue is empty, a claim is refused, or max_jobs were handled."""
+        ensure_browser()
         results = []
         for _ in range(max_jobs):
             result = self._live_once()
@@ -463,27 +549,72 @@ class Worker:
             except Exception as exc:  # noqa: BLE001 - lock timeout: nothing was touched yet
                 raise Stop("retry", f"Box browser busy (AMYI computerUse holds the TAO lock): {exc}")
             try:
-                return self._process(job, ref, token, raw)
+                stall_watchdog.mark_progress(self.evidence_dir.parent, ref)
+                return self._run_job(job, ref, token, raw)
             finally:
                 lock.__exit__(None, None, None)
         except Stop as stop:
-            meta = {"worker": "railway", **stop.extra}
-            if stop.action == "retry":
-                meta["submission_attempted"] = False
-            code, body = self.api.update(ref, token, stop.action, meta, stop.reason)
-            log.warning("Job %s -> %s: %s (HTTP %s)", ref, stop.action, stop.reason, code)
-            if stop.action in ("manual", "uncertain"):
-                self._alert(ref, stop.action, stop.reason, raw)
-            return {"status": stop.action, "ref": ref, "reason": stop.reason, "http": code}
+            return self._finish_stop(ref, token, raw, stop)
         except Exception as exc:  # noqa: BLE001 - never loop on an unknown failure
-            log.exception("Job %s failed unexpectedly", ref)
-            attempted = any((self.ledger.get(night_key(ref, v, n)) or {}).get("state")
-                            for v, n in self._safe_nights(raw))
-            action = "uncertain" if attempted else "manual"
-            reason = f"Worker error ({type(exc).__name__}: {str(exc)[:300]}); not retried"
-            self.api.update(ref, token, action, {"worker": "railway"}, reason)
-            self._alert(ref, action, reason, raw)
-            return {"status": action, "ref": ref, "reason": reason}
+            return self._handle_unexpected(job, ref, token, raw, exc)
+
+    def _run_job(self, job, ref, token, raw):
+        """Run one job under the hard time cap so a hung page cannot stall the pickup."""
+        return run_with_deadline(
+            lambda: self._process(job, ref, token, raw),
+            self.job_time_cap,
+            on_expire=lambda: self._unstick_browser(ref),
+            clock=self.now,
+        )
+
+    def _unstick_browser(self, ref):
+        log.warning("Job %s hit the %ss time cap; unsticking the booking browser",
+                    ref, self.job_time_cap)
+        try:
+            import browser_host
+            browser_host.restart()
+        except Exception:  # noqa: BLE001
+            log.exception("Could not unstick the booking browser after the job time cap")
+
+    def _finish_stop(self, ref, token, raw, stop):
+        meta = {"worker": "railway", **stop.extra}
+        if stop.action == "retry":
+            meta["submission_attempted"] = False
+        code, body = self.api.update(ref, token, stop.action, meta, stop.reason)
+        log.warning("Job %s -> %s: %s (HTTP %s)", ref, stop.action, stop.reason, code)
+        if stop.action in ("manual", "uncertain"):
+            self._alert(ref, stop.action, stop.reason, raw)
+        return {"status": stop.action, "ref": ref, "reason": stop.reason, "http": code}
+
+    def _handle_unexpected(self, job, ref, token, raw, exc):
+        log.exception("Job %s failed unexpectedly", ref)
+        attempted = any((self.ledger.get(night_key(ref, v, n)) or {}).get("state")
+                        for v, n in self._safe_nights(raw))
+        if not attempted and retryable_browser_error(exc):
+            try:
+                import browser_host
+                log.warning("Job %s: browser error (%s); restarting and retrying once",
+                            ref, type(exc).__name__)
+                browser_host.restart()
+                return self._run_job(job, ref, token, raw)
+            except Stop as stop:
+                return self._finish_stop(ref, token, raw, stop)
+            except Exception as retry_exc:  # noqa: BLE001
+                log.exception("Job %s retry after browser restart failed", ref)
+                exc = retry_exc
+                attempted = any((self.ledger.get(night_key(ref, v, n)) or {}).get("state")
+                                for v, n in self._safe_nights(raw))
+                if not attempted and retryable_browser_error(exc):
+                    return self._finish_stop(ref, token, raw, Stop(
+                        "retry",
+                        f"Worker error ({type(exc).__name__}: {str(exc)[:300]}); "
+                        "left queued for the next pickup",
+                    ))
+        action = "uncertain" if attempted else "manual"
+        reason = f"Worker error ({type(exc).__name__}: {str(exc)[:300]}); not retried"
+        self.api.update(ref, token, action, {"worker": "railway"}, reason)
+        self._alert(ref, action, reason, raw)
+        return {"status": action, "ref": ref, "reason": reason}
 
     @staticmethod
     def _safe_nights(raw):
@@ -500,9 +631,29 @@ class Worker:
             raise Stop("manual", reason)
         if self.duplicate_check:
             self._check_duplicates(ref, raw)
-        bookings = self._book_all(job, raw, rehearse=False, token=token)
         from config import rules
         drais = any(rules.is_drais(v) for v in raw.get("venues") or [])
+        waiting = []
+        bookings = self._book_all(job, raw, rehearse=False, token=token, waiting=waiting)
+        if waiting:
+            # Some nights of this request are only waiting for their guest list
+            # to be posted. Confirm everything booked so far in ONE guest and
+            # ONE team email now; the nights booked later go out together in
+            # one "Updated:" email (Thomas, Nov 19 2026: one email per request,
+            # never one per venue/night). Nothing is submitted for the
+            # waiting nights, so this stays a pre-submit retry.
+            already = (self.ledger.get(f"{ref}|emails") or {}).get("receipts") or \
+                ((job.get("metadata") or {}).get("progress") or {}).get("emails")
+            # Only the first partial confirmation goes out early; nights booked
+            # later wait until the whole request is done (one Updated email).
+            if bookings and not drais and not already:
+                self._send_emails(job, ref, token, raw, bookings, drais=False,
+                                  pending=[(v, n) for v, n, _ in waiting])
+            first = waiting[0][2]
+            reason = first.reason if len(waiting) == 1 else (
+                f"{len(waiting)} night(s) waiting for their guest list to be posted ("
+                + "; ".join(f"{v} {n}" for v, n, _ in waiting) + "); nothing submitted for them")
+            raise Stop("retry", reason, kind="unposted")
         evidence = {"verified": True, "worker": "railway", "bookings": [b["record"] for b in bookings]}
         evidence["email_receipts"] = self._send_emails(job, ref, token, raw, bookings, drais=drais)
         code, body = self.api.update(ref, token, "complete", {"evidence": evidence}, "Booked by Railway worker")
@@ -529,7 +680,10 @@ class Worker:
                 v, n = sorted(overlap)[0]
                 raise Stop("manual", f"Duplicate suspicion: {email} already booked {v} on {n} (job {other['ref']})")
 
-    def _book_all(self, job, raw, *, rehearse, token=None):
+    def _book_all(self, job, raw, *, rehearse, token=None, waiting=None):
+        """Book every requested venue/night. With `waiting` (a list), a night
+        whose list is simply not posted yet is recorded there and the other
+        nights still book; without it the first such night stops the job."""
         from config import rules
         from rules_engine import ActionNeeded, normalize_guest_request
         try:
@@ -551,12 +705,150 @@ class Worker:
             if not rehearse and (self.ledger.get(key) or {}).get("state") == "submitting":
                 raise Stop("uncertain", f"{venue} {night}: a submit started earlier with no confirmed result; "
                            "check TAO/Speakeasy before any resubmit")
+            # A nightclub already booked this date (requested or fallback)
+            # fills that nightclub slot; a dayclub on the same date is separate.
+            if venue in rules.NIGHTCLUBS:
+                existing = self._existing_night_booking(job["ref"], night, out)
+                if existing and (existing.get("record") or {}).get("venue") in rules.NIGHTCLUBS:
+                    out.append(existing)
+                    continue
+            if any(rules.is_manual_venue(v) for v in (raw.get("venues") or [])):
+                raise Stop("manual", "LIV, XS, LIV Beach and EBC stay manual")
             if rules.is_drais(venue):
+                if rules.venue_open_on(venue, date.fromisoformat(night)) is False:
+                    continue
                 item = self._book_drais(job["ref"], venue, night, request, rehearse, token)
             else:
-                item = self._book_tao(job["ref"], venue, night, request, rehearse, token, partial=bool(out))
-            out.append(item)
+                try:
+                    item = self._book_requested_or_fallback(
+                        job["ref"], venue, night, request, rehearse, token, partial=bool(out), booked=out)
+                except Stop as stop:
+                    if (waiting is None or stop.action != "retry"
+                            or stop.extra.get("kind") != "unposted"):
+                        raise
+                    waiting.append((venue, night, stop))
+                    continue
+            if item:
+                out.append(item)
+        self._add_marquee_dayclub(job["ref"], nights, request, rehearse, token, out)
         return out
+
+    def _add_marquee_dayclub(self, ref, nights, request, rehearse, token, out):
+        """Add Marquee Dayclub on each itinerary date it is open, through 2027-03-31."""
+        from config import rules
+        if nights and all(rules.is_drais(v) for v, _ in nights):
+            return
+        dates = []
+        for _, night in nights:
+            if night not in dates:
+                dates.append(night)
+        for night in dates:
+            if night > rules.MARQUEE_DAYCLUB_PUSH_END:
+                continue
+            key = night_key(ref, "Marquee Dayclub", night)
+            saved = (self.ledger.get(key) or {}).get("record") or {}
+            if saved.get("verified") and saved.get("order_id"):
+                if not any((i.get("record") or {}).get("venue") == "Marquee Dayclub"
+                           and (i.get("record") or {}).get("date") == night for i in out):
+                    out.append({"record": saved, "meta": (self.ledger.get(key) or {}).get("meta") or {}})
+                continue
+            if any((i.get("record") or {}).get("venue") == "Marquee Dayclub"
+                   and (i.get("record") or {}).get("date") == night for i in out):
+                continue
+            try:
+                item = self._book_tao(ref, "Marquee Dayclub", night, request, rehearse, token, partial=False)
+            except Stop as stop:
+                if stop.extra.get("kind") in ("unposted", "unavailable", "access_code"):
+                    continue  # not open that day; skip
+                raise
+            out.append(item)
+
+    def _existing_night_booking(self, ref, night, booked):
+        """Reuse a verified nightclub booking already made for this job on this
+        date (requested venue or a fallback), so a later pass does not resubmit."""
+        from config import rules
+        for item in booked:
+            rec = item.get("record") or {}
+            if rec.get("verified") and rec.get("date") == night and rec.get("venue") in rules.NIGHTCLUBS and (
+                    rec.get("order_id") or rec.get("system")):
+                return item
+        prefix, suffix = f"{ref}|", f"|{night}"
+        for key, entry in (self.ledger._load() or {}).items():
+            rec = (entry or {}).get("record") or {}
+            if key.startswith(prefix) and key.endswith(suffix) and rec.get("venue") in rules.NIGHTCLUBS and rec.get("verified") and (
+                    rec.get("order_id") or rec.get("system")):
+                return {"record": rec, "meta": (entry or {}).get("meta") or {}}
+        return None
+
+    def _previous_nightclub(self, night, booked):
+        prev = (date.fromisoformat(night) - timedelta(days=1)).isoformat()
+        from config import rules
+        for item in booked:
+            rec = item.get("record") or {}
+            if rec.get("date") == prev and rec.get("venue") in rules.NIGHTCLUBS:
+                return rec["venue"]
+        return None
+
+    def _book_requested_or_fallback(self, ref, venue, night, request, rehearse, token, partial, booked):
+        """Book the requested venue first. If it is closed, needs a code, or
+        is not operating that night, fall through DEFAULT_ROUTING (OMNIA first)
+        rather than parking the night as manual. A verified-dark night skips
+        the TAO lookup and does not retry the requested venue. Lists not yet
+        posted on a night the venue does operate still retry."""
+        FALLBACK_KINDS = ("unposted", "unavailable", "access_code")
+        from config import rules
+        from rules_engine import fallback_venues_for, venue_operates_that_night
+        night_date = date.fromisoformat(night)
+        if rules.venue_open_on(venue, night_date) is False:
+            if venue not in rules.NIGHTCLUBS:
+                return None
+            stop = Stop("retry", f"{venue} {night}: does not operate that night; nothing submitted",
+                        kind="unavailable")
+        else:
+            try:
+                return self._book_tao(ref, venue, night, request, rehearse, token, partial)
+            except Stop as raised:
+                stop = raised
+        if stop.extra.get("kind") not in FALLBACK_KINDS:
+            raise stop
+        # Non-nightclubs (e.g. LAVO): keep retry for an unposted list.
+        if venue not in rules.NIGHTCLUBS:
+            if stop.extra.get("kind") == "unposted":
+                raise Stop("retry", stop.reason, kind="unposted")
+            raise stop
+        if stop.extra.get("kind") == "unposted" and venue_operates_that_night(venue, night_date):
+            raise Stop("retry", f"{venue} {night}: guest list not posted on TAO yet; nothing submitted",
+                       kind="unposted")
+        prev = self._previous_nightclub(night, booked)
+        last_stop = stop
+        for alt in fallback_venues_for(night_date, prev, skip={venue}):
+            alt_key = night_key(ref, alt, night)
+            alt_entry = self.ledger.get(alt_key) or {}
+            saved = alt_entry.get("record") or {}
+            if saved.get("verified") and saved.get("order_id"):
+                return {"record": saved, "meta": alt_entry.get("meta") or {}}
+            if not rehearse and alt_entry.get("state") == "submitting":
+                raise Stop("uncertain", f"{alt} {night}: a submit started earlier with no confirmed result; "
+                           "check TAO/Speakeasy before any resubmit")
+            try:
+                item = self._book_tao(ref, alt, night, request, rehearse, token, partial=False)
+            except Stop as alt_stop:
+                last_stop = alt_stop
+                if alt_stop.extra.get("kind") in FALLBACK_KINDS:
+                    continue
+                raise
+            item.setdefault("meta", {})["fallback"] = True
+            item["meta"]["fallback_from"] = venue
+            if item.get("record"):
+                item["record"]["fallback"] = True
+            if not rehearse and item.get("record"):
+                self._checkpoint(ref, token, alt_key,
+                                 {"state": "booked", "record": item["record"], "meta": item["meta"]})
+            return item
+        if last_stop.action == "uncertain":
+            raise last_stop
+        raise Stop("retry", f"{venue} {night}: closed, access-code or not operating; "
+                   "DEFAULT_ROUTING fallbacks also not bookable yet; nothing submitted")
 
     def _shot_path(self, ref, venue, night, suffix):
         safe = "".join(c if c.isalnum() else "-" for c in venue)
@@ -564,6 +856,7 @@ class Worker:
 
     def _checkpoint(self, ref, token, key, entry):
         self.ledger.put(key, entry)
+        stall_watchdog.mark_progress(self.evidence_dir.parent, ref)
         if token:
             self.api.update(ref, token, "progress", {"progress": {"bookings": {key.split("|", 1)[1]: entry.get("record")}}}
                             if entry.get("record") else {"progress": {"submitting": {key.split("|", 1)[1]: True}}})
@@ -574,17 +867,19 @@ class Worker:
         night_date = date.fromisoformat(night)
         posted = self.tao.posted(venue, night_date)
         if posted is False:
-            if partial or rehearse:
-                raise Stop("manual", f"{venue} {night}: no guest list posted on TAO yet (other nights already booked)")
-            raise Stop("retry", f"{venue} {night}: guest list not posted on TAO yet; nothing submitted")
+            raise Stop("retry", f"{venue} {night}: guest list not posted on TAO yet; nothing submitted", kind="unposted")
         try:
             listing = self.tao.listing(venue, night_date)
         except tao_portal.TaoBlocked as exc:
             raise Stop("manual", f"{venue} {night}: {exc}; nothing submitted (waited for Cloudflare to clear)")
+        if listing and listing.get("access_code_required"):
+            raise Stop("retry", f"{venue} {night}: listing requires an access code; nothing submitted",
+                       kind="access_code")
         if not listing:
-            raise Stop("manual", f"{venue} {night}: no live free guest list (closed, sold out or not free); nothing submitted")
+            raise Stop("manual", f"{venue} {night}: no live free guest list (closed, sold out or not free); nothing submitted",
+                       kind="unavailable")
         if listing.get("listing_type") != "Passes" or listing.get("price", 0) != 0:
-            raise Stop("manual", f"{venue} {night}: listing is not a free guest-list pass")
+            raise Stop("manual", f"{venue} {night}: listing is not a free guest-list pass", kind="unavailable")
         party = {"male_count": int(request["male_count"]), "female_count": int(request["female_count"])}
         shot = self._shot_path(ref, venue, night, "rehearsal" if rehearse else "confirmation")
 
@@ -607,7 +902,9 @@ class Worker:
         if result.get("assisted_job"):
             raise Stop("manual", f"{venue} {night}: assisted mode is on; worker never hands off. Nothing submitted")
         if not result.get("verified") or not result.get("confirmation_id"):
-            raise Stop("manual", f"{venue} {night}: not submitted — {result.get('reason', 'could not be verified')}")
+            reason = result.get("reason", "could not be verified")
+            kind = "access_code" if "access code" in reason.lower() else None
+            raise Stop("manual", f"{venue} {night}: not submitted — {reason}", **({"kind": kind} if kind else {}))
         record = {"verified": True, "venue": venue, "date": night, "order_id": result["confirmation_id"], "party": party}
         meta = {"event": result.get("event") or listing.get("event"), "event_time": listing.get("event_time"),
                 "confirmation_url": result.get("confirmation_url"), "screenshot": result.get("screenshot"),
@@ -628,18 +925,19 @@ class Worker:
         self._checkpoint(ref, token, key, {"state": "email_only", "record": record, "meta": {}})
         return {"record": record, "meta": {}}
 
-    def _send_emails(self, job, ref, token, raw, bookings, drais=False):
+    def _send_emails(self, job, ref, token, raw, bookings, drais=False, pending=None):
         import worker_emails
         from rules_engine import normalize_guest_request
         request = normalize_guest_request(raw)
         rows = [{**b["record"], **(b.get("meta") or {})} for b in bookings]
+        pending = list(pending or [])
 
         def build(update=False):
             if drais:
                 return (("guest", worker_emails.drais_guest_email(request, rows)),
                         ("team", worker_emails.drais_team_email(ref, raw, request, rows)))
-            return (("guest", worker_emails.guest_email(request, rows, update=update)),
-                    ("team", worker_emails.team_email(ref, raw, request, rows, update=update)))
+            return (("guest", worker_emails.guest_email(request, rows, update=update, pending=pending)),
+                    ("team", worker_emails.team_email(ref, raw, request, rows, update=update, pending=pending)))
 
         order_ids = sorted({str(r["order_id"]) for r in rows if r.get("order_id")})
         entry = self.ledger.get(f"{ref}|emails") or {}
@@ -806,6 +1104,129 @@ def probe_speakeasy(listing_date=None):
     return report
 
 
+
+class JobTimeExpired(Exception):
+    """The job's hard time cap elapsed; the page or browser was unstuck."""
+
+
+class JobDeadline:
+    """Wall-clock cap that interrupts a hung Playwright call by running on_expire.
+
+    Playwright's own timeouts sometimes never fire (the 4 PM Nov 12 goto hang).
+    Closing or restarting Chrome from this timer unblocks the main thread."""
+
+    def __init__(self, seconds, *, on_expire=None, clock=time.time):
+        self.seconds = seconds
+        self.deadline_at = clock() + seconds
+        self.clock = clock
+        self.on_expire = on_expire
+        self._timer = None
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._fired = False
+
+    def start(self):
+        remaining = self.deadline_at - self.clock()
+        if remaining <= 0:
+            self._fire()
+            return self
+        self._timer = threading.Timer(remaining, self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+        return self
+
+    def _fire(self):
+        with self._lock:
+            if self._cancelled or self._fired:
+                return
+            self._fired = True
+        log.warning("Job time cap (%ss) elapsed", self.seconds)
+        if self.on_expire:
+            try:
+                self.on_expire()
+            except Exception:  # noqa: BLE001
+                log.exception("job time cap unstick failed")
+
+    def expired(self):
+        return self._fired or self.clock() >= self.deadline_at
+
+    def check(self):
+        if self.expired():
+            raise JobTimeExpired(f"Job exceeded the {self.seconds:.0f}s time cap")
+
+    def cancel(self):
+        with self._lock:
+            self._cancelled = True
+        if self._timer is not None:
+            self._timer.cancel()
+
+
+def run_with_deadline(fn, seconds, *, on_expire=None, clock=time.time):
+    """Run fn; if it overruns `seconds`, call on_expire to unstick the browser."""
+    if seconds is None or seconds <= 0:
+        return fn()
+    deadline = JobDeadline(seconds, on_expire=on_expire, clock=clock).start()
+    try:
+        deadline.check()
+        return fn()
+    finally:
+        deadline.cancel()
+
+
+def browser_lost(exc):
+    """True when the failure is a dead/unreachable booking Chrome, not a booking rule."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(s in text for s in (
+        "econnrefused",
+        "connect_over_cdp",
+        "retrieving websocket url",
+        "browser has been closed",
+        "browser closed",
+        "target page, context or browser has been closed",
+        "connection refused",
+    ))
+
+
+def retryable_browser_error(exc):
+    """True for a pre-submit Playwright timeout, navigation failure, or dead Chrome.
+
+    These are safe to retry only when nothing has been submitted yet. The
+    caller must still check the ledger before retrying."""
+    if isinstance(exc, JobTimeExpired) or browser_lost(exc):
+        return True
+    name = type(exc).__name__.lower()
+    text = f"{name}: {exc}".lower()
+    if "timeouterror" in name:
+        return True
+    return any(s in text for s in (
+        "ms exceeded",
+        "page.goto",
+        "page.reload",
+        "wait_for_load_state",
+        "navigation failed",
+        "navigation timeout",
+        "net::err_",
+        "err_connection",
+        "err_aborted",
+        "err_timed_out",
+        "frame was detached",
+        "execution context was destroyed",
+        "target closed",
+        "connection closed",
+        "job exceeded the",
+    ))
+
+
+def ensure_browser():
+    """Bring the plain Chrome back if it died between pickups. No-op when
+    the worker is not using AMY_BROWSER_LAUNCH=plain."""
+    try:
+        import browser_host
+        browser_host.ensure()
+    except Exception:  # noqa: BLE001
+        log.exception("Could not ensure the booking browser is running")
+
+
 # --- Entry point -------------------------------------------------------------
 
 def check_config(mode):
@@ -866,7 +1287,8 @@ def main(argv=None):
     idle = max(int(os.environ.get("AMY_WORKER_IDLE_SECONDS", "120")), 30)
     log.info("AMY booking worker started in %s mode", mode)
     if mode == "live":
-        return live_loop(worker, work_dir, loop=args.loop)
+        return live_loop(worker, work_dir, loop=args.loop,
+                         monitor=build_monitor(worker, work_dir) if args.loop else None)
     while True:
         try:
             result = worker.run_once()

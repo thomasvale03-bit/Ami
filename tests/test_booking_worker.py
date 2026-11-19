@@ -63,14 +63,17 @@ class InProcessApi:
 
 
 class FakeTao:
-    def __init__(self, posted=True, listing=True, submit=None):
+    def __init__(self, posted=True, listing=True, submit=None, dayclubs=False):
         self.posted_value, self.listing_value, self.submit_fn = posted, listing, submit
+        self.dayclubs = dayclubs
         self.submits = []
 
     def reset(self):
         pass
 
     def posted(self, venue, night):
+        if venue == "Marquee Dayclub":
+            return bool(self.dayclubs)
         return self.posted_value
 
     def listing(self, venue, night):
@@ -103,7 +106,7 @@ def make(tmp_path, tao=None, drais=None, **kw):
 
 
 def test_full_cycle_books_emails_and_completes(tmp_path):
-    s, api, worker = make(tmp_path)
+    s, api, worker = make(tmp_path, tao=FakeTao(dayclubs=True))
     s.enqueue('a', raw(venues=['Hakkasan Nightclub', 'Marquee Dayclub']), NOW)
     result = worker.run_once()
     assert result['status'] == 'done', result
@@ -190,7 +193,7 @@ def test_duplicate_send_response_is_manual_not_fabricated(tmp_path):
 
 
 @pytest.mark.parametrize('tao,expected,state', [
-    (FakeTao(listing=False), 'manual', 'manual'),
+    (FakeTao(listing=False), 'retry', 'retry'),
     (FakeTao(listing=tao_portal.TaoBlocked('Cloudflare did not clear')), 'manual', 'manual'),
     (FakeTao(posted=False), 'retry', 'retry'),
     (FakeTao(submit=lambda b: (_ for _ in ()).throw(tao_portal.SubmissionUncertain('spinner'))), 'uncertain',
@@ -207,13 +210,25 @@ def test_stops_are_terminal_with_reasons(tmp_path, tao, expected, state):
 
 
 def test_duplicate_suspicion_goes_manual(tmp_path):
-    s, api, worker = make(tmp_path)
+    s, api, worker = make(tmp_path, duplicate_check=True)
     s.enqueue('first', raw(), NOW - 5)
     assert worker.run_once()['status'] == 'done'
     s.enqueue('again', raw(source_message_id='again'), NOW)
     result = worker.run_once()
     assert result['status'] == 'manual' and 'Duplicate suspicion' in result['reason']
     assert len(worker.tao.submits) == 1
+
+
+def test_duplicate_check_off_by_default_books_second_signup(tmp_path):
+    s, api, worker = make(tmp_path)
+    assert worker.duplicate_check is False
+    s.enqueue('first', raw(), NOW - 5)
+    assert worker.run_once()['status'] == 'done'
+    s.enqueue('again', raw(source_message_id='again'), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'done', result
+    assert len(worker.tao.submits) == 2
+    assert s.get('again')['state'] == 'done'
 
 
 class FakeDrais:
@@ -229,7 +244,7 @@ class FakeDrais:
 def test_drais_skips_speakeasy_and_sends_guest_and_team(tmp_path):
     drais = FakeDrais()
     s, api, worker = make(tmp_path, drais=drais)
-    s.enqueue('d', raw(venues=["Drai's"]), NOW)
+    s.enqueue('d', raw(venues=["Drai's"], start_date='2026-11-26', end_date='2026-11-26'), NOW)
     assert worker.run_once()['status'] == 'done'
     assert drais.calls == []  # Thomas, Nov 10 2026: never add on Speakeasy
     assert [p['to'] for p in api.sent] == ['guest@example.invalid', 'team@playmakerentertainment.com']
@@ -242,7 +257,7 @@ def test_drais_skips_speakeasy_and_sends_guest_and_team(tmp_path):
     assert ev['bookings'][0]['system'] == 'email_only' and 'entry_id' not in ev['bookings'][0]
     assert {r['kind'] for r in ev['email_receipts']} == {'guest', 'team'}
     assert worker.tao.submits == []  # never TAO for Drai's
-    key = "d|Drai's|2026-11-25"
+    key = "d|Drai's|2026-11-26"
     assert worker.ledger.get(key)['state'] == 'email_only'
 
 
@@ -251,7 +266,7 @@ def test_drais_email_only_ignores_speakeasy_flags(tmp_path, monkeypatch):
     monkeypatch.setenv('DRAIS_SPEAKEASY_DAY_OFFSET', 'tomorrow')
     drais = FakeDrais()
     s, api, worker = make(tmp_path, drais=drais)
-    s.enqueue('d', raw(venues=["Drai's"]), NOW)
+    s.enqueue('d', raw(venues=["Drai's"], start_date='2026-11-26', end_date='2026-11-26'), NOW)
     assert worker.run_once()['status'] == 'done'
     assert drais.calls == []
     ev = s.get('d')['metadata']['evidence']
@@ -299,7 +314,7 @@ def test_dry_run_never_claims_or_sends(tmp_path):
 
 
 def test_exceptions_endpoint_lists_review_work(tmp_path):
-    s, api, worker = make(tmp_path, tao=FakeTao(listing=False))
+    s, api, worker = make(tmp_path, tao=FakeTao(listing=tao_portal.TaoBlocked('Cloudflare did not clear')))
     s.enqueue('a', raw(), NOW)
     s.enqueue('held', raw(start_date='2026-11-01', end_date='2026-11-01'), NOW)
     worker.run_once()
@@ -456,3 +471,298 @@ def test_run_now_file_runs_once_and_keeps_slot(tmp_path):
     with pytest.raises(KeyboardInterrupt):
         bw.live_loop(w, tmp_path, step=5, clock=clock, sleep=lambda s: None)
     assert w.calls == 1 and state.last() is None and not state.run_now_file.exists()
+
+def test_browser_lost_detects_cdp_refused():
+    assert bw.browser_lost(RuntimeError(
+        'BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9335'))
+    assert bw.browser_lost(ConnectionError('Connection refused'))
+    assert not bw.browser_lost(RuntimeError('list is closed'))
+    assert not bw.browser_lost(ValueError('bad date'))
+
+
+def test_ensure_is_noop_unless_plain_launch(monkeypatch):
+    import browser_host
+    monkeypatch.delenv('AMY_BROWSER_LAUNCH', raising=False)
+    monkeypatch.delenv('AMY_BROWSER_CDP_URL', raising=False)
+    assert browser_host.ensure() is None
+    assert browser_host.start() is None
+    assert browser_host.restart() is None
+
+
+def test_ensure_reuses_healthy_chrome_and_restarts_when_down(monkeypatch):
+    import browser_host
+    monkeypatch.setenv('AMY_BROWSER_LAUNCH', 'plain')
+    monkeypatch.setenv('AMY_BROWSER_CDP_URL', 'http://127.0.0.1:9335')
+    monkeypatch.setattr(browser_host, 'healthy', lambda url=None, timeout=2: True)
+    assert browser_host.ensure() == 'http://127.0.0.1:9335'
+    calls = []
+    monkeypatch.setattr(browser_host, 'healthy', lambda url=None, timeout=2: False)
+    monkeypatch.setattr(browser_host, 'restart', lambda: calls.append('restart') or 'http://127.0.0.1:9335')
+    assert browser_host.ensure() == 'http://127.0.0.1:9335' and calls == ['restart']
+
+
+def test_cdp_refused_restarts_browser_and_retries_job(tmp_path, monkeypatch):
+    calls = {'listings': 0, 'restarts': 0}
+
+    class Flaky(FakeTao):
+        def listing(self, venue, night):
+            calls['listings'] += 1
+            if calls['listings'] == 1:
+                raise RuntimeError(
+                    'BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9335\n'
+                    'Call log:\n  - <ws preparing> retrieving websocket url from http://127.0.0.1:9335')
+            return super().listing(venue, night)
+
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: calls.__setitem__('restarts', calls['restarts'] + 1))
+    s, api, worker = make(tmp_path, tao=Flaky())
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'done', result
+    assert calls['restarts'] == 1 and calls['listings'] == 2
+    assert s.get('a')['state'] == 'done'
+    assert api.updates[-1][1] == 'complete'
+
+
+def test_cdp_error_after_click_is_uncertain_not_retried(tmp_path, monkeypatch):
+    def boom(before_submit):
+        before_submit()
+        raise RuntimeError('BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9335')
+
+    restarts = []
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: restarts.append(1))
+    s, api, worker = make(tmp_path, tao=FakeTao(submit=boom))
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'uncertain', result
+    assert restarts == []
+    assert s.get('a')['state'] == 'submission_uncertain'
+
+
+def test_cdp_retry_goes_manual_if_browser_stays_down(tmp_path, monkeypatch):
+    class Down(FakeTao):
+        def listing(self, venue, night):
+            raise RuntimeError('BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9335')
+
+    restarts = []
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: restarts.append(1))
+    s, api, worker = make(tmp_path, tao=Down())
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    # One in-process retry, then leave the job queued for the next pickup
+    # rather than parking it as manual (the browser may be back by then).
+    assert result['status'] == 'retry', result
+    assert restarts == [1]
+    assert 'left queued for the next pickup' in result['reason']
+    assert s.get('a')['state'] == 'retry'
+
+
+def _timeout():
+    return type('TimeoutError', (Exception,), {})('Timeout 15000ms exceeded.')
+
+
+def test_retryable_browser_error_covers_timeouts_and_navigation():
+    assert bw.retryable_browser_error(_timeout())
+    assert bw.retryable_browser_error(RuntimeError(
+        'Page.goto: net::ERR_CONNECTION_TIMED_OUT at https://tickets.taogroup.com/promoter/x'))
+    assert bw.retryable_browser_error(bw.JobTimeExpired('Job exceeded the 360s time cap'))
+    assert bw.retryable_browser_error(RuntimeError(
+        'BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9335'))
+    assert not bw.retryable_browser_error(RuntimeError('list is closed'))
+    assert not bw.retryable_browser_error(ValueError('bad date'))
+
+
+def test_timeout_before_submit_restarts_and_retries_job(tmp_path, monkeypatch):
+    calls = {'listings': 0, 'restarts': 0}
+
+    class Flaky(FakeTao):
+        def listing(self, venue, night):
+            calls['listings'] += 1
+            if calls['listings'] == 1:
+                raise _timeout()
+            return super().listing(venue, night)
+
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: calls.__setitem__('restarts', calls['restarts'] + 1))
+    s, api, worker = make(tmp_path, tao=Flaky())
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'done', result
+    assert calls['restarts'] == 1 and calls['listings'] == 2
+    assert s.get('a')['state'] == 'done'
+
+
+def test_timeout_before_submit_leaves_queued_if_retry_fails(tmp_path, monkeypatch):
+    class Down(FakeTao):
+        def listing(self, venue, night):
+            raise _timeout()
+
+    restarts = []
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: restarts.append(1))
+    s, api, worker = make(tmp_path, tao=Down())
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'retry', result
+    assert restarts == [1]
+    assert 'left queued for the next pickup' in result['reason']
+    assert s.get('a')['state'] == 'retry'
+
+
+def test_navigation_error_before_submit_is_retryable(tmp_path, monkeypatch):
+    class Down(FakeTao):
+        def listing(self, venue, night):
+            raise RuntimeError('Page.goto: net::ERR_CONNECTION_RESET at https://tickets.taogroup.com/promoter/x')
+
+    restarts = []
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: restarts.append(1))
+    s, api, worker = make(tmp_path, tao=Down())
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'retry', result
+    assert restarts == [1]
+    assert s.get('a')['state'] == 'retry'
+
+
+def test_timeout_after_click_is_uncertain_not_retried(tmp_path, monkeypatch):
+    def boom(before_submit):
+        before_submit()
+        raise _timeout()
+
+    restarts = []
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: restarts.append(1))
+    s, api, worker = make(tmp_path, tao=FakeTao(submit=boom))
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'uncertain', result
+    assert restarts == []
+    assert s.get('a')['state'] == 'submission_uncertain'
+
+
+def test_job_time_cap_unsticks_hung_listing_and_retries(tmp_path, monkeypatch):
+    import threading
+    released = threading.Event()
+    calls = {'listings': 0, 'restarts': 0}
+
+    class Hung(FakeTao):
+        def listing(self, venue, night):
+            calls['listings'] += 1
+            if calls['listings'] == 1:
+                if not released.wait(timeout=2):
+                    raise AssertionError('job cap did not unstick the hung listing')
+                raise _timeout()
+            return super().listing(venue, night)
+
+    import browser_host
+
+    def restart():
+        calls['restarts'] += 1
+        released.set()
+
+    monkeypatch.setattr(browser_host, 'restart', restart)
+    s, api, worker = make(tmp_path, tao=Hung())
+    worker.job_time_cap = 0.05
+    # Use wall-clock time so the cap timer can fire; the frozen NOW clock
+    # would never advance toward the deadline on its own.
+    worker.now = __import__('time').time
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'done', result
+    assert calls['restarts'] >= 1 and calls['listings'] == 2
+    assert s.get('a')['state'] == 'done'
+
+
+def test_job_time_cap_after_submit_is_uncertain_not_retried(tmp_path, monkeypatch):
+    def boom(before_submit):
+        before_submit()
+        raise bw.JobTimeExpired('Job exceeded the 360s time cap')
+
+    restarts = []
+    import browser_host
+    monkeypatch.setattr(browser_host, 'restart', lambda: restarts.append(1))
+    s, api, worker = make(tmp_path, tao=FakeTao(submit=boom))
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'uncertain', result
+    assert restarts == []
+    assert s.get('a')['state'] == 'submission_uncertain'
+
+
+def test_run_with_deadline_cancels_timer_and_does_not_fire_after_success():
+    fired = []
+    result = bw.run_with_deadline(lambda: 'ok', 0.2, on_expire=lambda: fired.append(1))
+    assert result == 'ok'
+    __import__('time').sleep(0.3)
+    assert fired == []
+
+
+def test_run_with_deadline_fires_on_expire_when_overrun():
+    import threading
+    released = threading.Event()
+
+    def hung():
+        if not released.wait(timeout=2):
+            raise AssertionError('deadline did not fire')
+        raise bw.JobTimeExpired('Job exceeded the 0s time cap')
+
+    def expire():
+        released.set()
+
+    try:
+        bw.run_with_deadline(hung, 0.05, on_expire=expire)
+        assert False, 'expected JobTimeExpired'
+    except bw.JobTimeExpired:
+        pass
+
+
+def test_duplicate_guest_email_completes_with_prior_receipt(tmp_path):
+    """Nov 16 2026: an already-sent guest email that listed the same orders
+    completes with the earlier email's id instead of stopping at manual."""
+    s, api, worker = make(tmp_path)
+    s.enqueue('a', raw(), NOW)
+    api.send_responses = [(200, {'result': {'sent': False, 'duplicate': True,
+                                            'prior': {'id': 'gmail:abc', 'source': 'gmail_sent', 'order_ids': ['ORDER-1']}}})]
+    assert worker.run_once()['status'] == 'done'
+    receipts = {r['kind']: r['id'] for r in s.get('a')['metadata']['evidence']['email_receipts']}
+    assert receipts['guest'] == 'gmail:abc' and receipts['team'].startswith('MSG-')
+    assert all(p.get('report_prior') for p in api.sent) and len(api.sent) == 2
+
+
+def test_second_order_same_night_sends_updated_guest_and_team(tmp_path):
+    s, api, worker = make(tmp_path)
+    s.enqueue('a', raw(), NOW)
+    other = {'id': 'MID-0', 'source': 'branded_log', 'order_ids': ['OTHER-ORDER']}
+    api.send_responses = [(200, {'result': {'sent': False, 'duplicate': True, 'prior': other}}),
+                          (200, {'result': {'sent': True, 'id': 'UPD-G'}}),
+                          (200, {'result': {'sent': False, 'duplicate': True, 'prior': other}}),
+                          (200, {'result': {'sent': True, 'id': 'UPD-T'}})]
+    assert worker.run_once()['status'] == 'done'
+    assert api.sent[1]['subject'].startswith('Updated: ') and api.sent[3]['subject'].startswith('Updated: Signed up:')
+    assert {r['kind']: r['id'] for r in s.get('a')['metadata']['evidence']['email_receipts']} == {'guest': 'UPD-G', 'team': 'UPD-T'}
+
+
+def test_added_venue_after_confirmation_sends_updated(tmp_path):
+    import time
+    s, api, worker = make(tmp_path, tao=FakeTao(dayclubs=True))
+    s.enqueue('a', raw(venues=['Hakkasan Nightclub', 'Marquee Dayclub']), NOW)
+    old = {'verified': True, 'venue': 'Hakkasan Nightclub', 'date': '2026-11-25', 'order_id': 'OLD-1',
+           'party': {'male_count': 1, 'female_count': 2}}
+    worker.ledger.put(bw.night_key('a', 'Hakkasan Nightclub', '2026-11-25'), {'state': 'booked', 'record': old, 'meta': {}})
+    time.sleep(0.01)
+    worker.ledger.put('a|emails', {'receipts': {'guest': 'G0', 'team': 'T0'}})
+    time.sleep(0.01)
+    assert worker.run_once()['status'] == 'done'
+    assert [p['subject'].split(':')[0] for p in api.sent] == ['Updated', 'Updated']
+    assert 'OLD-1' in api.sent[0]['text']
+
+
+def test_duplicate_without_prior_id_stays_manual(tmp_path):
+    s, api, worker = make(tmp_path)
+    s.enqueue('a', raw(), NOW)
+    nothing = (200, {'result': {'sent': False, 'duplicate': True, 'prior': None}})
+    api.send_responses = [nothing, nothing]
+    assert worker.run_once()['status'] == 'manual'

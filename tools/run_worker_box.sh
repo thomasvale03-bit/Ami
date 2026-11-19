@@ -14,12 +14,17 @@
 #   AMY_WORKER_MODE=dry-run         (live also needs AMY_WORKER_LIVE_CONFIRM=yes)
 #   AMY_WORKER_DRAIS=true
 #   SPEAKEASY_EMAIL=... SPEAKEASY_PASSWORD=...
+# Monitor alerts (in-worker sweep/audit, worker_monitor.py): /workspace/amy-worker/alert.env
+#   (mode 600) with AMYI_WEBHOOK_URL=... and AMYI_WEBHOOK_AUTH=<full Authorization value>.
+#   Sourced at start; the monitor also re-reads it before each alert, so no restart
+#   is needed. `alert-env` writes it from those two env vars without printing them.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 RUN=/workspace/amy-worker
 PIDFILE="$RUN/worker.pid"
 LOG="$RUN/worker.log"
 DATA="${AMY_WORKER_DIR:-$RUN/data}"
+ALERT_ENV="${AMY_ALERT_ENV:-$RUN/alert.env}"
 mkdir -p "$RUN" && chmod 700 "$RUN"
 
 running() { [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
@@ -29,6 +34,8 @@ start() {
   (
     set -a
     [[ -f /home/box/.config/amy-worker.env ]] && . /home/box/.config/amy-worker.env
+    [[ -f "$ALERT_ENV" ]] && . "$ALERT_ENV"
+    AMY_ALERT_ENV="$ALERT_ENV"
     AMY_QUEUE_API_TOKEN="$(cat /home/box/agent-data/amy-queue-client/api-token)"
     [[ -f /home/box/.config/amy_branded_send_token ]] && BRANDED_SEND_TOKEN="$(cat /home/box/.config/amy_branded_send_token)"
     AMY_BROWSER_LAUNCH=plain                       # plain Chrome + CDP (passes Cloudflare)
@@ -36,11 +43,14 @@ start() {
     CHROMIUM_PATH="${CHROMIUM_PATH:-/usr/bin/google-chrome}"
     AMY_WORKER_DIR="${AMY_WORKER_DIR:-$RUN/data}"
     AMY_WORKER_BOX_LOCK=true                       # share /workspace/.tao_browser.lock with AMYI
+    AMY_WORKER_DUPLICATE_CHECK="${AMY_WORKER_DUPLICATE_CHECK:-false}"  # book same-email sign-ups; ledger still blocks resubmits
     set +a
     unset DISPLAY                                  # private Xvfb; never draws on a desktop
     cd "$REPO"
-    # Supervisor: restart the worker if it exits, at most once a minute.
-    nohup bash -c 'while true; do python3 booking_worker.py --loop; echo "worker exited $? at $(date)"; sleep 60; done' \
+    # Supervisor: stall watchdog runs the worker and restarts it if a pickup
+    # writes no progress for AMY_WORKER_STALL_SECONDS (default 20 min). If the
+    # watchdog itself exits, bash restarts it at most once a minute.
+    nohup bash -c 'while true; do python3 stall_watchdog.py --supervise; echo "worker exited $? at $(date)"; sleep 60; done' \
       >> "$LOG" 2>&1 &
     echo $! > "$PIDFILE"
   )
@@ -52,6 +62,13 @@ stop() {
     pkill -P "$(cat "$PIDFILE")" 2>/dev/null || true
     kill "$(cat "$PIDFILE")" 2>/dev/null || true
   fi
+  # The worker runs in its own session (start_new_session), so killing the bash
+  # loop's children does not reach it: stop any leftover supervisor/worker too,
+  # or an orphaned old worker keeps running pickups next to the new one.
+  pkill -f "stall_watchdog.py --supervise" 2>/dev/null || true
+  pkill -f "booking_worker.py --loop" 2>/dev/null || true
+  sleep 1
+  pkill -9 -f "booking_worker.py --loop" 2>/dev/null || true
   pkill -f "user-data-dir=${AMY_BROWSER_PROFILE:-/workspace/worker-profile}" 2>/dev/null || true
   rm -f "$PIDFILE"; echo stopped
 }
@@ -77,12 +94,22 @@ run_now() {
   echo "worker pid $(cat "$PIDFILE"): off-schedule pickup of the whole queue requested (starts within 5 s)"
 }
 
+alert_env() {
+  # Write AMYI_WEBHOOK_URL / AMYI_WEBHOOK_AUTH from this shell's env; never echoes values.
+  if [[ -z "${AMYI_WEBHOOK_URL:-}" ]]; then echo "AMYI_WEBHOOK_URL not set in this shell" >&2; exit 1; fi
+  umask 077
+  { printf 'AMYI_WEBHOOK_URL=%q\n' "$AMYI_WEBHOOK_URL"; printf 'AMYI_WEBHOOK_AUTH=%q\n' "${AMYI_WEBHOOK_AUTH:-}"; } > "$ALERT_ENV.tmp"
+  chmod 600 "$ALERT_ENV.tmp" && mv "$ALERT_ENV.tmp" "$ALERT_ENV"
+  echo "wrote $ALERT_ENV (mode 600; values not shown)"
+}
+
 case "${1:-}" in
   start) start ;;
   kick) kick ;;
   run-now) run_now ;;
   ensure) running && echo "running (pid $(cat "$PIDFILE"))" || start ;;
   stop) stop ;;
+  alert-env) alert_env ;;
   status) running && echo "running (pid $(cat "$PIDFILE"))" || echo "not running"; tail -n 5 "$LOG" 2>/dev/null || true ;;
-  *) echo "usage: $0 start|stop|status|ensure|kick|run-now" >&2; exit 2 ;;
+  *) echo "usage: $0 start|stop|status|ensure|kick|run-now|alert-env" >&2; exit 2 ;;
 esac

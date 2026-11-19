@@ -118,6 +118,65 @@ def default_route_for_date(date_obj):
     return rules.DEFAULT_ROUTING[date_obj.strftime("%A")]
 
 
+def scheduled_venues_for(date_obj):
+    """Primary and named fallbacks from DEFAULT_ROUTING for this weekday."""
+    route = default_route_for_date(date_obj)
+    fb = route["fallback"] if isinstance(route["fallback"], list) else [route["fallback"]]
+    return [v for v in [route["primary"], *fb] if v and v != "best_available"]
+
+
+def venue_operates_that_night(venue, date_obj):
+    """True when we should wait for this venue's own list (retry) rather than
+    treat the night as dark and fall through DEFAULT_ROUTING.
+
+    A verified VENUE_SCHEDULE is authoritative: a night the venue does not
+    operate is never retried. A tbd or unknown venue is never treated as
+    closed; those still use weekday routing (and Fri/Sat main-club) heuristics.
+    JEWEL after Nov 21, 2026 does not operate."""
+    scheduled = rules.venue_open_on(venue, date_obj)
+    if scheduled is False:
+        return False
+    if scheduled is True:
+        return True
+    if venue == "JEWEL Nightclub" and not rules.jewel_allowed_on(date_obj):
+        return False
+    if venue in scheduled_venues_for(date_obj):
+        return True
+    if date_obj.weekday() in (4, 5) and venue in rules.NIGHTCLUBS:
+        return True
+    return False
+
+
+def fallback_venues_for(date_obj, previous_night_venue=None, skip=None):
+    """Ordered fallbacks when the requested nightclub cannot be booked:
+    OMNIA first (top priority), then that weekday's DEFAULT_ROUTING, then
+    JEWEL (through Nov 21, 2026), then the extra backup, then Hakkasan or
+    Marquee. Never the same club two nights running."""
+    route = default_route_for_date(date_obj)
+    fb = route["fallback"] if isinstance(route["fallback"], list) else [route["fallback"]]
+    day = date_obj.strftime("%A")
+    ordered = ["OMNIA Nightclub", route["primary"], *fb]
+    if rules.jewel_allowed_on(date_obj):
+        ordered.append("JEWEL Nightclub")
+    if day not in rules.NO_EXTRA_BACKUP_DAYS:
+        ordered += list(rules.EXTRA_BACKUP_NIGHTCLUBS)
+    ordered += ["Hakkasan Nightclub", "Marquee Nightclub"]
+    skip = set(skip or ())
+    seen, result = set(), []
+    for v in ordered:
+        if v == "best_available" or v in rules.PAUSED_VENUES or v in skip or v in seen:
+            continue
+        if v == "JEWEL Nightclub" and not rules.jewel_allowed_on(date_obj):
+            continue
+        if rules.venue_open_on(v, date_obj) is False:
+            continue
+        seen.add(v)
+        result.append(v)
+    if previous_night_venue in result and len(result) > 1:
+        result = [v for v in result if v != previous_night_venue] + [previous_night_venue]
+    return result
+
+
 def omnia_closed_for_same_day(date_obj, today):
     """OMNIA's Friday and Saturday guest lists close, so a signup made on that
     same day can't be honored. Requested in advance, OMNIA stays open. Only

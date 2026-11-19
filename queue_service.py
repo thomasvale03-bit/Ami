@@ -95,7 +95,9 @@ def source_policy(ref, raw, today):
         if int(raw.get('male_count') or 0) + int(raw.get('female_count') or 0) < 1:
             return 'Party size missing; manual review required'
         venues = [rules.normalize_venue_name(v) for v in raw.get('venues', [])]
-        if not venues or any(not rules.is_known_vegas_venue(v) for v in venues):
+        if any(rules.is_manual_venue(v) for v in venues):
+            return 'LIV, XS, LIV Beach and EBC stay manual'
+        if not venues or any(not rules.is_known_vegas_venue(v) and not rules.is_manual_venue(v) for v in venues):
             return 'Unspecified/unsupported venue; reviewed routing required'
         drais = [v for v in venues if rules.is_drais(v)]
         if drais and len(venues) != 1:
@@ -171,7 +173,9 @@ def validate_completion(raw, metadata, require_team_receipt=True):
 
     The queue cannot observe a click or independently prove a receipt. It checks
     consistency and saves evidence; it NEVER claims these checks performed booking.
-    No fallback mapping is changed here. Unclear routing remains manual.
+    A record marked fallback=True may cover a requested nightclub date
+    when that venue was dark and DEFAULT_ROUTING booked a different club.
+    Unclear routing remains manual.
     """
     from config import rules
     evidence = metadata.get('evidence')
@@ -416,6 +420,11 @@ def handle(method, url, headers, payload, *, s=None, now=None):
             if payload.get('alert', True) is not False:
                 _dispatch_alert(s, ref, now)
             return 200, row
+        if method == 'POST' and path.startswith('/queue/stall-requeue/'):
+            if not isinstance(payload, dict):
+                raise Conflict('JSON object required')
+            ref = unquote(path[len('/queue/stall-requeue/'):])
+            return 200, s.stall_requeue(ref, now, str(payload.get('reason', ''))[:1000])
         if method == 'POST' and path.startswith('/queue/jobs/'):
             if not isinstance(payload, dict):
                 raise Conflict('JSON object required')

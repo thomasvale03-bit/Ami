@@ -15,25 +15,58 @@ CHROMIUM_PATH                  binary (default: google-chrome / chromium on PATH
 AMY_BROWSER_PROXY              optional http(s) proxy WITHOUT credentials
                                (Chrome flags cannot carry proxy auth)
 No DISPLAY -> starts a private Xvfb so the window never appears on a desktop.
+
+The booking Chrome also gets its own D-Bus session and XDG runtime, not the
+box desktop's. Sharing the desktop session bus made Chrome abort with
+"D-Bus connection was disconnected" when that session refreshed (seen after
+the Nov 9 12:20 PM run at 2:24 PM MST).
+
+Chrome can still crash between pickups for other reasons (it did after the
+Nov 9 4 AM and 9 AM runs). ensure() / restart() bring it back; the worker
+retries a job once instead of sending it to manual on the first connection
+refused.
 """
 import atexit
+import logging
 import os
 import shutil
 import subprocess
 import time
 import urllib.request
 
+log = logging.getLogger(__name__)
+
 FORBIDDEN_PROFILES = ("/home/box/chrome-profile",)  # computerUse's real browser
+
+_procs = []
+_atexit_registered = False
+_log_handle = None
+
+
+def port():
+    return int(os.environ.get("AMY_BROWSER_CDP_PORT", "9335"))
+
+
+def cdp_url():
+    return os.environ.get("AMY_BROWSER_CDP_URL", "").strip() or f"http://127.0.0.1:{port()}"
+
+
+def healthy(url=None, timeout=2):
+    """True when the worker Chrome is answering on its debugging port."""
+    url = url or cdp_url()
+    try:
+        with urllib.request.urlopen(url + "/json/version", timeout=timeout):
+            return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _wait(url, seconds=30):
     deadline = time.time() + seconds
     while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(url + "/json/version", timeout=2):
-                return True
-        except Exception:  # noqa: BLE001
-            time.sleep(0.5)
+        if healthy(url, timeout=2):
+            return True
+        time.sleep(0.5)
     return False
 
 
@@ -44,9 +77,133 @@ def _free_display():
     raise RuntimeError("no free X display")
 
 
-def start():
+def _log_file():
+    global _log_handle
+    if _log_handle and not _log_handle.closed:
+        return _log_handle
+    path = os.environ.get("AMY_BROWSER_LOG", "").strip()
+    if not path:
+        work = os.environ.get("AMY_WORKER_DIR", "").strip()
+        path = os.path.join(os.path.dirname(work), "chrome.log") if work else "/tmp/amy-worker-chrome.log"
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    _log_handle = open(path, "a", buffering=1)  # noqa: SIM115 - kept open for the Chrome process
+    return _log_handle
+
+
+def _stop_tracked():
+    global _procs
+    for proc in reversed(_procs):
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(5)
+        except Exception:  # noqa: BLE001
+            pass
+    _procs = []
+
+
+def _session_runtime():
+    return os.path.abspath(os.environ.get("AMY_BROWSER_RUNTIME_DIR") or "/tmp/amy-worker-runtime")
+
+
+def _stop_session_bus():
+    """Stop only the worker's private session bus, never a desktop dbus-daemon."""
+    bus = os.path.join(_session_runtime(), "bus")
+    try:
+        subprocess.run(
+            ["pkill", "-f", f"dbus-daemon --session --nofork --address=unix:path={bus}"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    for leftover in (bus, bus + "-pid"):
+        try:
+            os.remove(leftover)
+        except FileNotFoundError:
+            pass
+
+
+def _start_session_bus(env, logf):
+    """Give Chrome a session bus that outlives desktop session refreshes."""
+    runtime = _session_runtime()
+    os.makedirs(runtime, mode=0o700, exist_ok=True)
+    bus = os.path.join(runtime, "bus")
+    _stop_session_bus()
+    env["XDG_RUNTIME_DIR"] = runtime
+    env.pop("DBUS_SESSION_BUS_ADDRESS", None)
+    env.pop("DBUS_SYSTEM_BUS_ADDRESS", None)
+    binary = shutil.which("dbus-daemon")
+    if not binary:
+        raise RuntimeError("dbus-daemon is required so booking Chrome is not tied to the desktop session")
+    proc = subprocess.Popen(
+        [binary, "--session", "--nofork", f"--address=unix:path={bus}"],
+        env=env, stdout=logf, stderr=logf,
+    )
+    _procs.append(proc)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError("worker session bus exited immediately")
+        if os.path.exists(bus):
+            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
+            return
+        time.sleep(0.05)
+    raise RuntimeError("worker session bus did not start")
+
+
+def stop():
+    """Stop only the worker's plain Chrome, private Xvfb, and session bus."""
+    _stop_tracked()
+    _stop_session_bus()
+    profile = os.path.abspath(os.environ.get("AMY_BROWSER_PROFILE") or "/data/worker/profile")
+    if profile and not any(profile.startswith(p) for p in FORBIDDEN_PROFILES):
+        try:
+            subprocess.run(["pkill", "-f", f"user-data-dir={profile}"], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:  # noqa: BLE001
+            pass
+    for _ in range(20):
+        if not healthy(timeout=0.3):
+            break
+        time.sleep(0.1)
+
+
+def restart():
+    """Kill a dead or stale worker Chrome and start a fresh one."""
     if os.environ.get("AMY_BROWSER_LAUNCH", "").lower() != "plain":
         return None
+    log.warning("Restarting the booking Chrome")
+    stop()
+    return start(force=True)
+
+
+def ensure():
+    """Return the CDP URL, starting or restarting Chrome if it is down.
+
+    No-op (returns the existing URL, or None) when AMY_BROWSER_LAUNCH is not
+    plain, so tests and the Railway worker path are unchanged.
+    """
+    if os.environ.get("AMY_BROWSER_LAUNCH", "").lower() != "plain":
+        return os.environ.get("AMY_BROWSER_CDP_URL") or None
+    if healthy():
+        url = cdp_url()
+        os.environ["AMY_BROWSER_CDP_URL"] = url
+        return url
+    log.warning("Booking Chrome is not answering on %s; restarting it", cdp_url())
+    return restart()
+
+
+def start(force=False):
+    if os.environ.get("AMY_BROWSER_LAUNCH", "").lower() != "plain":
+        return None
+    if not force and healthy():
+        url = cdp_url()
+        os.environ["AMY_BROWSER_CDP_URL"] = url
+        return url
     profile = os.path.abspath(os.environ.get("AMY_BROWSER_PROFILE") or "/data/worker/profile")
     if any(profile.startswith(p) for p in FORBIDDEN_PROFILES):
         raise RuntimeError("refusing to run the worker on the computerUse browser profile")
@@ -67,16 +224,20 @@ def start():
             binary = None
     if not binary:
         raise RuntimeError("no Chrome/Chromium binary found")
-    port = int(os.environ.get("AMY_BROWSER_CDP_PORT", "9335"))
+    port_n = port()
     env = dict(os.environ)
-    procs = []
+    global _procs
+    _procs = []
+    logf = _log_file()
+    _start_session_bus(env, logf)
     if not env.get("DISPLAY"):
         display = _free_display()
-        procs.append(subprocess.Popen(["Xvfb", display, "-screen", "0", "1366x900x24"],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        logf = _log_file()
+        _procs.append(subprocess.Popen(["Xvfb", display, "-screen", "0", "1366x900x24"],
+                                       stdout=logf, stderr=logf))
         env["DISPLAY"] = display
         time.sleep(1)
-    args = [binary, f"--user-data-dir={profile}", f"--remote-debugging-port={port}",
+    args = [binary, f"--user-data-dir={profile}", f"--remote-debugging-port={port_n}",
             "--remote-debugging-address=127.0.0.1", "--no-first-run", "--no-default-browser-check",
             "--password-store=basic", "--window-size=1366,900"]
     if os.geteuid() == 0:
@@ -89,20 +250,17 @@ def start():
             raise RuntimeError("plain launch cannot use a proxy with credentials; use an IP-allowlisted proxy")
         args.append(f"--proxy-server={proxy}")
     args.append("about:blank")
-    procs.append(subprocess.Popen(args, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-    url = f"http://127.0.0.1:{port}"
+    logf = _log_file()
+    _procs.append(subprocess.Popen(args, env=env, stdout=logf, stderr=logf))
+    url = f"http://127.0.0.1:{port_n}"
     if not _wait(url):
-        for proc in procs:
-            proc.terminate()
+        _stop_tracked()
         raise RuntimeError("plain Chrome did not open its debugging port")
 
-    def _stop():
-        for proc in reversed(procs):
-            try:
-                proc.terminate()
-                proc.wait(10)
-            except Exception:  # noqa: BLE001
-                pass
-    atexit.register(_stop)
+    global _atexit_registered
+    if not _atexit_registered:
+        atexit.register(_stop_tracked)
+        _atexit_registered = True
     os.environ["AMY_BROWSER_CDP_URL"] = url
+    log.info("Booking Chrome is up at %s", url)
     return url

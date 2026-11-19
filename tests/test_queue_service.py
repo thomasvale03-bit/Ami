@@ -155,7 +155,7 @@ def test_held_exceptions_not_claimed(raw, ref):
 
 @pytest.mark.parametrize('change', [
     {'start_date': '2026-11-09'}, {'venues': []}, {'venues': ['Unknown']},
-    {'venues': ['JEWEL Nightclub']}, {'venues': ["Drai's After Hours", 'TAO Nightclub']},
+    {'venues': ['LIV Nightclub']}, {'venues': ["Drai's After Hours", 'TAO Nightclub']},
     {'_action_needed': ['ambiguous date', 'review']},
 ])
 def test_source_constraints_preserve_payload(raw, change):
@@ -169,9 +169,10 @@ def test_source_constraints_preserve_payload(raw, change):
 
 def test_drais_speakeasy_only_no_emails(raw):
     raw['venues'] = ["Drai's After Hours"]
+    raw['start_date'] = raw['end_date'] = '2026-11-26'
     s, token = assigned(raw)
     good = {'evidence': {'verified': True, 'no_guest_or_team_email': True, 'bookings': [dict(
-        venue="Drai's After Hours", date='2026-11-25', verified=True, system='speakeasy', entry_id='MOCK-ENTRY', party={'male_count': 1, 'female_count': 2},
+        venue="Drai's After Hours", date='2026-11-26', verified=True, system='speakeasy', entry_id='MOCK-ENTRY', party={'male_count': 1, 'female_count': 2},
         submitted_fields=['first_name', 'last_name', 'male_count', 'female_count'])]}}
     bad = {'evidence': {**good['evidence'], 'email_receipts': [{'id': 'not-allowed'}]}}
     assert update(s, token, 'complete', bad)[0] == 409
@@ -180,9 +181,10 @@ def test_drais_speakeasy_only_no_emails(raw):
 
 def test_drais_email_receipts_complete_without_speakeasy_entry(raw):
     raw['venues'] = ["Drai's After Hours"]
+    raw['start_date'] = raw['end_date'] = '2026-11-26'
     s, token = assigned(raw)
     missing = {'evidence': {'verified': True, 'bookings': [dict(
-        venue="Drai's After Hours", date='2026-11-25', verified=True, system='email_only',
+        venue="Drai's After Hours", date='2026-11-26', verified=True, system='email_only',
         party={'male_count': 1, 'female_count': 2})]}}
     assert update(s, token, 'complete', missing)[0] == 409
     good = {'evidence': {**missing['evidence'], 'email_receipts': [
@@ -403,6 +405,23 @@ def test_website_form_still_emails_team_in_queue_mode(monkeypatch):
     assert send.call_args[0][2] == rules.PLAYMAKER_EMAIL == 'team@playmakerentertainment.com'
 
 
+def test_stall_requeue_puts_assigned_job_back_on_queue(raw, monkeypatch):
+    monkeypatch.setenv('AMY_QUEUE_WORKER_CLAIMS', 'true')
+    s, token = assigned(raw)
+    assert s.get('mock')['state'] == 'assigned'
+    code, row = api(s, '/queue/stall-requeue/mock', {'reason': 'Stall watchdog: never submitted'})
+    assert code == 200
+    assert row['state'] == 'queued' and row['due'] == NOW
+    assert 'claim_token' not in row
+
+
+def test_stall_requeue_refuses_submitted_progress(raw, monkeypatch):
+    monkeypatch.setenv('AMY_QUEUE_WORKER_CLAIMS', 'true')
+    s, token = assigned(raw)
+    update(s, token, 'progress', {'progress': {'submitting': {'Marquee Nightclub|2026-11-25': True}}})
+    code, body = api(s, '/queue/stall-requeue/mock', {'reason': 'stall'})
+    assert code == 409
+    assert s.get('mock')['state'] == 'assigned'
 def _manual(raw, reason='Duplicate suspicion'):
     s, token = assigned(raw)
     assert api(s, '/queue/jobs/mock', {'claim_token': token, 'action': 'manual', 'reason': reason})[0] == 200

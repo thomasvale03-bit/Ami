@@ -151,7 +151,9 @@ def test_added_venue_after_confirmation_sends_updated(tmp_path):
     later must not reuse the old receipts silently."""
     import time
     import booking_worker as bw
-    s, api, worker = make(tmp_path)
+    from tests.test_booking_worker import FakeTao
+    # Box worker FakeTao: Marquee Dayclub counts as posted only with dayclubs=True.
+    s, api, worker = make(tmp_path, tao=FakeTao(dayclubs=True))
     s.enqueue('a', wraw(venues=['Hakkasan Nightclub', 'Marquee Dayclub']), NOW)
     old = {'verified': True, 'venue': 'Hakkasan Nightclub', 'date': '2026-11-25', 'order_id': 'OLD-1',
            'party': {'male_count': 1, 'female_count': 2}}
