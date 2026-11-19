@@ -8,7 +8,7 @@ from datetime import datetime
 from unittest import mock
 from zoneinfo import ZoneInfo
 
-from slack_worker import app as sw_app, catchup, commands, guardrails, health, history, llm, prompt, views
+from slack_worker import app as sw_app, catchup, commands, guardrails, health, history, llm, persona, prompt, views, welcome
 from slack_worker.lookups import Lookups
 from slack_worker.watcher import Watcher
 
@@ -1080,6 +1080,151 @@ class VoiceGuardrailTest(unittest.TestCase):
         self.assertIn('<@U0CK42KJT7E>', note)
         self.assertIn('#generalchat', note)
         self.assertNotIn('555-1234', note)
+
+
+class JacobPersonaTest(unittest.TestCase):
+    def test_default_persona_is_amy(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('SLACK_PERSONA', None)
+            self.assertTrue(persona.is_amy())
+            self.assertFalse(persona.is_jacob())
+            self.assertIs(prompt.system_prompt(), prompt.SYSTEM_PROMPT)
+            self.assertTrue(llm.include_tools())
+            self.assertIn('tools', llm.responses_payload('gpt-6.1-sol', []))
+
+    def test_jacob_persona_is_knowledge_bot(self):
+        with mock.patch.dict(os.environ, {'SLACK_PERSONA': 'jacob'}):
+            self.assertTrue(persona.is_jacob())
+            text = prompt.system_prompt()
+            self.assertIn('You are Jacob', text)
+            self.assertIn('KNOWLEDGE-BASE RULE FOR JACOB AND AMYI', text)
+            self.assertIn('playmakerentertainment.com', text)
+            self.assertIn('Promoter first name', text)
+            self.assertIn('Tom still needs to confirm', text)
+            self.assertNotIn('$1', text)
+            self.assertNotIn('$3', text)
+            self.assertNotIn('2–3%', text)
+            self.assertNotIn('2-3%', text)
+            self.assertFalse(llm.include_tools())
+            self.assertNotIn('tools', llm.responses_payload('gpt-6.1-sol', []))
+
+    def test_knowledge_base_file_has_no_pay_figures(self):
+        self.assertIn('KNOWLEDGE-BASE RULE FOR JACOB AND AMYI', prompt.KNOWLEDGE_BASE)
+        self.assertFalse(prompt.re_pay_figure(prompt.KNOWLEDGE_BASE))
+        self.assertNotIn('$1', prompt.KNOWLEDGE_BASE)
+        self.assertNotIn('$3', prompt.KNOWLEDGE_BASE)
+
+    def test_pay_questions_escalate_only_for_jacob(self):
+        question = 'how often do we get paid?'
+        self.assertTrue(guardrails.is_pay_question(question))
+        self.assertFalse(guardrails.needs_escalation(question, persona='amy'))
+        self.assertTrue(guardrails.needs_escalation(question, persona='jacob'))
+        self.assertEqual(
+            guardrails.escalation_reply(question, persona='jacob'),
+            guardrails.PAY_ESCALATION_REPLY)
+        self.assertNotIn('$', guardrails.PAY_ESCALATION_REPLY)
+        self.assertFalse(guardrails.is_pay_question('how do I sign up a client?'))
+        self.assertFalse(guardrails.needs_escalation(
+            "I'm a promoter, i want to get credit", persona='jacob'))
+        self.assertTrue(guardrails.is_pay_question('is there a bonus?'))
+        self.assertTrue(guardrails.is_pay_question('Can I get paid on Venmo?'))
+        self.assertTrue(guardrails.is_pay_question('is this a contract?'))
+
+    def test_jacob_pay_figures_are_rewritten(self):
+        out, flags = guardrails.apply_guardrails(
+            'We pay $1 per check-in and 2-3% on tables.', persona='jacob')
+        self.assertIn('pay_figure_blocked', flags)
+        self.assertEqual(out, guardrails.PAY_ESCALATION_REPLY)
+        out_amy, flags_amy = guardrails.apply_guardrails(
+            'We pay $1 per check-in.', persona='amy', amy_confirmed=True)
+        self.assertNotIn('pay_figure_blocked', flags_amy)
+
+    def test_jacob_skips_amy_commands(self):
+        lk = Lookups(FakeApi([]), clock=lambda: NOW)
+        with mock.patch.dict(os.environ, {'SLACK_PERSONA': 'jacob', 'OPENAI_API_KEY': ''}):
+            os.environ.pop('OPENAI_API_KEY', None)
+            text = sw_app.reply_text(lk, 'status', use_llm=False)
+        self.assertEqual(text, sw_app.JACOB_VAGUE_FALLBACK)
+        self.assertNotIn('queued', text.lower())
+
+    def test_jacob_llm_reply_is_guardrailed(self):
+        with mock.patch.dict(os.environ, {'SLACK_PERSONA': 'jacob'}):
+            text = sw_app.reply_text(
+                None, 'how do I sign up a client?', use_llm=True,
+                llm_answer=lambda *a, **k: (
+                    'Have them go through the Playmaker link, pick the right '
+                    'venue and date, and put your name in the Promoter fields.'))
+        self.assertIn('Playmaker', text)
+        self.assertNotIn('$', text)
+
+    def test_welcome_text_is_short_and_has_first_steps(self):
+        text = persona.welcome_text({'real_name': 'Alex Promoter', 'id': 'U1'})
+        self.assertTrue(text.startswith('Hey Alex, welcome to Playmaker.'))
+        self.assertIn('playmakerentertainment.com', text)
+        self.assertIn('Promoter fields', text)
+        self.assertIn('ask me here', text.lower())
+        self.assertNotIn('$', text)
+        self.assertFalse(prompt.re_pay_figure(text))
+
+    def test_welcomed_set_persists_and_skips_bots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'jacob-welcomed.json')
+            store = welcome.WelcomedSet(path)
+            self.assertFalse(store.already('U123'))
+            store.mark('U123')
+            again = welcome.WelcomedSet(path)
+            self.assertTrue(again.already('U123'))
+        self.assertFalse(sw_app.should_welcome({'id': 'U123', 'is_bot': True}))
+        self.assertFalse(sw_app.should_welcome({'id': ''}))
+        self.assertTrue(sw_app.should_welcome({'id': 'U123', 'real_name': 'Alex'}))
+        self.assertEqual(sw_app.team_join_user({'user': {'id': 'U123'}})['id'], 'U123')
+        self.assertEqual(sw_app.team_join_user({'user': 'U123'})['id'], 'U123')
+
+    def test_jacob_startup_check_logs_both_replies(self):
+        answers = {
+            'how often do we get paid?': 'You get paid weekly, $1 a check-in.',
+            'how do I sign up a client?': (
+                'Have them go through the Playmaker link and complete signup. '
+                'Put your name in the Promoter fields.'),
+        }
+
+        def answer(_lookups, text):
+            return answers[text]
+
+        logs = []
+
+        def fake_info(msg, *args):
+            logs.append(msg % args if args else msg)
+
+        with mock.patch.dict(os.environ, {'SLACK_PERSONA': 'jacob'}):
+            with mock.patch.object(sw_app.log, 'info', side_effect=fake_info):
+                ok = sw_app.startup_check(None, answer=answer, check=lambda: None)
+        self.assertTrue(ok)
+        joined = '\n'.join(logs)
+        self.assertIn('OpenAI voice-check (pay schedule):', joined)
+        self.assertIn(guardrails.PAY_ESCALATION_REPLY, joined)
+        self.assertNotIn('$1', joined.split('OpenAI voice-check (pay schedule):', 1)[-1].split('\n', 1)[0])
+        self.assertIn('OpenAI voice-check (signup):', joined)
+        self.assertIn('Playmaker link', joined)
+        # The leaked draft is logged only as a model draft, then replaced.
+        self.assertIn('model draft', joined)
+
+    def test_owner_poster_dms_tom(self):
+        posted = []
+
+        class Client:
+            def conversations_open(self, users=None):
+                self.users = users
+                return {'channel': {'id': 'D999'}}
+
+            def chat_postMessage(self, **kw):
+                posted.append(kw)
+
+        post = sw_app.owner_poster(Client(), owner='U0CK42KJT7E')
+        post('Need you to look at this.')
+        self.assertEqual(posted[0]['channel'], 'D999')
+        self.assertEqual(posted[0]['text'], 'Need you to look at this.')
+        self.assertFalse(posted[0]['unfurl_links'])
 
 
 if __name__ == '__main__':

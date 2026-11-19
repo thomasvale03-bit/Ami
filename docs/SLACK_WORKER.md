@@ -1,4 +1,6 @@
-# AMY Slack worker (`slack_worker/`, Railway service `amy-slack-worker`)
+# Slack worker (`slack_worker/`)
+
+The same package runs two Railway services, switched by `SLACK_PERSONA` (default `amy`).
 
 A separate Railway service in the AMY project (Socket Mode, so no public URL
 or port). It is **read-only**: it only calls `GET /queue/status` and
@@ -103,7 +105,8 @@ backup path). No reinstall is required unless a new scope is added —
 ## Variables
 | Variable | Value |
 |---|---|
-| `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` | AMY Worker app (xoxb / xapp) |
+| `SLACK_PERSONA` | default `amy` (AMY Worker). Set `jacob` for the onboarding bot. |
+| `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` | Slack app tokens for that persona (xoxb / xapp) |
 | `AMY_BASE_URL` | `https://amy-production-1616.up.railway.app` |
 | `AMY_QUEUE_API_TOKEN` | `${{AMY.AMY_QUEUE_API_TOKEN}}` (reference) |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | optional; keyword fallback when unset |
@@ -111,4 +114,48 @@ backup path). No reinstall is required unless a new scope is added —
 | `SLACK_OWNER_USER_ID` | Tom (DM fallback), default `U0CK42KJT7E` |
 | `SLACK_ALLOWED_USERS` | optional comma list of user IDs allowed to ask |
 | `SLACK_WORKER_STATE` | `/data/slack-worker/state.json` (volume at `/data`) |
+| `RAILWAY_DOCKERFILE_PATH` | `slack_worker/Dockerfile` |
+
+
+## Jacob (`jacob-slack-worker`)
+
+Jacob is the new-hire promoter onboarding bot in the same Slack workspace,
+running the same `slack_worker` package with `SLACK_PERSONA=jacob`.
+
+* Knowledge bot only: Tom's onboarding knowledge base
+  (`slack_worker/knowledge_base.txt`) is the primary reference, with the same
+  voice guide as AMYI. Historical pay figures were removed from the file and
+  are never loaded into the prompt. Jacob has no AMY queue tools and does
+  not run the booking watcher, so AMYI's behavior is unchanged.
+* On `team_join`, Jacob DMs the new member a short welcome with first steps
+  and invites questions. Existing members are not backfilled. `member_joined_channel`
+  is logged only, so joining a second channel does not send another DM.
+* Answers DMs, @mentions, and untagged follow-ups in threads it is already
+  in, with the same catch-up loop as AMYI.
+* For any rate, payout schedule, payment method, bonus, or contract
+  question, Jacob says Tom still needs to confirm it and DMs Tom
+  (`U0CK42KJT7E`) a short note. The same happens for disputes, payment
+  issues, special requests, or anything needing management approval.
+* Promoter credit: sign clients up on playmakerentertainment.com and fill
+  in the Promoter first and last name fields; counted for the guest list
+  only after that; no guaranteed check-in credit. Jacob cannot look up
+  AMY records; for a specific credit / on-the-list question it asks for
+  the client's full name, venue, and date and escalates to Tom.
+* Guardrails match AMYI (banned phrases, no phones or secrets, no
+  unconfirmed promises) and also rewrite any dollar or percent pay
+  figures out of Jacob's replies.
+* Startup logs a plain OpenAI self-check plus two logged-only model tests
+  (`how often do we get paid?` and `how do I sign up a client?`). Those
+  checks never post to Slack.
+
+### Jacob variables
+
+| Variable | Value |
+|---|---|
+| `SLACK_PERSONA` | `jacob` |
+| `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` | Jacob app (xoxb / xapp) |
+| `OPENAI_API_KEY` | `${{amy-slack-worker.OPENAI_API_KEY}}` (reference) |
+| `OPENAI_MODEL` | `gpt-6.1-sol` |
+| `SLACK_OWNER_USER_ID` | Tom, default `U0CK42KJT7E` |
+| `SLACK_WORKER_STATE` | `/data/slack-worker/state.json` (its own volume at `/data`) |
 | `RAILWAY_DOCKERFILE_PATH` | `slack_worker/Dockerfile` |

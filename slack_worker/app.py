@@ -1,28 +1,33 @@
-"""AMY Slack worker: Socket Mode bot (no public URL).
+"""Shared Slack worker (Socket Mode, no public URL).
 
-* Posts booking updates (done / manual / needs_review / submission_uncertain,
-  stalls, API down) to #amy-bookings, or Tom's DM if that channel is missing.
-* Answers DMs and @mentions read-only: OpenAI tool calls when OPENAI_API_KEY is
-  set, keyword commands otherwise (and always for exact commands).
+Persona is selected with SLACK_PERSONA (default amy):
 
-Env: SLACK_BOT_TOKEN, SLACK_APP_TOKEN, AMY_BASE_URL, AMY_QUEUE_API_TOKEN,
-OPENAI_API_KEY, OPENAI_MODEL, SLACK_UPDATES_CHANNEL (default amy-bookings),
-SLACK_OWNER_USER_ID (Tom), SLACK_ALLOWED_USERS (optional comma list),
-SLACK_POLL_SECONDS, SLACK_WORKER_STATE. Secrets are never logged.
+* amy (AMY Worker / AMYI): posts booking updates to #amy-bookings (or Tom's
+  DM), answers DMs and @mentions with read-only AMY queue tools.
+* jacob (Jacob): new-hire promoter onboarding knowledge bot. No AMY queue
+  tools or booking watcher. On team_join, DMs a short welcome. Escalations
+  are DMed to Tom.
+
+Env: SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_PERSONA, OPENAI_API_KEY,
+OPENAI_MODEL, SLACK_OWNER_USER_ID (Tom), SLACK_ALLOWED_USERS,
+SLACK_POLL_SECONDS, SLACK_WORKER_STATE. AMY_BASE_URL and
+AMY_QUEUE_API_TOKEN are required for the amy persona only. Secrets are
+never logged.
 """
 import logging
 import os
 import threading
 import time
 
-from . import commands, llm
+from . import commands, llm, persona
 from .amy_api import AmyApi
 from .catchup import Catchup, RepliedSet, should_answer_channel
-from .guardrails import apply_guardrails, needs_escalation, ESCALATION_REPLY
+from .guardrails import apply_guardrails, needs_escalation, escalation_reply, ESCALATION_REPLY
 from .history import load_conversation
 from .lookups import Lookups
 from .views import scrub
 from .watcher import Watcher
+from .welcome import WelcomedSet
 
 log = logging.getLogger('amy.slack')
 TOM_USER_ID = 'U0CK42KJT7E'
@@ -158,16 +163,31 @@ def slack_error(exc):
 
 
 class FlagSink:
-    """Posts escalation notes to #amy-bookings once a Router.post is attached."""
+    """Posts escalation notes once a poster is attached.
+
+    AMY attaches Router.post (#amy-bookings). Jacob attaches owner_poster
+    (a DM to Tom).
+    """
 
     def __init__(self):
         self.post = None
 
     def send(self, text):
         if not self.post:
-            log.warning('escalation flagged but no #amy-bookings poster is attached')
+            log.warning('escalation flagged but no poster is attached')
             return
         self.post(text)
+
+
+def owner_poster(client, owner=None):
+    """Return a post(text) function that DMs Tom. Used by Jacob only."""
+    owner = owner or os.environ.get('SLACK_OWNER_USER_ID') or TOM_USER_ID
+
+    def post(text):
+        dm = client.conversations_open(users=owner)['channel']['id']
+        client.chat_postMessage(channel=dm, text=text, unfurl_links=False, unfurl_media=False)
+
+    return post
 
 
 def escalation_note(event, reply, channel_label=None):
@@ -184,6 +204,11 @@ def escalation_note(event, reply, channel_label=None):
 
 LLM_FAIL_FALLBACK = "Couldn't reach ChatGPT right now. Try me again in a minute?"
 VAGUE_FALLBACK = "Not sure I follow — want the queue status, a guest lookup, or a night's bookings?"
+JACOB_FAIL_FALLBACK = "Couldn't get back to you just now. Try me again in a minute?"
+JACOB_VAGUE_FALLBACK = (
+    "Not sure I follow — what do you want to know about getting started, "
+    "signing clients up, or how things work here?"
+)
 
 
 def _call_answer(fn, lookups, text, history=None, context=None, meta=None):
@@ -197,7 +222,26 @@ def reply_text(lookups, text, *, use_llm=None, llm_answer=None, history=None, co
     """Answer one message. Exact keyword commands are answered directly; free
     text goes to the OpenAI model when configured, else a short clarifying
     question. Never dump the command list on a vague message. Guardrails run
-    on every outgoing line (no phones, secrets, or unconfirmed 'booked')."""
+    on every outgoing line (no phones, secrets, or unconfirmed 'booked').
+    Jacob skips AMY keyword commands and has no queue lookups."""
+    if persona.is_jacob():
+        use_llm = llm.configured() if use_llm is None else use_llm
+        try:
+            if use_llm:
+                try:
+                    meta = {}
+                    raw = _call_answer(llm_answer or llm.answer, lookups, commands.strip_mentions(text),
+                                       history=history, context=context, meta=meta)
+                    safe, _flags = apply_guardrails(
+                        raw, amy_confirmed=False, source='llm', persona='jacob')
+                    return safe
+                except Exception as exc:  # noqa: BLE001
+                    log.error('OpenAI answer failed: %s', llm.describe(exc))
+                    return JACOB_FAIL_FALLBACK
+            return JACOB_VAGUE_FALLBACK
+        except Exception as exc:  # noqa: BLE001
+            log.warning('jacob reply failed: %s', type(exc).__name__)
+            return JACOB_FAIL_FALLBACK
     cmd, arg = commands.parse(text)
     use_llm = llm.configured() if use_llm is None else use_llm
     try:
@@ -226,10 +270,37 @@ def reply_text(lookups, text, *, use_llm=None, llm_answer=None, history=None, co
         return "Couldn't reach AMY right now, try again in a minute."
 
 
+def _jacob_startup_checks(lookups, answer=None):
+    """Logged-only model tests for Jacob. Never posts to Slack."""
+    ok = True
+    tests = (
+        ('pay schedule', 'how often do we get paid?'),
+        ('signup', 'how do I sign up a client?'),
+    )
+    for label, question in tests:
+        try:
+            raw = (answer or llm.answer)(lookups, question)
+            draft, _flags = apply_guardrails(
+                raw, amy_confirmed=False, source='voice-check', persona='jacob')
+            outgoing = draft
+            if needs_escalation(question, persona='jacob'):
+                outgoing = apply_guardrails(
+                    escalation_reply(question, persona='jacob'),
+                    amy_confirmed=True, source='escalation', persona='jacob')[0]
+                log.info('OpenAI voice-check (%s, model draft): %s', label, scrub(draft, 500))
+            log.info('OpenAI voice-check (%s): %s', label, scrub(outgoing, 500))
+        except Exception as exc:  # noqa: BLE001
+            log.error('OpenAI voice-check (%s): FAIL %s', label, llm.describe(exc))
+            ok = False
+    return ok
+
+
 def startup_check(lookups, answer=None, check=None):
-    """OpenAI self-check plus one real read-only tool round trip (queue
-    status). Logs ok/FAIL only; never the key, never posts to Slack."""
+    """OpenAI self-check plus persona-specific model tests. Logs ok/FAIL
+    only; never the key, never posts to Slack."""
     (check or llm.self_check)()
+    if persona.is_jacob():
+        return _jacob_startup_checks(lookups, answer)
     try:
         text = (answer or llm.answer)(lookups, 'How many jobs are in done right now? Use the queue_status tool.')
         log.info('OpenAI self-check (round trip): ok, %d chars, has number=%s', len(text),
@@ -246,15 +317,37 @@ def startup_check(lookups, answer=None, check=None):
         return False
 
 
+def team_join_user(event):
+    user = (event or {}).get('user')
+    if isinstance(user, dict):
+        return user
+    if isinstance(user, str):
+        return {'id': user}
+    return {}
+
+
+def should_welcome(user):
+    """Skip bots, the app user, and empty ids."""
+    user = user if isinstance(user, dict) else {'id': user}
+    uid = user.get('id') or ''
+    if not uid or user.get('is_bot') or user.get('is_app_user'):
+        return False
+    return True
+
+
 def build_app():
     from slack_bolt import App
 
     app = App(token=os.environ['SLACK_BOT_TOKEN'])
-    api = CachedApi(AmyApi())
-    lookups = Lookups(api)
+    if persona.is_jacob():
+        api = lookups = None
+    else:
+        api = CachedApi(AmyApi())
+        lookups = Lookups(api)
 
     replied = RepliedSet()
     flagsink = FlagSink()
+    welcomed = WelcomedSet() if persona.is_jacob() else None
 
     def handle(event, say, thread=None):
         user = event.get('user') or ''
@@ -275,13 +368,15 @@ def build_app():
             history, context = load_conversation(app.client, event, thread)
             incoming = event.get('text') or ''
             outgoing = reply_text(lookups, incoming, history=history, context=context)
-            if needs_escalation(incoming):
+            who = persona.name()
+            if needs_escalation(incoming, persona=who):
                 outgoing = apply_guardrails(
-                    ESCALATION_REPLY, amy_confirmed=True, source='escalation')[0]
+                    escalation_reply(incoming, persona=who),
+                    amy_confirmed=True, source='escalation', persona=who)[0]
             say(text=outgoing, thread_ts=thread)
             if channel and ts:
                 replied.mark(channel, ts)
-            if needs_escalation(incoming):
+            if needs_escalation(incoming, persona=who):
                 log.warning('escalation flagged channel=%s ts=%s user=%s', channel, ts, user)
                 try:
                     flagsink.send(escalation_note(event, outgoing, channel_label=event.get('channel_name')))
@@ -331,6 +426,42 @@ def build_app():
         log.info('ignore untagged channel message channel=%s ts=%s',
                  event.get('channel') or '', event.get('ts') or '')
 
+    def welcome_new_member(user):
+        user = user if isinstance(user, dict) else {'id': user}
+        uid = user.get('id') or ''
+        if not should_welcome(user):
+            log.info('skip welcome user=%s', uid or '?')
+            return
+        if welcomed is None or welcomed.already(uid):
+            log.info('skip already-welcomed user=%s', uid)
+            return
+        text = persona.welcome_text(user)
+        text, _flags = apply_guardrails(
+            text, amy_confirmed=True, source='welcome', persona='jacob')
+        try:
+            dm = app.client.conversations_open(users=uid)['channel']['id']
+            app.client.chat_postMessage(
+                channel=dm, text=text, unfurl_links=False, unfurl_media=False)
+            welcomed.mark(uid)
+            log.info('welcomed user=%s', uid)
+        except Exception as exc:  # noqa: BLE001
+            err, needed = slack_error(exc)
+            log.error('welcome DM failed user=%s: %s needed=%s', uid, err, needed)
+
+    if persona.is_jacob():
+        @app.event('team_join')
+        def on_team_join(event):
+            user = team_join_user(event)
+            log.info('incoming type=team_join user=%s', user.get('id') or '')
+            welcome_new_member(user)
+
+        @app.event('member_joined_channel')
+        def on_member_joined_channel(event):
+            # Log only. Welcome is team_join only so a second channel join
+            # does not send another DM.
+            log.info('incoming type=member_joined_channel user=%s channel=%s',
+                     event.get('user') or '', event.get('channel') or '')
+
     return app, api, lookups, replied, say_reply, flagsink
 
 
@@ -338,21 +469,31 @@ def main():
     import sys
     logging.basicConfig(level=os.environ.get('LOG_LEVEL', 'INFO'), stream=sys.stdout,
                         format='%(asctime)s %(levelname)s %(name)s: %(message)s')
-    for name in ('SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'AMY_QUEUE_API_TOKEN'):
+    required = ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']
+    if not persona.is_jacob():
+        required.append('AMY_QUEUE_API_TOKEN')
+    for name in required:
         if not os.environ.get(name):
             raise SystemExit(f'{name} is not set')
     from slack_bolt.adapter.socket_mode import SocketModeHandler
 
     app, api, lookups, replied, say_reply, flagsink = build_app()
-    router = Router(app.client)
-    router.resolve()
-    flagsink.post = router.post
-    log.info('updates go to %s; answers via %s', router.note or '?',
-             'OpenAI ' + (os.environ.get('OPENAI_MODEL') or llm.DEFAULT_MODEL) if llm.configured() else 'keyword commands')
-    if llm.configured():
-        threading.Thread(target=startup_check, args=(Lookups(api),), name='openai-self-check', daemon=True).start()
-    watcher = Watcher(AmyApi(), router.post)
-    threading.Thread(target=watcher.run_forever, name='amy-watcher', daemon=True).start()
+    if persona.is_jacob():
+        flagsink.post = owner_poster(app.client)
+        log.info('jacob onboarding bot; escalations DM Tom; answers via %s',
+                 'OpenAI ' + (os.environ.get('OPENAI_MODEL') or llm.DEFAULT_MODEL) if llm.configured() else 'keyword fallback')
+        if llm.configured():
+            threading.Thread(target=startup_check, args=(lookups,), name='openai-self-check', daemon=True).start()
+    else:
+        router = Router(app.client)
+        router.resolve()
+        flagsink.post = router.post
+        log.info('updates go to %s; answers via %s', router.note or '?',
+                 'OpenAI ' + (os.environ.get('OPENAI_MODEL') or llm.DEFAULT_MODEL) if llm.configured() else 'keyword commands')
+        if llm.configured():
+            threading.Thread(target=startup_check, args=(Lookups(api),), name='openai-self-check', daemon=True).start()
+        watcher = Watcher(AmyApi(), router.post)
+        threading.Thread(target=watcher.run_forever, name='amy-watcher', daemon=True).start()
     catchup = Catchup(app.client, say_reply, replied)
     threading.Thread(target=catchup.run_forever, name='amy-catchup', daemon=True).start()
     SocketModeHandler(app, os.environ['SLACK_APP_TOKEN']).start()
