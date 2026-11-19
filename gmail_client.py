@@ -83,6 +83,8 @@ LABEL_TO_FIELD = {
     "venues": "venues",
     "promoter first name": "promoter_first",
     "promoter last name": "promoter_last",
+    "promoter email": "promoter_email",
+    "promoter phone": "promoter_phone",
     "additional comments": "comments",
     "authorization accepted": "authorization",
     "originating page": "originating_page",
