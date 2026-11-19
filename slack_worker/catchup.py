@@ -85,6 +85,12 @@ class RepliedSet:
         with self._lock:
             return key in self._done or key in self._claimed
 
+    def in_flight(self, channel, ts):
+        """True only while a handler has claimed the ts and not yet marked or released it."""
+        key = self._key(channel, ts)
+        with self._lock:
+            return key in self._claimed and key not in self._done
+
     def claim(self, channel, ts):
         """True if this process should answer this message (not already claimed)."""
         key = self._key(channel, ts)
@@ -106,6 +112,14 @@ class RepliedSet:
         key = self._key(channel, ts)
         with self._lock:
             self._claimed.discard(key)
+
+    def reopen(self, channel, ts):
+        """Drop a persisted mark when Slack still has no bot reply."""
+        key = self._key(channel, ts)
+        with self._lock:
+            self._done.discard(key)
+            self._claimed.discard(key)
+            self._save()
 
 
 def _list_channels(client, types):
@@ -265,7 +279,10 @@ class Catchup:
         self.bot_id = bot_id
 
     def pending(self):
-        already = self.replied.already
+        # Slack is the source of truth for whether we already replied. A persisted
+        # mark must not hide an unanswered mention (a prior catch-up bug marked
+        # before posting). Only skip ts the handler currently has in flight.
+        already = self.replied.in_flight
         now = self.clock()
         mentions = unanswered_channel_mentions(
             self.client, bot_user=self.bot_user, bot_id=self.bot_id,
@@ -280,15 +297,17 @@ class Catchup:
             log.info('catch-up found %d unanswered message(s)', len(pending))
         for event in pending:
             channel, ts = event.get('channel'), event.get('ts')
-            if not self.replied.claim(channel, ts):
+            if self.replied.in_flight(channel, ts):
                 continue
             thread = event.get('thread_ts') or (ts if event.get('channel_type') != 'im' else None)
             try:
+                # handle() claims, posts, and marks. Do not claim here — that
+                # made handle skip the post and still look like a success.
+                # Reopen a stale disk mark so handle.claim() can succeed.
+                self.replied.reopen(channel, ts)
                 self.reply(event, thread)
-                self.replied.mark(channel, ts)
                 log.info('catch-up replied channel=%s ts=%s', channel, ts)
             except Exception as exc:  # noqa: BLE001
-                self.replied.release(channel, ts)
                 err, needed = _api_error(exc)
                 log.error('catch-up reply failed channel=%s ts=%s: %s needed=%s',
                           channel, ts, err, needed)

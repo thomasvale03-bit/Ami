@@ -841,7 +841,21 @@ class CatchupTest(unittest.TestCase):
         posts = []
 
         def reply(event, thread):
+            # Mimic handle(): claim, post, mark. Catch-up must not pre-claim.
+            self.assertTrue(self.replied.claim(event['channel'], event['ts']),
+                            'catch-up pre-claimed the ts; handle would skip the post')
             posts.append((event['channel'], event['ts'], thread, event['text']))
+            # Slack now has a bot thread reply, so the next scan will skip it.
+            parent = dict(event)
+            parent['reply_count'] = 1
+            for msg in client.histories[event['channel']]:
+                if msg.get('ts') == event['ts']:
+                    msg['reply_count'] = 1
+                    parent = msg
+                    break
+            bot = {'ts': str(float(event['ts']) + 1), 'user': 'U0CKWBVA7BJ', 'text': 'on it'}
+            client.replies[(event['channel'], event['ts'])] = [parent, bot]
+            self.replied.mark(event['channel'], event['ts'])
 
         runner = catchup.Catchup(client, reply, self.replied, clock=lambda: self.now, sleeper=lambda _s: None)
         runner.run_once()
@@ -853,6 +867,21 @@ class CatchupTest(unittest.TestCase):
         posts.clear()
         runner.run_once()
         self.assertEqual(posts, [])
+
+    def test_stale_disk_mark_is_retried_when_slack_has_no_reply(self):
+        client = FakeSlack(self.channels, self.histories)
+        self.replied.claim('C0CJK07GMHV', self.mention_ts)
+        self.replied.mark('C0CJK07GMHV', self.mention_ts)
+        posts = []
+
+        def reply(event, thread):
+            self.assertTrue(self.replied.claim(event['channel'], event['ts']))
+            posts.append(event['text'])
+            self.replied.mark(event['channel'], event['ts'])
+
+        runner = catchup.Catchup(client, reply, self.replied, clock=lambda: self.now, sleeper=lambda _s: None)
+        runner.run_once()
+        self.assertTrue(any('sign clients' in t for t in posts))
 
     def test_unanswered_dm_when_latest_is_from_teammate(self):
         self.histories['D0CK1QTE1FU'] = [
