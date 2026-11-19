@@ -412,3 +412,32 @@ class OpenAiErrorTest(unittest.TestCase):
         self.assertEqual(res['plain'], 'ok')
         self.assertIn('unsupported_parameter', res['tools'])
         self.assertEqual([lvl for lvl, _ in logs], ['info', 'error'])
+
+
+class ReasoningEffortTest(unittest.TestCase):
+    def test_tool_requests_send_reasoning_effort_none(self):
+        lk = Lookups(FakeApi([job('r1', 'done', bookings=BOOKED)]), clock=lambda: NOW)
+        seen = []
+
+        def post(payload):
+            seen.append(payload)
+            return {'choices': [{'message': {'content': 'Queue is clean.'}}]}
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('OPENAI_REASONING_EFFORT', None)
+            llm.answer(lk, 'hows the queue', post=post, model='gpt-6.1-sol')
+        self.assertEqual(seen[0]['reasoning_effort'], 'none')
+        self.assertIn('tools', seen[0])
+
+    def test_self_check_tools_request_matches_answer_path(self):
+        seen = []
+        llm.self_check(post=lambda p: seen.append(p) or {'model': 'gpt-6.1-sol'}, model='gpt-6.1-sol',
+                       log_=mock.Mock())
+        self.assertNotIn('reasoning_effort', seen[0])
+        self.assertEqual(seen[1]['reasoning_effort'], 'none')
+        self.assertIn('tools', seen[1])
+
+    def test_override_and_omit(self):
+        with mock.patch.dict(os.environ, {'OPENAI_REASONING_EFFORT': 'low'}):
+            self.assertEqual(llm.with_tools({})['reasoning_effort'], 'low')
+        with mock.patch.dict(os.environ, {'OPENAI_REASONING_EFFORT': ''}):
+            self.assertNotIn('reasoning_effort', llm.with_tools({}))
