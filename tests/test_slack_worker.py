@@ -735,6 +735,22 @@ class PromptSignupTest(unittest.TestCase):
         self.assertIn('cannot book, cancel, requeue, change, approve, email, or sign anyone up', text)
 
 
+class PromptPromoterCreditTest(unittest.TestCase):
+    def test_prompt_has_form_policy_and_no_checkin_promise(self):
+        text = prompt.SYSTEM_PROMPT
+        self.assertIn('playmakerentertainment.com', text)
+        self.assertIn('Promoter first name', text)
+        self.assertIn('Promoter last name', text)
+        self.assertIn('counted for the guest list', text)
+        self.assertIn('does NOT mean they are guaranteed credit for check-ins', text)
+        self.assertIn('Never promise check-in credit, commission, or payouts', text)
+        self.assertIn('promoter (a teammate)', text)
+        self.assertNotIn("I'll get Tom to sort out", text)
+        self.assertNotIn('how they found the guests', text)
+        self.assertNotRegex(text, r'\d+%')
+        self.assertNotIn('commission rate', text)
+
+
 class FakeSlack:
     """Minimal conversations.* client for catch-up tests."""
 
@@ -893,6 +909,80 @@ class CatchupTest(unittest.TestCase):
         self.assertEqual(len(dms), 1)
         self.assertEqual(dms[0]['text'], 'you there?')
         self.assertEqual(dms[0]['channel_type'], 'im')
+
+    def test_should_answer_channel_only_mentions_and_our_threads(self):
+        mention = {'text': '<@B0CK3T1AH8R> how do we sign clients up?', 'user': 'U0CK42KJT7E'}
+        self.assertTrue(catchup.should_answer_channel(mention))
+        self.assertFalse(catchup.should_answer_channel(
+            {'text': 'random chatter', 'user': 'U0CK42KJT7E'}))
+        self.assertFalse(catchup.should_answer_channel(
+            {'text': 'edit', 'user': 'U0CK42KJT7E', 'subtype': 'message_changed'}))
+        self.assertFalse(catchup.should_answer_channel(
+            {'text': 'hey', 'bot_id': 'B0CK3T1AH8R'}))
+        follow = {
+            'text': "I'm a promoter, i want to get credit",
+            'user': 'U0CK42KJT7E',
+            'thread_ts': '1',
+            'channel': 'C0CJK07GMHV',
+        }
+        ours = [
+            {'ts': '1', 'user': 'U0CK42KJT7E', 'text': '<@B0CK3T1AH8R> how do we sign clients up?'},
+            {'ts': '2', 'user': 'U0CKWBVA7BJ', 'text': 'Sign up on the site.'},
+        ]
+        self.assertTrue(catchup.should_answer_channel(follow, replies=ours))
+        other = [
+            {'ts': '1', 'user': 'U0CK42KJT7E', 'text': 'side conversation'},
+            {'ts': '2', 'user': 'U0CK42KJT7E', 'text': 'still just us'},
+        ]
+        self.assertFalse(catchup.should_answer_channel(follow, replies=other))
+
+    def test_catchup_replays_unanswered_thread_followup(self):
+        parent_ts = str(self.now - 2500)
+        bot_ts = str(self.now - 2000)
+        follow_ts = str(self.now - 180)
+        self.histories['C0CJK07GMHV'] = [
+            {'ts': parent_ts, 'user': 'U0CK42KJT7E',
+             'text': '<@B0CK3T1AH8R> how do we sign clients up?', 'reply_count': 2,
+             'latest_reply': follow_ts},
+        ]
+        # The other channels should not create extra pending follow-ups
+        self.histories['C0CK42NLM9A'] = []
+        replies = {
+            ('C0CJK07GMHV', parent_ts): [
+                {'ts': parent_ts, 'user': 'U0CK42KJT7E',
+                 'text': '<@B0CK3T1AH8R> how do we sign clients up?'},
+                {'ts': bot_ts, 'user': 'U0CKWBVA7BJ',
+                 'text': 'Have them sign up at playmakerentertainment.com.'},
+                {'ts': follow_ts, 'user': 'U0CK42KJT7E',
+                 'text': "I'm a promoter, i want to get credit"},
+            ],
+        }
+        client = FakeSlack(self.channels, self.histories, replies=replies)
+        found = catchup.unanswered_thread_followups(
+            client, lookback=6 * 3600, now=self.now, already=self.replied.already)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]['text'], "I'm a promoter, i want to get credit")
+        self.assertEqual(found[0]['thread_ts'], parent_ts)
+        self.assertEqual(found[0]['ts'], follow_ts)
+
+        posts = []
+
+        def reply(event, thread):
+            self.assertTrue(self.replied.claim(event['channel'], event['ts']))
+            posts.append((event['ts'], thread, event['text']))
+            self.replied.mark(event['channel'], event['ts'])
+
+        runner = catchup.Catchup(client, reply, self.replied, clock=lambda: self.now, sleeper=lambda _s: None)
+        runner.run_once()
+        self.assertEqual(posts, [(follow_ts, parent_ts, "I'm a promoter, i want to get credit")])
+
+        # After a bot reply in the thread, catch-up does not post again
+        replies[('C0CJK07GMHV', parent_ts)].append(
+            {'ts': str(self.now - 10), 'user': 'U0CKWBVA7BJ', 'text': 'Go to the site and add your promoter name.'})
+        self.histories['C0CJK07GMHV'][0]['reply_count'] = 3
+        posts.clear()
+        runner.run_once()
+        self.assertEqual(posts, [])
 
 
 class HandleThreadTest(unittest.TestCase):

@@ -17,7 +17,7 @@ import time
 
 from . import commands, llm
 from .amy_api import AmyApi
-from .catchup import Catchup, RepliedSet, is_mention
+from .catchup import Catchup, RepliedSet, should_answer_channel
 from .guardrails import apply_guardrails
 from .history import load_conversation
 from .lookups import Lookups
@@ -269,14 +269,24 @@ def build_app():
 
     @app.event('message')
     def on_message(event, say):
+        # Log every message event so we can tell whether Socket Mode is
+        # delivering message.channels / message.im (even ones we ignore).
+        log.info('incoming type=message subtype=%s channel=%s ts=%s user=%s thread=%s channel_type=%s',
+                 event.get('subtype') or '-', event.get('channel') or '', event.get('ts') or '',
+                 event.get('user') or event.get('bot_id') or '',
+                 event.get('thread_ts') or '', event.get('channel_type') or '')
         if event.get('subtype') or event.get('bot_id'):
             return
         if event.get('channel_type') == 'im':
             handle(event, say, thread=event.get('thread_ts'))
             return
-        # Backup if message.channels is subscribed and app_mention did not fire.
-        if is_mention(event.get('text') or ''):
+        # Mentions (backup if app_mention did not fire) and untagged replies
+        # in a thread the bot is already part of. Other channel messages stay quiet.
+        if should_answer_channel(event, client=app.client):
             handle(event, say, thread=event.get('thread_ts') or event.get('ts'))
+            return
+        log.info('ignore untagged channel message channel=%s ts=%s',
+                 event.get('channel') or '', event.get('ts') or '')
 
     return app, api, lookups, replied, say_reply
 

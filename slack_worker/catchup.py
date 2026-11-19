@@ -160,6 +160,131 @@ def _bot_already_replied(client, msg, channel, bot_user=BOT_USER_ID):
     return False
 
 
+def thread_is_ours(messages, *, bot_user=BOT_USER_ID, bot_id=BOT_ID):
+    """True if this thread started with an @mention of the bot or the bot already posted in it."""
+    if not messages:
+        return False
+    parent = messages[0]
+    if is_mention(parent.get('text') or '', bot_user, bot_id):
+        return True
+    return any(_is_bot(m, bot_user) for m in messages)
+
+
+def should_answer_channel(event, *, replies=None, client=None,
+                          bot_user=BOT_USER_ID, bot_id=BOT_ID):
+    """Channel messages we should answer: an @mention, or a non-bot reply in a
+    thread the bot is already part of (mention parent or a prior bot reply).
+    Untagged top-level channel messages are ignored. Subtypes, edits, and bot
+    messages are ignored. IMs are not decided here.
+    """
+    if event.get('subtype') or event.get('bot_id') or _is_bot(event, bot_user):
+        return False
+    if is_mention(event.get('text') or '', bot_user, bot_id):
+        return True
+    thread = event.get('thread_ts')
+    if not thread:
+        return False
+    if replies is None and client is not None:
+        try:
+            replies = _replies(client, event.get('channel'), thread)
+        except Exception as exc:  # noqa: BLE001
+            err, needed = _api_error(exc)
+            log.warning('thread lookup failed: %s needed=%s', err, needed)
+            return False
+    return thread_is_ours(replies or [], bot_user=bot_user, bot_id=bot_id)
+
+
+def _newest_unanswered_human(replies, *, bot_user, cutoff):
+    """Latest teammate message in a thread with no bot message after it, in lookback."""
+    last_human = None
+    for msg in sorted(replies, key=lambda m: float(m.get('ts') or 0)):
+        if msg.get('subtype') or not (msg.get('text') or '').strip():
+            continue
+        if _is_bot(msg, bot_user):
+            last_human = None
+            continue
+        try:
+            if float(msg.get('ts') or 0) < cutoff:
+                last_human = None
+                continue
+        except (TypeError, ValueError):
+            continue
+        last_human = msg
+    return last_human
+
+
+def unanswered_thread_followups(client, *, bot_user=BOT_USER_ID, bot_id=BOT_ID,
+                                lookback=LOOKBACK_SECONDS, now=None, already=None):
+    """Unanswered teammate replies in threads the bot is already part of."""
+    now = time.time() if now is None else now
+    cutoff = now - lookback
+    found = []
+    try:
+        channels = _list_channels(client, 'public_channel')
+    except Exception as exc:  # noqa: BLE001
+        err, needed = _api_error(exc)
+        log.warning('conversations.list failed: %s needed=%s', err, needed)
+        return found
+    for ch in channels:
+        if ch.get('is_member') is False:
+            continue
+        cid = ch.get('id')
+        if not cid:
+            continue
+        try:
+            messages = _history(client, cid)
+        except Exception as exc:  # noqa: BLE001
+            err, needed = _api_error(exc)
+            log.warning('history %s failed: %s needed=%s', cid, err, needed)
+            continue
+        for parent in messages:
+            parent_ts = parent.get('ts') or ''
+            if int(parent.get('reply_count') or 0) <= 0 and not parent.get('latest_reply'):
+                continue
+            latest = parent.get('latest_reply')
+            try:
+                if latest and float(latest) < cutoff:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            try:
+                replies = _replies(client, cid, parent.get('thread_ts') or parent_ts)
+            except Exception as exc:  # noqa: BLE001
+                err, needed = _api_error(exc)
+                log.warning('replies %s %s failed: %s needed=%s', cid, parent_ts, err, needed)
+                continue
+            if not thread_is_ours(replies, bot_user=bot_user, bot_id=bot_id):
+                continue
+            last_human = _newest_unanswered_human(replies, bot_user=bot_user, cutoff=cutoff)
+            if not last_human:
+                continue
+            ts = last_human.get('ts') or ''
+            if already and already(cid, ts):
+                continue
+            found.append({
+                'type': 'message',
+                'channel': cid,
+                'channel_type': 'channel',
+                'channel_name': ch.get('name'),
+                'user': last_human.get('user') or '',
+                'text': last_human.get('text') or '',
+                'ts': ts,
+                'thread_ts': parent.get('thread_ts') or parent_ts,
+            })
+    return found
+
+
+def _dedupe_events(events):
+    seen, out = set(), []
+    for event in events:
+        key = (event.get('channel'), event.get('ts'))
+        if key in seen or not key[0] or not key[1]:
+            continue
+        seen.add(key)
+        out.append(event)
+    return out
+
+
 def unanswered_channel_mentions(client, *, bot_user=BOT_USER_ID, bot_id=BOT_ID,
                                 lookback=LOOKBACK_SECONDS, now=None, already=None):
     """Newest-first scan of public channels the bot is in."""
@@ -287,9 +412,12 @@ class Catchup:
         mentions = unanswered_channel_mentions(
             self.client, bot_user=self.bot_user, bot_id=self.bot_id,
             lookback=self.lookback, now=now, already=already)
+        followups = unanswered_thread_followups(
+            self.client, bot_user=self.bot_user, bot_id=self.bot_id,
+            lookback=self.lookback, now=now, already=already)
         dms = unanswered_dms(
             self.client, bot_user=self.bot_user, lookback=self.lookback, now=now, already=already)
-        return mentions + dms
+        return _dedupe_events(mentions + followups + dms)
 
     def run_once(self):
         pending = self.pending()
