@@ -4,9 +4,10 @@ Persona is selected with SLACK_PERSONA (default amy):
 
 * amy (AMY Worker / AMYI): posts booking updates to #amy-bookings (or Tom's
   DM), answers DMs and @mentions with read-only AMY queue tools.
-* jacob (Jacob): new-hire promoter onboarding knowledge bot. No AMY queue
-  tools or booking watcher. On team_join, DMs a short welcome. Escalations
-  are DMed to Tom.
+* jacob (Jacob): new-hire promoter onboarding coach. No AMY queue tools or
+  booking watcher. Intro DM on team_join, #newhire joins, and a first DM;
+  captures why they want to be a promoter and assigns staged homework.
+  Escalations are DMed to Tom.
 
 Env: SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_PERSONA, OPENAI_API_KEY,
 OPENAI_MODEL, SLACK_OWNER_USER_ID (Tom), SLACK_ALLOWED_USERS,
@@ -28,6 +29,8 @@ from .lookups import Lookups
 from .views import scrub
 from .watcher import Watcher
 from .welcome import WelcomedSet
+from . import onboarding as onboarding_mod
+from .onboarding import OnboardingStore
 
 log = logging.getLogger('amy.slack')
 TOM_USER_ID = 'U0CK42KJT7E'
@@ -218,30 +221,69 @@ def _call_answer(fn, lookups, text, history=None, context=None, meta=None):
         return fn(lookups, text)
 
 
-def reply_text(lookups, text, *, use_llm=None, llm_answer=None, history=None, context=None):
+def jacob_reply_text(lookups, text, *, use_llm=None, llm_answer=None, history=None,
+                     context=None, user_id=None, onboarding=None, user=None, is_im=False):
+    """Coach turn for Jacob: intro, reason, homework, or a KB answer."""
+    use_llm = llm.configured() if use_llm is None else use_llm
+    lead = ''
+    suffix = ''
+    if onboarding and user_id and not needs_escalation(text, persona='jacob'):
+        planned = onboarding_mod.plan_turn(
+            onboarding, user_id, text, user=user, history=history, is_im=is_im)
+        if planned['mode'] in ('intro', 'ack_reason', 'progress') and not planned.get('also_answer'):
+            safe, _flags = apply_guardrails(
+                planned['text'], amy_confirmed=True, source='onboarding', persona='jacob')
+            return safe
+        if planned['mode'] == 'intro' and planned.get('also_answer'):
+            lead = planned['text']
+        elif planned['mode'] == 'answer':
+            suffix = planned['text'] or ''
+    extra = context
+    if onboarding and user_id:
+        note = onboarding_mod.onboarding_note(onboarding.get(user_id))
+        if note:
+            extra = (context + '\n' + note) if context else note
+    try:
+        if use_llm:
+            try:
+                meta = {}
+                raw = _call_answer(llm_answer or llm.answer, lookups, commands.strip_mentions(text),
+                                   history=history, context=extra, meta=meta)
+                if lead:
+                    raw = lead.rstrip() + '\n\n' + (raw or '')
+                if suffix and suffix not in (raw or ''):
+                    raw = (raw or '').rstrip() + suffix
+                safe, _flags = apply_guardrails(
+                    raw, amy_confirmed=False, source='llm', persona='jacob')
+                return safe
+            except Exception as exc:  # noqa: BLE001
+                log.error('OpenAI answer failed: %s', llm.describe(exc))
+                if lead:
+                    return apply_guardrails(
+                        lead, amy_confirmed=True, source='onboarding', persona='jacob')[0]
+                return JACOB_FAIL_FALLBACK
+        if lead:
+            return apply_guardrails(
+                lead, amy_confirmed=True, source='onboarding', persona='jacob')[0]
+        vague = JACOB_VAGUE_FALLBACK + (suffix or '')
+        return apply_guardrails(vague, amy_confirmed=True, source='onboarding', persona='jacob')[0]
+    except Exception as exc:  # noqa: BLE001
+        log.warning('jacob reply failed: %s', type(exc).__name__)
+        return JACOB_FAIL_FALLBACK
+
+
+def reply_text(lookups, text, *, use_llm=None, llm_answer=None, history=None, context=None,
+               user_id=None, onboarding=None, user=None, is_im=False):
     """Answer one message. Exact keyword commands are answered directly; free
     text goes to the OpenAI model when configured, else a short clarifying
     question. Never dump the command list on a vague message. Guardrails run
     on every outgoing line (no phones, secrets, or unconfirmed 'booked').
     Jacob skips AMY keyword commands and has no queue lookups."""
     if persona.is_jacob():
-        use_llm = llm.configured() if use_llm is None else use_llm
-        try:
-            if use_llm:
-                try:
-                    meta = {}
-                    raw = _call_answer(llm_answer or llm.answer, lookups, commands.strip_mentions(text),
-                                       history=history, context=context, meta=meta)
-                    safe, _flags = apply_guardrails(
-                        raw, amy_confirmed=False, source='llm', persona='jacob')
-                    return safe
-                except Exception as exc:  # noqa: BLE001
-                    log.error('OpenAI answer failed: %s', llm.describe(exc))
-                    return JACOB_FAIL_FALLBACK
-            return JACOB_VAGUE_FALLBACK
-        except Exception as exc:  # noqa: BLE001
-            log.warning('jacob reply failed: %s', type(exc).__name__)
-            return JACOB_FAIL_FALLBACK
+        return jacob_reply_text(
+            lookups, text, use_llm=use_llm, llm_answer=llm_answer,
+            history=history, context=context, user_id=user_id,
+            onboarding=onboarding, user=user, is_im=is_im)
     cmd, arg = commands.parse(text)
     use_llm = llm.configured() if use_llm is None else use_llm
     try:
@@ -271,8 +313,20 @@ def reply_text(lookups, text, *, use_llm=None, llm_answer=None, history=None, co
 
 
 def _jacob_startup_checks(lookups, answer=None):
-    """Logged-only model tests for Jacob. Never posts to Slack."""
+    """Logged-only intro draft, coach simulation, and model tests. Never posts to Slack."""
     ok = True
+    try:
+        intro = onboarding_mod.intro_text({'id': 'U_SIM', 'real_name': 'Alex'})
+        log.info('Jacob intro draft: %s', scrub(intro, 800))
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            turns, _rec = onboarding_mod.simulate_conversation(
+                path=os.path.join(tmp, 'jacob-coach-sim.json'))
+        for i, (who, msg) in enumerate(turns, 1):
+            log.info('Jacob coach-sim turn %d %s: %s', i, who, scrub(msg, 500))
+    except Exception as exc:  # noqa: BLE001
+        log.error('Jacob coach-sim: FAIL %s', type(exc).__name__)
+        ok = False
     tests = (
         ('pay schedule', 'how often do we get paid?'),
         ('signup', 'how do I sign up a client?'),
@@ -327,12 +381,8 @@ def team_join_user(event):
 
 
 def should_welcome(user):
-    """Skip bots, the app user, and empty ids."""
-    user = user if isinstance(user, dict) else {'id': user}
-    uid = user.get('id') or ''
-    if not uid or user.get('is_bot') or user.get('is_app_user'):
-        return False
-    return True
+    """Skip bots, the app user, empty ids, and Tom."""
+    return onboarding_mod.should_intro(user)
 
 
 def build_app():
@@ -347,7 +397,8 @@ def build_app():
 
     replied = RepliedSet()
     flagsink = FlagSink()
-    welcomed = WelcomedSet() if persona.is_jacob() else None
+    onboarding = OnboardingStore() if persona.is_jacob() else None
+    welcomed = onboarding
 
     def handle(event, say, thread=None):
         user = event.get('user') or ''
@@ -367,7 +418,14 @@ def build_app():
                 return
             history, context = load_conversation(app.client, event, thread)
             incoming = event.get('text') or ''
-            outgoing = reply_text(lookups, incoming, history=history, context=context)
+            is_im = event.get('channel_type') == 'im' or (channel or '').startswith('D')
+            if persona.is_jacob() and onboarding and user:
+                note = onboarding_mod.onboarding_note(onboarding.get(user))
+                if note:
+                    context = (context + '\n' + note) if context else note
+            outgoing = reply_text(
+                lookups, incoming, history=history, context=context,
+                user_id=user, onboarding=onboarding, user={'id': user}, is_im=is_im)
             who = persona.name()
             if needs_escalation(incoming, persona=who):
                 outgoing = apply_guardrails(
@@ -426,24 +484,24 @@ def build_app():
         log.info('ignore untagged channel message channel=%s ts=%s',
                  event.get('channel') or '', event.get('ts') or '')
 
-    def welcome_new_member(user):
+    def welcome_new_member(user, source='join'):
         user = user if isinstance(user, dict) else {'id': user}
         uid = user.get('id') or ''
         if not should_welcome(user):
             log.info('skip welcome user=%s', uid or '?')
             return
-        if welcomed is None or welcomed.already(uid):
+        if onboarding is None or onboarding.intro_sent(uid):
             log.info('skip already-welcomed user=%s', uid)
             return
-        text = persona.welcome_text(user)
+        text = onboarding_mod.intro_text(user)
         text, _flags = apply_guardrails(
             text, amy_confirmed=True, source='welcome', persona='jacob')
         try:
             dm = app.client.conversations_open(users=uid)['channel']['id']
             app.client.chat_postMessage(
                 channel=dm, text=text, unfurl_links=False, unfurl_media=False)
-            welcomed.mark(uid)
-            log.info('welcomed user=%s', uid)
+            onboarding.mark_intro_sent(uid, source=source)
+            log.info('welcomed user=%s source=%s', uid, source)
         except Exception as exc:  # noqa: BLE001
             err, needed = slack_error(exc)
             log.error('welcome DM failed user=%s: %s needed=%s', uid, err, needed)
@@ -457,10 +515,15 @@ def build_app():
 
         @app.event('member_joined_channel')
         def on_member_joined_channel(event):
-            # Log only. Welcome is team_join only so a second channel join
-            # does not send another DM.
+            user = event.get('user') or ''
+            channel = event.get('channel') or ''
             log.info('incoming type=member_joined_channel user=%s channel=%s',
-                     event.get('user') or '', event.get('channel') or '')
+                     user if not isinstance(user, dict) else user.get('id'), channel)
+            if onboarding_mod.is_newhire_channel(
+                    channel, event.get('channel_name') or event.get('name')):
+                # DM the intro; do not post in #newhire. Existing members are
+                # not backfilled — only live join events after deploy.
+                welcome_new_member(user, source='newhire')
 
     return app, api, lookups, replied, say_reply, flagsink
 
@@ -480,7 +543,7 @@ def main():
     app, api, lookups, replied, say_reply, flagsink = build_app()
     if persona.is_jacob():
         flagsink.post = owner_poster(app.client)
-        log.info('jacob onboarding bot; escalations DM Tom; answers via %s',
+        log.info('jacob onboarding coach; escalations DM Tom; answers via %s',
                  'OpenAI ' + (os.environ.get('OPENAI_MODEL') or llm.DEFAULT_MODEL) if llm.configured() else 'keyword fallback')
         if llm.configured():
             threading.Thread(target=startup_check, args=(lookups,), name='openai-self-check', daemon=True).start()
