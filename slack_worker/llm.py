@@ -18,7 +18,7 @@ import urllib.request
 
 from .guardrails import tool_shows_done
 from .history import to_api_messages
-from .prompt import REPLY_SCHEMA, SYSTEM_PROMPT
+from .prompt import REPLY_SCHEMA, system_prompt
 from .views import scrub
 
 log = logging.getLogger('amy.slack.llm')
@@ -65,8 +65,18 @@ def responses_tools():
              'parameters': t['function']['parameters']} for t in TOOLS]
 
 
-def responses_payload(model, input_items, *, instructions=None, previous=None, max_tokens=4000, structured=True):
-    payload = {'model': model, 'input': input_items, 'tools': responses_tools(), 'max_output_tokens': max_tokens}
+def include_tools():
+    """Jacob is a knowledge bot and must not receive AMY queue tools."""
+    from . import persona
+    return not persona.is_jacob()
+
+
+def responses_payload(model, input_items, *, instructions=None, previous=None, max_tokens=4000, structured=True, tools=None):
+    payload = {'model': model, 'input': input_items, 'max_output_tokens': max_tokens}
+    if tools is None:
+        tools = responses_tools() if include_tools() else []
+    if tools:
+        payload['tools'] = tools
     if instructions:
         payload['instructions'] = instructions
     if previous:
@@ -238,13 +248,16 @@ def answer(lookups, text, *, history=None, context=None, meta=None, post=respons
     model = model or os.environ.get('OPENAI_MODEL', '').strip() or DEFAULT_MODEL
     items = to_api_messages(history, text, newest_context=context)
     resp, structured = _post_structured(
-        post, lambda s: responses_payload(model, items, instructions=SYSTEM_PROMPT, structured=s))
+        post, lambda s: responses_payload(model, items, instructions=system_prompt(), structured=s))
     results = []
     for _ in range(MAX_ROUNDS):
         why = refusal_reason(resp)
         if why:
             raise LlmError(why)
         calls = function_calls(resp)
+        if calls and not include_tools():
+            log.warning('model requested tools on jacob persona; ignoring tool calls')
+            calls = []
         if not calls:
             content = parse_reply(output_text(resp), structured=structured)
             if meta is not None:
@@ -260,7 +273,7 @@ def answer(lookups, text, *, history=None, context=None, meta=None, post=respons
             results.append(result)
             outputs.append({'type': 'function_call_output', 'call_id': call.get('call_id'),
                             'output': json.dumps(result, default=str)[:30000]})
-        resp = post(responses_payload(model, outputs, instructions=SYSTEM_PROMPT,
+        resp = post(responses_payload(model, outputs, instructions=system_prompt(),
                                       previous=resp.get('id'), structured=structured))
     raise LlmError('too many tool rounds')
 
@@ -274,13 +287,18 @@ def self_check(post=None, model=None, log_=None, tools_post=None):
     log_ = log_ or log
     model = model or os.environ.get('OPENAI_MODEL', '').strip() or DEFAULT_MODEL
     results = {}
-    checks = (
+    checks = [
         ('plain', post, {'model': model, 'max_completion_tokens': 400, 'messages': [
             {'role': 'system', 'content': 'Reply with the single word ok.'}, {'role': 'user', 'content': 'ping'}]}),
-        ('tools', tools_post, responses_payload(model, [{'role': 'user', 'content': 'ping'}],
-                                                instructions='Reply with the single word ok.', max_tokens=400,
-                                                structured=False)),
-    )
+    ]
+    if include_tools():
+        checks.append(
+            ('tools', tools_post, responses_payload(model, [{'role': 'user', 'content': 'ping'}],
+                                                    instructions='Reply with the single word ok.', max_tokens=400,
+                                                    structured=False)),
+        )
+    else:
+        log_.info('OpenAI self-check (tools): skipped (jacob knowledge bot)')
     for name, fn, payload in checks:
         try:
             resp = fn(payload)

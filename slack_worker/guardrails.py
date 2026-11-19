@@ -108,10 +108,60 @@ ESCALATION_RE = re.compile(
 
 ESCALATION_REPLY = "I'll get this over to Tom. Let me know if anything else comes up."
 
+# Jacob-only: rate / payout schedule / payment method / bonus / contract.
+# Do not treat a general "I want credit" question as a pay question.
+PAY_QUESTION_RE = re.compile(
+    r"(?i)("
+    r"\b(?:how often|when|how frequent(?:ly)?)\b[\s\S]{0,40}\b(?:paid|pay|payout|paycheck)\b|"
+    r"\b(?:get|getting|got|are we|am i|do we|do i|will we|will i)\s+paid\b|"
+    r"\bpayout schedule\b|\bpay schedule\b|\bpayment schedule\b|"
+    r"\b(?:what(?:'s| is| are)|how much(?: is| are)?)\b[^.]{0,40}\b(?:rate|rates|commission|pay|payout)s?\b|"
+    r"\bpayment method|"
+    r"\bhow do (?:we|i) (?:get|receive) (?:paid|payment|pay)\b|"
+    r"\bzelle\b|\bcash\s?app\b|\bvenmo\b|\bdirect deposit\b|"
+    r"\bbonus(?:es)?\b|\bcontracts?\b|\bcontractual\b|\b1099\b|\bw-?2\b|"
+    r"\bhow much\b[\s\S]{0,40}\b(?:get|make|earn|pay|paid|commission)\b|"
+    r"\b(?:commission|pay)\s+rates?\b"
+    r")"
+)
+PAY_ESCALATION_REPLY = "Tom still needs to confirm that. I'll get it over to him."
+PAY_FIGURE_RE = re.compile(r'\$\s*\d|\d+\s*[–-]\s*\d+\s*%')
 
-def needs_escalation(text):
-    """True when the incoming message should be flagged for Tom."""
-    return bool(ESCALATION_RE.search(text or ''))
+
+def is_pay_question(text):
+    return bool(PAY_QUESTION_RE.search(text or ''))
+
+
+def looks_like_pay_figure(text):
+    return bool(PAY_FIGURE_RE.search(text or ''))
+
+
+def needs_escalation(text, persona=None):
+    """True when the incoming message should be flagged for Tom.
+
+    AMY (default): disputes, payment issues, special requests, management
+    approval. Jacob also escalates rate, payout schedule, payment method,
+    bonus, and contract questions. Bare credit questions are never an
+    escalation on either persona.
+    """
+    if ESCALATION_RE.search(text or ''):
+        return True
+    if persona is None:
+        from . import persona as persona_mod
+        persona = persona_mod.name()
+    if persona == 'jacob' and is_pay_question(text):
+        return True
+    return False
+
+
+def escalation_reply(text, persona=None):
+    """Forced reply used when needs_escalation is true."""
+    if persona is None:
+        from . import persona as persona_mod
+        persona = persona_mod.name()
+    if persona == 'jacob' and is_pay_question(text) and not ESCALATION_RE.search(text or ''):
+        return PAY_ESCALATION_REPLY
+    return ESCALATION_REPLY
 
 
 def tidy_voice(text):
@@ -142,7 +192,7 @@ def tidy_voice(text):
     return out.strip(), flags
 
 
-def apply_guardrails(text, *, amy_confirmed=False, source='llm'):
+def apply_guardrails(text, *, amy_confirmed=False, source='llm', persona=None):
     """-> (safe_text, flags). flags is empty when the original text is kept."""
     flags = []
     raw = (text or '').strip()
@@ -157,6 +207,13 @@ def apply_guardrails(text, *, amy_confirmed=False, source='llm'):
     if flags:
         log.warning('guardrails: %s source=%s', ','.join(flags), source)
         return SAFE_FALLBACK, flags
+    if persona is None:
+        from . import persona as persona_mod
+        persona = persona_mod.name()
+    if persona == 'jacob' and looks_like_pay_figure(raw):
+        flags.append('pay_figure_blocked')
+        log.warning('guardrails: pay_figure_blocked source=%s', source)
+        return PAY_ESCALATION_REPLY, flags
     if not amy_confirmed and looks_like_confirmation(raw):
         flags.append('unconfirmed_spot_blocked')
         log.warning('guardrails: unconfirmed_spot_blocked source=%s', source)
