@@ -66,6 +66,22 @@ TOOLS = [
 ]
 
 
+def reasoning_effort():
+    """gpt-6.1-sol rejects function tools on /v1/chat/completions unless
+    reasoning_effort is 'none' (OpenAI HTTP 400, param=reasoning_effort). The
+    lookups are simple, so 'none' is the default; override with
+    OPENAI_REASONING_EFFORT, or set it to '' to omit the parameter."""
+    return os.environ.get('OPENAI_REASONING_EFFORT', 'none').strip()
+
+
+def with_tools(payload):
+    out = {**payload, 'tools': TOOLS}
+    effort = reasoning_effort()
+    if effort:
+        out['reasoning_effort'] = effort
+    return out
+
+
 def configured():
     return bool(os.environ.get('OPENAI_API_KEY', '').strip())
 
@@ -139,7 +155,7 @@ def answer(lookups, text, *, history=None, post=http_post, model=None):
     messages += list(history or [])
     messages.append({'role': 'user', 'content': text})
     for _ in range(MAX_ROUNDS):
-        resp = post({'model': model, 'messages': messages, 'tools': TOOLS, 'max_completion_tokens': 4000})
+        resp = post(with_tools({'model': model, 'messages': messages, 'max_completion_tokens': 4000}))
         choice = (resp.get('choices') or [{}])[0]
         msg = choice.get('message') or {}
         calls = msg.get('tool_calls') or []
@@ -169,9 +185,9 @@ def self_check(post=http_post, model=None, log_=None):
     model = model or os.environ.get('OPENAI_MODEL', '').strip() or DEFAULT_MODEL
     results = {}
     base = [{'role': 'system', 'content': 'Reply with the single word ok.'}, {'role': 'user', 'content': 'ping'}]
-    for name, extra in (('plain', {}), ('tools', {'tools': TOOLS})):
+    for name, wrap in (('plain', dict), ('tools', with_tools)):
         try:
-            resp = post({'model': model, 'messages': base, 'max_completion_tokens': 400, **extra})
+            resp = post(wrap({'model': model, 'messages': base, 'max_completion_tokens': 400}))
             results[name] = 'ok'
             log_.info('OpenAI self-check (%s): ok, model=%s', name, scrub(str(resp.get('model') or model), 80))
         except Exception as exc:  # noqa: BLE001
