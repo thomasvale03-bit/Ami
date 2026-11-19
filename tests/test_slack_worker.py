@@ -8,7 +8,7 @@ from datetime import datetime
 from unittest import mock
 from zoneinfo import ZoneInfo
 
-from slack_worker import app as sw_app, catchup, commands, guardrails, health, history, llm, persona, prompt, views, welcome
+from slack_worker import app as sw_app, catchup, commands, guardrails, health, history, llm, onboarding, persona, prompt, views, welcome
 from slack_worker.lookups import Lookups
 from slack_worker.watcher import Watcher
 
@@ -1159,11 +1159,13 @@ class JacobPersonaTest(unittest.TestCase):
 
     def test_welcome_text_is_short_and_has_first_steps(self):
         text = persona.welcome_text({'real_name': 'Alex Promoter', 'id': 'U1'})
-        self.assertTrue(text.startswith('Hey Alex, welcome to Playmaker.'))
+        self.assertTrue(text.startswith("Hey Alex, I'm Jacob, Playmaker's new-promoter coach."))
         self.assertIn('playmakerentertainment.com', text)
-        self.assertIn('Promoter fields', text)
+        self.assertIn('why do you want to be a promoter', text.lower())
+        self.assertIn('homework', text.lower())
         self.assertIn('ask me here', text.lower())
         self.assertNotIn('$', text)
+        self.assertNotIn('🔥', text)
         self.assertFalse(prompt.re_pay_figure(text))
 
     def test_welcomed_set_persists_and_skips_bots(self):
@@ -1176,6 +1178,7 @@ class JacobPersonaTest(unittest.TestCase):
             self.assertTrue(again.already('U123'))
         self.assertFalse(sw_app.should_welcome({'id': 'U123', 'is_bot': True}))
         self.assertFalse(sw_app.should_welcome({'id': ''}))
+        self.assertFalse(sw_app.should_welcome({'id': 'U0CK42KJT7E'}))
         self.assertTrue(sw_app.should_welcome({'id': 'U123', 'real_name': 'Alex'}))
         self.assertEqual(sw_app.team_join_user({'user': {'id': 'U123'}})['id'], 'U123')
         self.assertEqual(sw_app.team_join_user({'user': 'U123'})['id'], 'U123')
@@ -1201,6 +1204,9 @@ class JacobPersonaTest(unittest.TestCase):
                 ok = sw_app.startup_check(None, answer=answer, check=lambda: None)
         self.assertTrue(ok)
         joined = '\n'.join(logs)
+        self.assertIn('Jacob intro draft:', joined)
+        self.assertIn("I'm Jacob, Playmaker's new-promoter coach", joined)
+        self.assertIn('Jacob coach-sim turn', joined)
         self.assertIn('OpenAI voice-check (pay schedule):', joined)
         self.assertIn(guardrails.PAY_ESCALATION_REPLY, joined)
         self.assertNotIn('$1', joined.split('OpenAI voice-check (pay schedule):', 1)[-1].split('\n', 1)[0])
@@ -1225,6 +1231,141 @@ class JacobPersonaTest(unittest.TestCase):
         self.assertEqual(posted[0]['channel'], 'D999')
         self.assertEqual(posted[0]['text'], 'Need you to look at this.')
         self.assertFalse(posted[0]['unfurl_links'])
+
+
+class JacobOnboardingCoachTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, 'jacob-onboarding.json')
+        self.store = onboarding.OnboardingStore(self.path)
+        self.uid = 'UCOACH'
+        self.user = {'id': self.uid, 'real_name': 'Alex'}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_intro_introduces_jacob_and_asks_why(self):
+        text = onboarding.intro_text(self.user)
+        self.assertIn("I'm Jacob, Playmaker's new-promoter coach", text)
+        self.assertIn('how the program works', text)
+        self.assertIn('playmakerentertainment.com', text)
+        self.assertIn('venues and nights', text)
+        self.assertIn('how to promote', text)
+        self.assertIn('why do you want to be a promoter', text.lower())
+        self.assertNotIn('$', text)
+        self.assertEqual(text.count('!'), 0)
+
+    def test_first_dm_sends_intro_once(self):
+        with mock.patch.dict(os.environ, {'SLACK_PERSONA': 'jacob'}):
+            first = sw_app.reply_text(
+                None, 'hey', use_llm=False, user_id=self.uid,
+                onboarding=self.store, user=self.user, is_im=True)
+            second = sw_app.reply_text(
+                None, 'hey again', use_llm=False, user_id=self.uid,
+                onboarding=self.store, user=self.user, is_im=True)
+        self.assertIn("I'm Jacob, Playmaker's new-promoter coach", first)
+        self.assertTrue(self.store.intro_sent(self.uid))
+        self.assertNotIn("I'm Jacob, Playmaker's new-promoter coach", second)
+
+    def test_newhire_channel_and_skip_tom(self):
+        self.assertTrue(onboarding.is_newhire_channel('C0CJZ69MPB7'))
+        self.assertTrue(onboarding.is_newhire_channel('Cxyz', 'newhire'))
+        self.assertFalse(onboarding.is_newhire_channel('C0CJK07GMHV', 'generalchat'))
+        self.assertFalse(onboarding.should_intro({'id': 'U0CK42KJT7E'}))
+        self.assertFalse(onboarding.should_intro({'id': self.uid, 'is_bot': True}))
+
+    def test_legacy_welcomed_ids_are_not_reintroduced(self):
+        legacy = os.path.join(self.tmp.name, 'jacob-welcomed.json')
+        with open(legacy, 'w', encoding='utf-8') as fh:
+            fh.write('["ULEGACY"]')
+        store = onboarding.OnboardingStore(self.path)
+        self.assertTrue(store.intro_sent('ULEGACY'))
+        with mock.patch.dict(os.environ, {'SLACK_PERSONA': 'jacob'}):
+            text = sw_app.reply_text(
+                None, 'hey', use_llm=False, user_id='ULEGACY',
+                onboarding=store, user={'id': 'ULEGACY'}, is_im=True)
+        self.assertNotIn("I'm Jacob, Playmaker's new-promoter coach", text)
+
+    def test_reason_capture_tailors_and_assigns_two_homework_items(self):
+        self.store.mark_intro_sent(self.uid)
+        reason = ('I want to be a promoter because I have a big friend group '
+                  'who go to Vegas and I can get them out.')
+        with mock.patch.dict(os.environ, {'SLACK_PERSONA': 'jacob'}):
+            text = sw_app.reply_text(
+                None, reason, use_llm=False, user_id=self.uid,
+                onboarding=self.store, user=self.user, is_im=True)
+        rec = self.store.get(self.uid)
+        self.assertIn(reason, rec['reason'])
+        self.assertEqual(rec['homework_assigned'], ['learn-basics', 'venues-nights'])
+        self.assertIn('solid place to start', text)
+        self.assertIn('Learn how Playmaker works', text)
+        self.assertIn('Study the venue lineup and weekly nights', text)
+        self.assertNotIn('Practice understanding the signup form', text)
+        self.assertIn('report back', text.lower())
+
+    def test_a_question_is_not_captured_as_a_reason(self):
+        self.store.mark_intro_sent(self.uid)
+        with mock.patch.dict(os.environ, {'SLACK_PERSONA': 'jacob'}):
+            sw_app.reply_text(
+                None, 'how do I sign up a client?', use_llm=False,
+                user_id=self.uid, onboarding=self.store, user=self.user, is_im=True)
+        self.assertEqual(self.store.get(self.uid)['reason'], '')
+        self.assertEqual(self.store.get(self.uid)['stage'], 'awaiting_reason')
+
+    def test_progress_assigns_the_next_homework_batch(self):
+        self.store.mark_intro_sent(self.uid)
+        self.store.set_reason(self.uid, 'I love nightlife and want to get friends out.')
+        self.assertEqual(self.store.get(self.uid)['homework_assigned'],
+                         ['learn-basics', 'venues-nights'])
+        with mock.patch.dict(os.environ, {'SLACK_PERSONA': 'jacob'}):
+            text = sw_app.reply_text(
+                None, "I'm done with that homework. I reviewed the site and the venues.",
+                use_llm=False, user_id=self.uid, onboarding=self.store,
+                user=self.user, is_im=True)
+        rec = self.store.get(self.uid)
+        self.assertEqual(rec['homework_done'], ['learn-basics', 'venues-nights'])
+        self.assertEqual(rec['homework_assigned'], ['practice-signup', 'contact-list'])
+        self.assertIn('Practice understanding the signup form', text)
+        self.assertIn('Build a list of contacts', text)
+
+    def test_homework_list_is_grounded_in_the_kb(self):
+        ids = [item['id'] for item in onboarding.HOMEWORK]
+        self.assertEqual(ids, [
+            'learn-basics', 'venues-nights', 'practice-signup',
+            'contact-list', 'first-outreach', 'follow-up',
+        ])
+        joined = ' '.join(item['instruction'] + item['kb'] for item in onboarding.HOMEWORK)
+        self.assertIn('playmakerentertainment.com', joined)
+        self.assertIn('Promoter', joined)
+        self.assertIn('approved', joined.lower())
+        self.assertNotIn('$1', joined)
+        self.assertFalse(prompt.re_pay_figure(joined))
+
+    def test_pay_escalation_still_intact_during_onboarding(self):
+        self.store.mark_intro_sent(self.uid)
+        self.store.set_reason(self.uid, 'I have a big friend group.')
+        question = 'how often do we get paid?'
+        self.assertTrue(guardrails.needs_escalation(question, persona='jacob'))
+        self.assertEqual(
+            guardrails.escalation_reply(question, persona='jacob'),
+            guardrails.PAY_ESCALATION_REPLY)
+        self.assertNotIn('$', guardrails.PAY_ESCALATION_REPLY)
+        # plan_turn is not used for pay questions; handle() overwrites.
+        rec = self.store.get(self.uid)
+        self.assertEqual(rec['stage'], 'homework')
+
+    def test_simulated_conversation_is_five_beats_and_escalates_pay(self):
+        turns, rec = onboarding.simulate_conversation(
+            os.path.join(self.tmp.name, 'sim.json'))
+        self.assertGreaterEqual(len(turns), 6)
+        self.assertIn("I'm Jacob, Playmaker's new-promoter coach", turns[0][1])
+        self.assertIn('friend', turns[1][1].lower())
+        self.assertIn('solid place to start', turns[2][1])
+        self.assertIn('Learn how Playmaker works', turns[2][1])
+        self.assertIn('how often do we get paid?', turns[-2][1])
+        self.assertEqual(turns[-1][1], guardrails.PAY_ESCALATION_REPLY)
+        self.assertNotIn('$1', ''.join(msg for _, msg in turns))
+        self.assertIn('learn-basics', rec['homework_done'])
 
 
 if __name__ == '__main__':

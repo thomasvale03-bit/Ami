@@ -119,7 +119,7 @@ backup path). No reinstall is required unless a new scope is added —
 
 ## Jacob (`jacob-slack-worker`)
 
-Jacob is the new-hire promoter onboarding bot in the same Slack workspace,
+Jacob is the new-hire promoter onboarding coach in the same Slack workspace,
 running the same `slack_worker` package with `SLACK_PERSONA=jacob`.
 
 * Knowledge bot only: Tom's onboarding knowledge base
@@ -127,9 +127,18 @@ running the same `slack_worker` package with `SLACK_PERSONA=jacob`.
   voice guide as AMYI. Historical pay figures were removed from the file and
   are never loaded into the prompt. Jacob has no AMY queue tools and does
   not run the booking watcher, so AMYI's behavior is unchanged.
-* On `team_join`, Jacob DMs the new member a short welcome with first steps
-  and invites questions. Existing members are not backfilled. `member_joined_channel`
-  is logged only, so joining a second channel does not send another DM.
+* Intro DM (deduped on the `/data` volume, including IDs from the earlier
+  welcome file): on `team_join`; when a new member joins `#newhire`
+  (`C0CJZ69MPB7`) via `member_joined_channel` (bots and Tom are skipped);
+  and on a first DM from someone who has not been introduced. Existing
+  members are not backfilled. The intro introduces Jacob as Playmaker's
+  new-promoter coach, explains what he can help with, and asks why they
+  want to be a promoter.
+* After they share their reason, Jacob acknowledges it personally, tailors
+  the next steps, and assigns staged homework (1–2 items at a time) drawn
+  only from typical promoter activities in the KB. He asks them to report
+  back and then moves to the next stage. Per-user state (stage, reason,
+  homework assigned/done) lives on the volume.
 * Answers DMs, @mentions, and untagged follow-ups in threads it is already
   in, with the same catch-up loop as AMYI.
 * For any rate, payout schedule, payment method, bonus, or contract
@@ -156,6 +165,7 @@ running the same `slack_worker` package with `SLACK_PERSONA=jacob`.
 | `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` | Jacob app (xoxb / xapp) |
 | `OPENAI_API_KEY` | `${{amy-slack-worker.OPENAI_API_KEY}}` (reference) |
 | `OPENAI_MODEL` | `gpt-6.1-sol` |
-| `SLACK_OWNER_USER_ID` | Tom, default `U0CK42KJT7E` |
+| `SLACK_OWNER_USER_ID` | Tom, default `U0CK42KJT7E` (skipped for intros) |
+| `SLACK_NEWHIRE_CHANNEL` | default `C0CJZ69MPB7` (`#newhire`) |
 | `SLACK_WORKER_STATE` | `/data/slack-worker/state.json` (its own volume at `/data`) |
 | `RAILWAY_DOCKERFILE_PATH` | `slack_worker/Dockerfile` |
