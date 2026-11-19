@@ -45,7 +45,19 @@ commands still work.
 Booking updates still go only to `#amy-bookings`. The once-per-channel
 hello posts only to that updates channel, never to `#generalchat`,
 `#weeklyevents`, or `#random`. In channels the bot answers only when
-@mentioned, and it replies in a thread on that mention.
+@mentioned, and it replies in a thread on that mention. It also replies
+in that thread when a teammate follows up without an @mention (a thread
+the bot already answered, or one that started with an @mention of the
+bot). Other untagged channel messages are ignored, so #generalchat and
+#weeklyevents stay quiet.
+
+If someone asks about promoter credit: everyone in the Slack workspace
+is a promoter. They get credit by going to playmakerentertainment.com,
+filling out their client's information, and putting their own promoter
+info (Promoter first name / Promoter last name) on that same form. Only
+then are they counted for the guest list. Being counted does not
+guarantee check-in credit; the bot must never promise check-in credit
+or payouts, and cannot submit the form from Slack.
 
 If someone asks how to sign clients or guests up, the bot explains that
 it cannot sign anyone up from Slack (read-only). Guests sign up on
