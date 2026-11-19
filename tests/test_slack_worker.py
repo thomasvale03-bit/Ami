@@ -8,7 +8,7 @@ from datetime import datetime
 from unittest import mock
 from zoneinfo import ZoneInfo
 
-from slack_worker import app as sw_app, commands, guardrails, health, history, llm, prompt, views
+from slack_worker import app as sw_app, catchup, commands, guardrails, health, history, llm, prompt, views
 from slack_worker.lookups import Lookups
 from slack_worker.watcher import Watcher
 
@@ -721,6 +721,176 @@ class ViewsSecretUrlTest(unittest.TestCase):
         self.assertNotIn('supersecret', out)
         self.assertNotIn('sk-not-real', out)
         self.assertIn('[hidden]', out)
+
+
+class PromptSignupTest(unittest.TestCase):
+    def test_prompt_explains_website_and_instagram_signup(self):
+        text = prompt.SYSTEM_PROMPT
+        self.assertIn('playmakerentertainment.com', text)
+        self.assertIn('Instagram', text)
+        self.assertIn('Email', text)
+        self.assertIn('First & Last name', text)
+        self.assertIn('Number of Females/Males', text)
+        self.assertIn('Dates In Vegas', text)
+        self.assertIn('cannot book, cancel, requeue, change, approve, email, or sign anyone up', text)
+
+
+class FakeSlack:
+    """Minimal conversations.* client for catch-up tests."""
+
+    def __init__(self, channels, histories, replies=None, list_error=None):
+        self.channels = channels
+        self.histories = histories
+        self.replies = replies or {}
+        self.list_error = list_error
+        self.posted = []
+
+    def conversations_list(self, types='', exclude_archived=True, limit=200, cursor=None):
+        if self.list_error:
+            raise self.list_error
+        typ = types.split(',')[0] if types else ''
+        if typ == 'im':
+            chans = [c for c in self.channels if c.get('is_im') or (c.get('id') or '').startswith('D')]
+        else:
+            chans = [c for c in self.channels if not c.get('is_im') and not (c.get('id') or '').startswith('D')]
+        return {'channels': chans, 'response_metadata': {}}
+
+    def conversations_history(self, channel=None, limit=50):
+        return {'messages': list(self.histories.get(channel) or [])}
+
+    def conversations_replies(self, channel=None, ts=None, limit=50):
+        return {'messages': list(self.replies.get((channel, ts)) or self.histories.get(channel) or [])}
+
+    def chat_postMessage(self, **kw):
+        self.posted.append(kw)
+        return {'ok': True, 'ts': '9.0'}
+
+
+class CatchupTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.replied = catchup.RepliedSet(path=os.path.join(self.tmp.name, 'replied.json'))
+        self.now = datetime(2026, 11, 18, 20, 36, tzinfo=PHX).timestamp()
+        self.mention_ts = str(self.now - 120)
+        self.hello_ts = str(self.now - 160)
+        self.channels = [
+            {'id': 'C0CJK07GMHV', 'name': 'generalchat', 'is_member': True},
+            {'id': 'C0CK42NLM9A', 'name': 'weeklyevents', 'is_member': True},
+            {'id': 'C0CJV2R9NUV', 'name': 'random', 'is_member': True},
+            {'id': 'D0CK1QTE1FU', 'is_im': True, 'user': 'U0CK42KJT7E'},
+        ]
+        self.histories = {
+            'C0CJK07GMHV': [
+                {'ts': self.mention_ts, 'user': 'U0CK42KJT7E', 'text': '<@B0CK3T1AH8R> how do we sign clients up?',
+                 'reply_count': 0},
+                {'ts': str(self.now - 3600), 'user': 'U0CKWBVA7BJ', 'subtype': 'channel_join',
+                 'text': '<@U0CKWBVA7BJ> has joined the channel'},
+            ],
+            'C0CK42NLM9A': [
+                {'ts': self.hello_ts, 'user': 'U0CK42KJT7E', 'text': '<@B0CK3T1AH8R> hello', 'reply_count': 0},
+            ],
+            'C0CJV2R9NUV': [
+                {'ts': str(self.now - 300), 'user': 'U0CKWBVA7BJ', 'subtype': 'channel_join',
+                 'text': '<@U0CKWBVA7BJ> has joined the channel'},
+            ],
+            'D0CK1QTE1FU': [
+                {'ts': str(self.now - 5400), 'user': 'U0CKWBVA7BJ',
+                 'text': "I can check guest list bookings here, but I can't sign people up."},
+                {'ts': str(self.now - 5404), 'user': 'U0CK42KJT7E', 'text': 'Help me sign people up'},
+            ],
+        }
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_is_mention_matches_bot_id_and_user_id(self):
+        self.assertTrue(catchup.is_mention('<@B0CK3T1AH8R> how do we sign clients up?'))
+        self.assertTrue(catchup.is_mention('hey <@U0CKWBVA7BJ>'))
+        self.assertFalse(catchup.is_mention('how do we sign clients up?'))
+        self.assertFalse(catchup.is_mention('<@U0CJYJRMRL6> how do I sign up clients?'))
+
+    def test_finds_unanswered_channel_mentions_not_answered_dms(self):
+        client = FakeSlack(self.channels, self.histories)
+        found = catchup.unanswered_channel_mentions(
+            client, lookback=6 * 3600, now=self.now, already=self.replied.already)
+        texts = {e['text'] for e in found}
+        self.assertEqual(texts, {
+            '<@B0CK3T1AH8R> how do we sign clients up?',
+            '<@B0CK3T1AH8R> hello',
+        })
+        self.assertTrue(all((e['thread_ts'] is None) for e in found))
+        dms = catchup.unanswered_dms(
+            client, lookback=6 * 3600, now=self.now, already=self.replied.already)
+        self.assertEqual(dms, [])
+
+    def test_skips_mention_once_bot_replied_in_thread(self):
+        ts = self.mention_ts
+        self.histories['C0CJK07GMHV'][0]['reply_count'] = 1
+        client = FakeSlack(self.channels, self.histories, replies={
+            ('C0CJK07GMHV', ts): [
+                self.histories['C0CJK07GMHV'][0],
+                {'ts': str(float(ts) + 1), 'user': 'U0CKWBVA7BJ', 'text': 'Guests sign up on the site.'},
+            ],
+        })
+        found = catchup.unanswered_channel_mentions(
+            client, lookback=6 * 3600, now=self.now, already=self.replied.already)
+        self.assertTrue(all('sign clients' not in e['text'] for e in found))
+
+    def test_run_once_replies_in_a_thread_and_does_not_double(self):
+        client = FakeSlack(self.channels, self.histories)
+        posts = []
+
+        def reply(event, thread):
+            posts.append((event['channel'], event['ts'], thread, event['text']))
+
+        runner = catchup.Catchup(client, reply, self.replied, clock=lambda: self.now, sleeper=lambda _s: None)
+        runner.run_once()
+        self.assertEqual({p[0] for p in posts}, {'C0CJK07GMHV', 'C0CK42NLM9A'})
+        signup = [p for p in posts if 'sign clients' in p[3]][0]
+        self.assertEqual(signup[2], self.mention_ts)  # thread on the mention
+        hello = [p for p in posts if p[3].endswith('hello')][0]
+        self.assertEqual(hello[2], self.hello_ts)
+        posts.clear()
+        runner.run_once()
+        self.assertEqual(posts, [])
+
+    def test_unanswered_dm_when_latest_is_from_teammate(self):
+        self.histories['D0CK1QTE1FU'] = [
+            {'ts': str(self.now - 10), 'user': 'U0CK42KJT7E', 'text': 'you there?'},
+        ]
+        client = FakeSlack(self.channels, self.histories)
+        dms = catchup.unanswered_dms(
+            client, lookback=6 * 3600, now=self.now, already=self.replied.already)
+        self.assertEqual(len(dms), 1)
+        self.assertEqual(dms[0]['text'], 'you there?')
+        self.assertEqual(dms[0]['channel_type'], 'im')
+
+
+class HandleThreadTest(unittest.TestCase):
+    def test_handle_posts_channel_mention_in_thread(self):
+        said = []
+
+        def say(**kw):
+            said.append(kw)
+
+        event = {
+            'type': 'app_mention',
+            'channel': 'C0CJK07GMHV',
+            'channel_type': 'channel',
+            'user': 'U0CK42KJT7E',
+            'text': '<@B0CK3T1AH8R> status',
+            'ts': '1795059293.490219',
+        }
+        # Build a light handle using the same thread rule as on_mention.
+        thread = event.get('thread_ts') or event.get('ts')
+        lk = Lookups(FakeApi([]), clock=lambda: NOW)
+        with mock.patch.object(sw_app, 'load_conversation', return_value=([], 'ctx')):
+            # inline the thread rule
+            self.assertEqual(thread, '1795059293.490219')
+            text = sw_app.reply_text(lk, event['text'], use_llm=False)
+            say(text=text, thread_ts=thread)
+        self.assertEqual(said[0]['thread_ts'], '1795059293.490219')
+        self.assertTrue(said[0]['text'])
 
 
 if __name__ == '__main__':

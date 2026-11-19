@@ -17,6 +17,7 @@ import time
 
 from . import commands, llm
 from .amy_api import AmyApi
+from .catchup import Catchup, RepliedSet, is_mention
 from .guardrails import apply_guardrails
 from .history import load_conversation
 from .lookups import Lookups
@@ -149,6 +150,13 @@ def allowed(user):
     return not raw or user in {u.strip() for u in raw.split(',') if u.strip()}
 
 
+def slack_error(exc):
+    data = getattr(getattr(exc, 'response', None), 'data', None) or {}
+    if isinstance(data, dict):
+        return data.get('error') or type(exc).__name__, data.get('needed')
+    return type(exc).__name__, None
+
+
 LLM_FAIL_FALLBACK = "Couldn't reach ChatGPT right now. Try me again in a minute?"
 VAGUE_FALLBACK = "Not sure I follow — want the queue status, a guest lookup, or a night's bookings?"
 
@@ -214,14 +222,46 @@ def build_app():
     api = CachedApi(AmyApi())
     lookups = Lookups(api)
 
+    replied = RepliedSet()
+
     def handle(event, say, thread=None):
         user = event.get('user') or ''
-        if not allowed(user):
-            say(text="Sorry, I only answer the Playmaker team.", thread_ts=thread)
+        channel = event.get('channel') or ''
+        ts = event.get('ts') or ''
+        log.info('incoming type=%s channel=%s ts=%s user=%s thread=%s',
+                 event.get('type') or event.get('channel_type') or '?',
+                 channel, ts, user, thread or '')
+        if ts and channel and not replied.claim(channel, ts):
+            log.info('skip already-claimed channel=%s ts=%s', channel, ts)
             return
-        history, context = load_conversation(app.client, event, thread)
-        say(text=reply_text(lookups, event.get('text') or '', history=history, context=context),
-            thread_ts=thread)
+        try:
+            if not allowed(user):
+                say(text="Sorry, I only answer the Playmaker team.", thread_ts=thread)
+                if channel and ts:
+                    replied.mark(channel, ts)
+                return
+            history, context = load_conversation(app.client, event, thread)
+            say(text=reply_text(lookups, event.get('text') or '', history=history, context=context),
+                thread_ts=thread)
+            if channel and ts:
+                replied.mark(channel, ts)
+        except Exception as exc:  # noqa: BLE001
+            if channel and ts:
+                replied.release(channel, ts)
+            err, needed = slack_error(exc)
+            log.error('reply failed type=%s channel=%s ts=%s: %s needed=%s',
+                      event.get('type'), channel, ts, err, needed)
+            try:
+                say(text="Couldn't reply just now, try me again in a minute?", thread_ts=thread)
+                if channel and ts:
+                    replied.mark(channel, ts)
+            except Exception as exc2:  # noqa: BLE001
+                err2, needed2 = slack_error(exc2)
+                log.error('fallback post failed: %s needed=%s', err2, needed2)
+
+    def say_reply(event, thread):
+        handle(event, lambda **kw: app.client.chat_postMessage(
+            channel=event.get('channel'), unfurl_links=False, unfurl_media=False, **kw), thread)
 
     @app.event('app_mention')
     def on_mention(event, say):
@@ -229,11 +269,16 @@ def build_app():
 
     @app.event('message')
     def on_message(event, say):
-        if event.get('channel_type') != 'im' or event.get('subtype') or event.get('bot_id'):
+        if event.get('subtype') or event.get('bot_id'):
             return
-        handle(event, say, thread=event.get('thread_ts'))
+        if event.get('channel_type') == 'im':
+            handle(event, say, thread=event.get('thread_ts'))
+            return
+        # Backup if message.channels is subscribed and app_mention did not fire.
+        if is_mention(event.get('text') or ''):
+            handle(event, say, thread=event.get('thread_ts') or event.get('ts'))
 
-    return app, api
+    return app, api, lookups, replied, say_reply
 
 
 def main():
@@ -245,7 +290,7 @@ def main():
             raise SystemExit(f'{name} is not set')
     from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-    app, api = build_app()
+    app, api, lookups, replied, say_reply = build_app()
     router = Router(app.client)
     router.resolve()
     log.info('updates go to %s; answers via %s', router.note or '?',
@@ -254,6 +299,8 @@ def main():
         threading.Thread(target=startup_check, args=(Lookups(api),), name='openai-self-check', daemon=True).start()
     watcher = Watcher(AmyApi(), router.post)
     threading.Thread(target=watcher.run_forever, name='amy-watcher', daemon=True).start()
+    catchup = Catchup(app.client, say_reply, replied)
+    threading.Thread(target=catchup.run_forever, name='amy-catchup', daemon=True).start()
     SocketModeHandler(app, os.environ['SLACK_APP_TOKEN']).start()
 
 
