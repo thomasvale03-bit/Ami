@@ -23,6 +23,7 @@ import time
 from . import commands, flyers, llm, persona, user_identity
 from .amy_api import AmyApi
 from .catchup import Catchup, RepliedSet, should_answer_channel
+from .daily_report import DailyReporter
 from .guardrails import apply_guardrails, needs_escalation, escalation_reply, ESCALATION_REPLY
 from .history import load_conversation
 from .lookups import Lookups
@@ -618,6 +619,9 @@ def main():
             threading.Thread(target=startup_check, args=(Lookups(api),), name='openai-self-check', daemon=True).start()
         watcher = Watcher(AmyApi(), router.post)
         threading.Thread(target=watcher.run_forever, name='amy-watcher', daemon=True).start()
+        reporter = DailyReporter(AmyApi(), router.post, channel=router.target or router.name,
+                                 history_client=app.client)
+        threading.Thread(target=reporter.run_forever, name='amy-daily-report', daemon=True).start()
     catchup = Catchup(app.client, say_reply, replied)
     threading.Thread(target=catchup.run_forever, name='amy-catchup', daemon=True).start()
     if getattr(app, '_amyi', None) is not None:
