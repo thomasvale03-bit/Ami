@@ -1,0 +1,69 @@
+{
+  "display_information": {
+    "name": "AMY Worker",
+    "description": "Playmaker booking worker: posts booking updates and answers questions about guests and the queue.",
+    "background_color": "#111111"
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": {
+      "display_name": "AMY Worker",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "chat:write",
+        "chat:write.public",
+        "channels:history",
+        "channels:read",
+        "groups:history",
+        "im:history",
+        "im:read",
+        "im:write",
+        "users:read",
+        "files:write",
+        "reactions:write",
+        "channels:join",
+        "files:read"
+      ],
+      "user": [
+        "im:history",
+        "im:read",
+        "chat:write",
+        "files:read",
+        "files:write",
+        "users:read",
+        "channels:history",
+        "channels:read",
+        "groups:history"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "app_mention",
+        "message.im",
+        "message.channels"
+      ],
+      "user_events": [
+        "message.im",
+        "message.channels",
+        "message.groups"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}
