@@ -181,7 +181,7 @@ class FlyerTest(unittest.TestCase):
 class PromptTest(unittest.TestCase):
     def test_operations_director_rules(self):
         text = prompt.SYSTEM_PROMPT
-        for phrase in ('operations director', 'Lead', 'Submission', 'Confirmed', 'Check-in',
+        for phrase in ('operations director', 'Lead', 'Submission', 'Confirmed reservation', 'Verified check-in',
                        'Escalations go to Tom', 'Verified attendance', 'Never invent availability',
                        "JEWEL's last night is Nov 21, 2026", 'LAVO is temporary', 'Never claim TAO access'):
             self.assertIn(phrase, text)
