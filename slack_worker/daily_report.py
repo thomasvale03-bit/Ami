@@ -1,4 +1,4 @@
-"""Daily 10 AM MST operations report posted to #amy-bookings.
+"""Daily 10 AM MST operations report posted to #generalchat.
 
 Built only from real AMY queue data (GET /queue/status and /queue/jobs).
 Never includes pay/commission figures, guest emails, or phone numbers.
@@ -40,7 +40,8 @@ MANUAL_STATES = ATTENTION  # manual, needs_review, submission_uncertain
 FAILED_STATES = frozenset({'failed'})
 HOLD_LIMIT = 15
 UPCOMING_DAYS = 7
-DEFAULT_CHANNEL = 'C0CKWF6FHAL'  # #amy-bookings
+DEFAULT_CHANNEL = 'C0CJK07GMHV'  # #generalchat (workspace general; no #general)
+CHANNEL_ENV = 'SLACK_DAILY_REPORT_CHANNEL'
 DOLLAR_AMOUNT_RE = re.compile(r'\$\s*\d+(?:,\d{3})*(?:\.\d+)?')
 
 
@@ -228,9 +229,15 @@ def upcoming_7_days(jobs, today):
             for k, v in out.items() if v]
 
 
-def open_holds(jobs):
+def open_holds(jobs, today=None):
+    """Current holds: last night is today (Phoenix) or later. Parked jobs and
+    older past-date manuals are counted but not listed."""
+    if today is None:
+        today = datetime.fromtimestamp(time.time(), PHOENIX).date()
+    today_s = today.isoformat()
     holds = []
     parked = 0
+    older = 0
     for j in jobs or []:
         if (j.get('state') or '') not in MANUAL_STATES:
             continue
@@ -238,6 +245,10 @@ def open_holds(jobs):
             parked += 1
             continue
         p = project(j)
+        last = p['end'] or p['start']
+        if last and last < today_s:
+            older += 1
+            continue
         holds.append({
             'guest': public_name(p['guest']),
             'venues': p['venues'],
@@ -249,7 +260,7 @@ def open_holds(jobs):
             'ref': p['ref'],
         })
     holds.sort(key=lambda h: (h['start'], h['guest']))
-    return {'holds': holds, 'parked': parked}
+    return {'holds': holds, 'parked': parked, 'older': older}
 
 
 def build(jobs, status=None, now=None):
@@ -260,7 +271,7 @@ def build(jobs, status=None, now=None):
     signups = signups_last_24h(jobs, now, status)
     upcoming = upcoming_7_days(jobs, today)
     queue = queue_counts(jobs, status)
-    holds = open_holds(jobs)
+    holds = open_holds(jobs, today)
     return {
         'date': today.isoformat(),
         'when': when,
@@ -276,9 +287,11 @@ def _fmt_party(f, m):
     return f'{int(f)}F/{int(m)}M'
 
 
-def render(data):
+def render(data, *, test=False):
     when = data['when']
     header = f"{REPORT_TITLE} — {when.strftime('%a %b %-d')}, {when.strftime('%-I:%M %p')} MST"
+    if test:
+        header = 'TEST — ' + header
     lines = [header, '']
 
     c = data['completed']
@@ -323,8 +336,13 @@ def render(data):
     h = data['holds']
     open_n = len(h['holds'])
     title = f"*Open holds needing Tom:* {open_n}"
-    if h['parked']:
-        title += f" ({h['parked']} intentionally parked, not listed)"
+    extras = []
+    if h.get('parked'):
+        extras.append(f"{h['parked']} intentionally parked, not listed")
+    if h.get('older'):
+        extras.append(f"+{h['older']} older past-date manual jobs not shown")
+    if extras:
+        title += ' (' + ', '.join(extras) + ')'
     lines.append(title)
     if not h['holds']:
         lines.append('• none')
@@ -388,8 +406,36 @@ def default_state_path():
     return os.environ.get('SLACK_DAILY_REPORT_STATE') or '/data/slack-worker/daily-report.json'
 
 
+def report_channel():
+    """Configurable destination; default #generalchat. Not the bookings channel."""
+    raw = (os.environ.get(CHANNEL_ENV) or DEFAULT_CHANNEL).strip()
+    return raw or DEFAULT_CHANNEL
+
+
+def make_channel_poster(client, channel=None):
+    """Post to the report channel, joining a public channel if the bot is not in it."""
+    target = channel or report_channel()
+
+    def post(text):
+        try:
+            client.chat_postMessage(channel=target, text=text, unfurl_links=False, unfurl_media=False)
+        except Exception as exc:
+            data = getattr(getattr(exc, 'response', None), 'data', None) or {}
+            err = data.get('error') if isinstance(data, dict) else ''
+            if err != 'not_in_channel':
+                raise
+            client.conversations_join(channel=target)
+            client.chat_postMessage(channel=target, text=text, unfurl_links=False, unfurl_media=False)
+
+    return post
+
+
 def history_has_today(client, channel, today, now=None):
-    """True if #amy-bookings already has today's report. Fail-open to False."""
+    """True if the report channel already has today's official report. Fail-open to False.
+
+    Messages prefixed with TEST — are previews and do not count, so a test post
+    never blocks the scheduled 10:00 AM run.
+    """
     if client is None or not channel:
         return False
     start = datetime(today.year, today.month, today.day, tzinfo=PHOENIX).timestamp()
@@ -400,7 +446,9 @@ def history_has_today(client, channel, today, now=None):
         log.info('daily report history check skipped: %s', type(exc).__name__)
         return False
     for msg in (resp or {}).get('messages') or []:
-        text = str(msg.get('text') or '')
+        text = str(msg.get('text') or '').lstrip()
+        if text.startswith('TEST —') or text.startswith('TEST -'):
+            continue
         if REPORT_TITLE.strip('*') in text[:120]:
             return True
     return False
@@ -413,7 +461,7 @@ class DailyReporter:
         self.post = post
         self.clock = clock
         self.path = Path(state_path or default_state_path())
-        self.channel = channel or os.environ.get('SLACK_UPDATES_CHANNEL') or DEFAULT_CHANNEL
+        self.channel = channel or report_channel()
         self.history_client = history_client
 
     def _already_posted(self, today, now):
@@ -474,4 +522,5 @@ class DailyReporter:
 
 
 __all__ = ['DailyReporter', 'build', 'render', 'sanitize', 'due', 'is_parked',
-           'public_name', 'queue_counts', 'PARKED_REFS', 'REPORT_TITLE']
+           'public_name', 'queue_counts', 'PARKED_REFS', 'REPORT_TITLE',
+           'DEFAULT_CHANNEL', 'report_channel', 'make_channel_poster']
