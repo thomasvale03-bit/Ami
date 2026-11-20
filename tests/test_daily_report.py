@@ -59,6 +59,7 @@ class PublicNameAndParkedTest(unittest.TestCase):
         self.assertEqual(dr.public_name('Sydney'), 'Sydney')
         self.assertEqual(dr.public_name('  Mary Ann Smith  '), 'Mary S.')
         self.assertEqual(dr.public_name(''), 'Unknown')
+        self.assertEqual(dr.public_name('Alexandra 👹'), 'Alexandra')
 
     def test_sydney_dec21_ref_is_parked_other_nights_are_not(self):
         parked = job('1a1f476cef115d1c', 'manual', name='Sydney Stevens',
@@ -198,13 +199,33 @@ class BuildAndRenderTest(unittest.TestCase):
         self.assertNotIn('Estefany Barraza', text)  # full last name must not appear
         self.assertIn('Estefany B.', text)
 
-    def test_sanitize_strips_dollar_amounts_and_contacts(self):
-        dirty = '*Playmaker daily report*\nEstefany B. $86 estimated\nemail me at a@b.com 602-555-9999'
+    def test_sanitize_strips_dollar_amounts_and_emails_keeps_dates_and_refs(self):
+        dirty = ('*Playmaker daily report*\n'
+                 'Estefany B. $86 estimated\n'
+                 'email me at a@b.com\n'
+                 'Marquee Nightclub 2026-12-25: guest list not posted\n'
+                 '(ref 1a1d718786368942)')
         out = dr.sanitize(dirty)
         self.assertIn('[amount]', out)
         self.assertNotIn('$86', out)
         self.assertIn('[email]', out)
-        self.assertIn('[phone]', out)
+        self.assertNotIn('a@b.com', out)
+        self.assertIn('2026-12-25', out)
+        self.assertIn('1a1d718786368942', out)
+        self.assertNotIn('[phone]', out)
+
+    def test_holds_sort_by_start_date_not_label_text(self):
+        jobs = [
+            job('dec', 'manual', name='Alex Roe', venues=('Marquee Nightclub',),
+                start='2026-12-25', reason='Marquee Nightclub 2026-12-25: guest list not posted'),
+            job('nov', 'manual', name='Corey Thomas', venues=('TAO Nightclub',),
+                start='2026-11-13', reason='Past or invalid source date; never move to tonight'),
+        ]
+        text = dr.sanitize(dr.render(dr.build(jobs, {}, TEN_AM)))
+        self.assertLess(text.index('Corey T.'), text.index('Alex R.'))
+        self.assertIn('2026-12-25', text)
+        self.assertIn('(ref dec)', text)
+        self.assertNotIn('[phone]', text)
 
 
 class ScheduleAndDedupeTest(unittest.TestCase):
