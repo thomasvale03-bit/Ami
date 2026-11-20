@@ -1130,6 +1130,9 @@ class TicketSauceFeedTests(unittest.TestCase):
                         "start": "2026-10-08 22:30:00", "tickets_active": True, "url": "x"}},
         "c": {"Event": {"name": "Guest List - Closed", "location": "Marquee Dayclub",
                         "start": "2026-10-08 11:00:00", "tickets_active": False, "url": "y"}},  # inactive
+        "d": {"Event": {"name": "Guest List - LAVO Party Brunch", "location": "LAVO Italian Restaurant LV",
+                        "start": "2026-11-21 12:00:00", "tickets_active": True,
+                        "url": "https://tickets.taogroup.com/e/guest-list-lavo-italian-las-vegas-11-21-2026"}},
     }}
 
     def test_only_active_guest_lists(self):
@@ -1139,8 +1142,11 @@ class TicketSauceFeedTests(unittest.TestCase):
         from datetime import date
         self.assertIn(("Hakkasan Nightclub", date(2026, 10, 8)), cat)
         self.assertNotIn(("Marquee Dayclub", date(2026, 10, 8)), cat)  # inactive dropped
-        self.assertEqual(len(cat), 1)  # the plain "DJ Bonics" (no "Guest List") excluded
+        self.assertEqual(len(cat), 2)  # Hakkasan + LAVO (plain "DJ Bonics" excluded)
         self.assertEqual(cat[("Hakkasan Nightclub", date(2026, 10, 8))]["event_time"], "10:30 PM")
+        # TicketSauce uses the restaurant location string; catalog keys must be canonical.
+        self.assertIn(("LAVO Party Brunch", date(2026, 11, 21)), cat)
+        self.assertNotIn(("LAVO Italian Restaurant LV", date(2026, 11, 21)), cat)
 
     def test_feed_failure_is_empty(self):
         import ticketsauce

@@ -575,7 +575,7 @@ def is_code_gated(page):
 
 
 def check_availability(venue, date_obj):
-    entry = _load_catalog().get((venue, date_obj))
+    entry = _load_catalog().get((venue, date_obj)) or catalog_snapshot().get((venue, date_obj))
     if not entry:
         return None
     url = entry["url"]
