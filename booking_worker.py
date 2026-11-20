@@ -692,6 +692,7 @@ class Worker:
             raise Stop("manual", exc.issue)
         except (KeyError, ValueError, TypeError) as exc:
             raise Stop("manual", f"Source request malformed ({exc})")
+        self._job_raw = raw
         progress = ((job.get("metadata") or {}).get("progress") or {}).get("bookings") or {}
         out = []
         self.tao.reset()
@@ -861,6 +862,14 @@ class Worker:
             self.api.update(ref, token, "progress", {"progress": {"bookings": {key.split("|", 1)[1]: entry.get("record")}}}
                             if entry.get("record") else {"progress": {"submitting": {key.split("|", 1)[1]: True}}})
 
+    def _night_party(self, request, night):
+        """Women/men for this night (request-level default unless notes/plan override)."""
+        import request_plan
+        female, male = request_plan.party_for_night(
+            getattr(self, "_job_raw", None) or {}, night,
+            request["female_count"], request["male_count"])
+        return {"male_count": int(male), "female_count": int(female)}
+
     def _book_tao(self, ref, venue, night, request, rehearse, token, partial):
         import tao_portal
         key = night_key(ref, venue, night)
@@ -880,7 +889,8 @@ class Worker:
                        kind="unavailable")
         if listing.get("listing_type") != "Passes" or listing.get("price", 0) != 0:
             raise Stop("manual", f"{venue} {night}: listing is not a free guest-list pass", kind="unavailable")
-        party = {"male_count": int(request["male_count"]), "female_count": int(request["female_count"])}
+        party = self._night_party(request, night)
+        guest = {**request, "female_count": party["female_count"], "male_count": party["male_count"]}
         shot = self._shot_path(ref, venue, night, "rehearsal" if rehearse else "confirmation")
 
         def before_submit():
@@ -888,7 +898,7 @@ class Worker:
                 self._checkpoint(ref, token, key, {"state": "submitting"})
 
         try:
-            result = self.tao.submit(listing, request, rehearse=rehearse, screenshot_path=shot, before_submit=before_submit)
+            result = self.tao.submit(listing, guest, rehearse=rehearse, screenshot_path=shot, before_submit=before_submit)
         except tao_portal.TaoBlocked as exc:
             raise Stop("manual", f"{venue} {night}: {exc}; nothing submitted")
         except tao_portal.SubmissionUncertain as exc:
@@ -917,7 +927,8 @@ class Worker:
         before_submit/submitting ledger state. Confirmation emails are sent by
         _send_emails after every night is recorded."""
         key = night_key(ref, venue, night)
-        male, female = int(request["male_count"]), int(request["female_count"])
+        party = self._night_party(request, night)
+        male, female = party["male_count"], party["female_count"]
         if rehearse:
             return {"venue": venue, "date": night, "rehearsal": True, "email_only": True}
         record = {"verified": True, "venue": venue, "date": night, "system": "email_only",

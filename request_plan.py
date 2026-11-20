@@ -147,3 +147,64 @@ def requested_pairs(raw):
             if (v, iso) not in out:
                 out.append((v, iso))
     return out
+
+
+# --- Per-night party size (optional) ------------------------------------
+# A trip can have a different women/men count on one night than another
+# (e.g. Sat LAVO 1F, Sun TAO 2F). Request-level female_count/male_count
+# stay the default. When a night names its own counts, booking, completion
+# checks and team night-lines use those instead.
+#
+# Survives today's intake without a schema change via a notes line:
+#   Party by night: 2026-11-21 1F 0M; 2026-11-22 2F 0M; 2026-11-23 2F 0M
+# List itinerary entries may also carry optional women/men keys.
+
+_PARTY_ITEM_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s+(\d+)\s*F(?:\s+(\d+)\s*M)?", re.I)
+
+
+def parse_night_parties(value):
+    """'Party by night: 2026-11-21 1F 0M; 2026-11-22 2F' -> {iso: (women, men)}."""
+    text = str(value or "")
+    marker = re.search(r"Party by night:\s*", text, re.I)
+    if not marker:
+        return {}
+    out = {}
+    for day, women, men in _PARTY_ITEM_RE.findall(text[marker.end():]):
+        date.fromisoformat(day)  # validate; raises ValueError if malformed
+        out[day] = (int(women), int(men or 0))
+    if not out:
+        raise ValueError("empty Party by night list")
+    return out
+
+
+def night_parties(raw):
+    """Per-night (women, men) from itinerary entries and/or a Party by night note."""
+    raw = raw or {}
+    out = {}
+    plan = raw.get("itinerary")
+    if isinstance(plan, (list, tuple)):
+        for item in plan:
+            if not isinstance(item, dict):
+                continue
+            day = str(item.get("date") or "").strip()
+            if not day or ("women" not in item and "men" not in item):
+                continue
+            date.fromisoformat(day)
+            women = int(item["women"]) if item.get("women") is not None else 0
+            men = int(item["men"]) if item.get("men") is not None else 0
+            if women < 0 or men < 0 or women + men < 1:
+                raise ValueError(f"bad party for {day}")
+            out[day] = (women, men)
+    blob = " ".join(str(raw.get(k) or "") for k in ("comments", "notes", "additional_comments"))
+    if blob.strip():
+        out.update(parse_night_parties(blob) if re.search(r"Party by night:", blob, re.I) else {})
+    return out
+
+
+def party_for_night(raw, night, default_female=None, default_male=None):
+    """(women, men) for this ISO night, else the request-level default."""
+    raw = raw or {}
+    night = str(night or "")[:10]
+    female = int((raw.get("female_count") if default_female is None else default_female) or 0)
+    male = int((raw.get("male_count") if default_male is None else default_male) or 0)
+    return night_parties(raw).get(night, (female, male))
