@@ -536,7 +536,7 @@ def set_labels(service, message_id, label_ids, add=(), remove=()):
     ).execute()
 
 
-def build_message(to, subject, body, sender, cc=None, message_id=None, attachments=None, html=None,
+def build_message(to, subject, body, sender, cc=None, bcc=None, message_id=None, attachments=None, html=None,
                   headers=None, inline_images=None, from_name="Playmaker Entertainment"):
     """attachments: list of file paths to attach (images). html: optional
     text/html alternative; body stays as the plain-text fallback."""
@@ -545,6 +545,8 @@ def build_message(to, subject, body, sender, cc=None, message_id=None, attachmen
     msg["To"] = to
     if cc:
         msg["Cc"] = cc
+    if bcc:
+        msg["Bcc"] = bcc
     msg["Subject"] = subject
     if message_id:
         msg["Message-ID"] = f"<{message_id}>"

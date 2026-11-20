@@ -195,7 +195,7 @@ def test_send_branded_reports_prior_from_send_log(monkeypatch):
     import posh_webhook as pw
     monkeypatch.setattr(pw, '_branded_times', [])
     monkeypatch.setattr(pw, 'zoho_configured', lambda: True)
-    monkeypatch.setattr(pw, '_zoho_send', lambda *a: 'MID-1@playmakerentertainment.com')
+    monkeypatch.setattr(pw, '_zoho_send', lambda *a, **k: 'MID-1@playmakerentertainment.com')
 
     class G:
         def users(self): return self

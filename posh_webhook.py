@@ -489,7 +489,7 @@ def zoho_configured():
     return bool(os.environ.get("ZOHO_SMTP_USER", "").strip() and os.environ.get("ZOHO_SMTP_PASSWORD", "").strip())
 
 
-def _zoho_send(to, subject, text, html, sender):
+def _zoho_send(to, subject, text, html, sender, bcc=None):
     """Send through Zoho SMTP (465 SSL, then 587 STARTTLS) so Zoho DKIM-signs it. Returns Message-ID."""
     import base64
     import email
@@ -500,7 +500,7 @@ def _zoho_send(to, subject, text, html, sender):
     pw = os.environ["ZOHO_SMTP_PASSWORD"].strip()
     host = os.environ.get("ZOHO_SMTP_HOST", "").strip() or "smtp.zoho.com"
     mid = email.utils.make_msgid(domain=sender.split("@")[-1])
-    raw = gmail_client.build_message(to, subject, text, sender, html=html, message_id=mid.strip("<>"))["raw"]
+    raw = gmail_client.build_message(to, subject, text, sender, html=html, bcc=bcc, message_id=mid.strip("<>"))["raw"]
     msg = email.message_from_bytes(base64.urlsafe_b64decode(raw))
     msg["Date"] = email.utils.formatdate(localtime=False)
     last = None
@@ -513,7 +513,7 @@ def _zoho_send(to, subject, text, html, sender):
                 s.starttls()
             with s:
                 s.login(user, pw)
-                s.send_message(msg, from_addr=sender, to_addrs=[to])
+                s.send_message(msg, from_addr=sender, to_addrs=[to] + ([bcc] if bcc else []))
             return mid.strip("<>")
         except smtplib.SMTPAuthenticationError:
             raise
@@ -532,7 +532,10 @@ def send_branded(service, payload, _sleep=None):
     import gmail_client
     to, subject = (payload.get("to") or "").strip(), (payload.get("subject") or "").strip()
     html, text = payload.get("html") or "", payload.get("text") or ""
+    bcc = (payload.get("bcc") or "").strip()
     if not (to and subject and html and text) or "@" not in to or any(c in to + subject for c in "\r\n,;"):
+        return 400, "need to (one address), subject, html, text"
+    if bcc and ("@" not in bcc or any(c in bcc for c in "\r\n,;")):
         return 400, "need to (one address), subject, html, text"
     now = time.time()
     with _branded_lock:
@@ -574,7 +577,7 @@ def send_branded(service, payload, _sleep=None):
         return _duplicate()
     if zoho_configured() and not from_name:
         try:
-            mid = _zoho_send(to, subject, text, html, sender)
+            mid = _zoho_send(to, subject, text, html, sender, bcc=bcc or None)
             with _branded_lock:
                 _zoho_sent.add((to.lower(), subject))
                 if is_followup:
@@ -584,11 +587,100 @@ def send_branded(service, payload, _sleep=None):
             return 200, {"sent": True, "id": mid, "from": sender, "via": "zoho"}
         except Exception as e:  # noqa: BLE001
             log.warning("Branded zoho send failed (%s: %s); falling back to gmail", type(e).__name__, e)
-    body = (gmail_client.build_message(to, subject, text, sender, html=html, from_name=from_name) if from_name
-            else gmail_client.build_message(to, subject, text, sender, html=html))
+    body = (gmail_client.build_message(to, subject, text, sender, html=html, bcc=bcc or None, from_name=from_name) if from_name
+            else gmail_client.build_message(to, subject, text, sender, html=html, bcc=bcc or None))
     resp = _gmail_call(lambda: service.users().messages().send(userId="me", body=body).execute(), _sleep=_sleep)
     log.info("Branded email sent via gmail to %s from %s (id %s)", to, sender, (resp or {}).get("id"))
     return 200, {"sent": True, "id": (resp or {}).get("id"), "from": sender, "via": "gmail"}
+
+
+
+
+TEAM_COPY_EMAIL = "team@playmakerentertainment.com"
+_APPLICANT_EMAIL_RE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
+
+
+def _valid_one_email(value):
+    raw = (value or "").strip()
+    if not raw or "@" not in raw or any(c in raw for c in "\r\n,; "):
+        return ""
+    if not _APPLICANT_EMAIL_RE.fullmatch(raw):
+        return ""
+    return raw.lower()
+
+
+def promoter_applicant_email(payload):
+    """Applicant address from a structured field or the team-notice body."""
+    for key in ("applicant_email", "reply_to"):
+        got = _valid_one_email(payload.get(key))
+        if got:
+            return got
+    text = payload.get("text") or ""
+    m = re.search(r"(?im)^Reply to:\s*(\S+)$", text)
+    if m:
+        got = _valid_one_email(m.group(1))
+        if got:
+            return got
+    m = re.search(r"(?im)^Email:\s*(\S+)$", text)
+    if m:
+        got = _valid_one_email(m.group(1))
+        if got:
+            return got
+    return ""
+
+
+def should_send_promoter_welcome(payload):
+    """True for new Playmaker site promoter applications only."""
+    if payload.get("send_promoter_welcome") is False:
+        return False
+    from templates import html_emails
+    subj = (payload.get("subject") or "").strip()
+    # Never re-trigger on the welcome itself (including the TEST: prefix).
+    if subj.lower().startswith("welcome to playmaker") or subj.lower().startswith("test: welcome to playmaker"):
+        return False
+    if payload.get("send_promoter_welcome") or payload.get("promoter_application"):
+        return True
+    return subj.lower().startswith("promoter application")
+
+
+def send_promoter_welcome_email(service, applicant_email, _sleep=None):
+    """Branded first-touch welcome; BCC team@; dedupe on applicant email."""
+    from templates import html_emails
+    email = _valid_one_email(applicant_email)
+    if not email:
+        return 400, "need applicant email"
+    payload = {
+        "to": email,
+        "subject": html_emails.PROMOTER_WELCOME_SUBJECT,
+        "text": html_emails.promoter_welcome_text(),
+        "html": html_emails.render_promoter_welcome(),
+        "dedupe_query": f'to:{email} subject:"{html_emails.PROMOTER_WELCOME_SUBJECT}"',
+    }
+    if email != TEAM_COPY_EMAIL:
+        payload["bcc"] = TEAM_COPY_EMAIL
+    return send_branded(service, payload, _sleep=_sleep)
+
+
+def maybe_send_promoter_welcome(service, payload, _sleep=None):
+    """If payload is a new promoter application, send the welcome once."""
+    if not should_send_promoter_welcome(payload):
+        return None
+    email = promoter_applicant_email(payload)
+    if not email:
+        log.warning("Promoter application missing applicant email; welcome not sent")
+        return None
+    # Standing skip list: internal/test addresses and yesso_fuentes.
+    local, _, domain = email.partition("@")
+    if domain in {"playmakerentertainment.com", "mail.grokbot.com", "grokbot.com"} or local in {"yesso_fuentes", "yessofuentes"} or "yesso_fuentes" in email:
+        log.info("Promoter welcome skipped for %s", email)
+        return None
+    try:
+        code, result = send_promoter_welcome_email(service, email, _sleep=_sleep)
+        log.info("Promoter welcome %s for %s: %s", code, email, result)
+        return code, result
+    except Exception:  # noqa: BLE001
+        log.exception("Promoter welcome failed for %s", email)
+        return None
 
 
 # --- HTTP server ------------------------------------------------------------
@@ -1501,6 +1593,10 @@ def make_handler(intake, store=None):
                         except Exception:
                             log.exception("Branded guest-list intake bridge failed")
                 code, result = send_branded(intake.service(), payload)
+                if code == 200:
+                    welcome = maybe_send_promoter_welcome(intake.service(), payload)
+                    if welcome and isinstance(result, dict):
+                        result = {**result, "promoter_welcome": {"status": welcome[0], "result": welcome[1]}}
             except Exception:
                 log.exception("Branded send failed")
                 return self._reply(502, "send failed")
