@@ -21,6 +21,25 @@ books, cancels or emails, and it does not change booking behaviour.
   Watcher state lives in `SLACK_WORKER_STATE` (volume) so restarts never
   re-post and transitions during a restart are still reported.
 
+
+## Daily report (10:00 AM MST, `#amy-bookings`)
+Once a day at 10:00 AM America/Phoenix, AMY Worker posts a short operations
+report built only from live AMY queue data: bookings completed in the last
+24 hours (by venue, guest counts F/M), new sign-ups received, upcoming
+confirmed bookings for the next 7 days by night and venue, queue counts
+(pending / claimed / manual / failed), and open holds that need Tom
+(manual / needs_review / submission_uncertain), excluding intentionally
+parked jobs (Valerie NYE; Sydney Stevens Dec 21, ref `1a1f476cef115d1c`).
+Check-ins are always "not tracked yet". No pay or commission figures, and
+no guest emails or phones (first name + last initial only).
+
+It posts at most once per Phoenix calendar day. The last-posted date is
+saved on the volume (`SLACK_DAILY_REPORT_STATE`, default
+`/data/slack-worker/daily-report.json`). If that file is missing after a
+restart, a read of recent `#amy-bookings` history is a second guard.
+A restart after 10:00 still posts once if today's report is missing; nothing
+posts before 10:00. Jacob's persona does not run this report.
+
 ## Answers (DM the bot or @mention it)
 Exact commands are answered directly: `status`, `state <name>`,
 `guest <name>`, `tonight`, `tomorrow`, `date 11/21`, `health`, `help`.
