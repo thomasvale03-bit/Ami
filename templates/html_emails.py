@@ -332,3 +332,27 @@ def scottsdale_confirmation_email(first_name, venue_name, dates_iso):
     canon = "El Hefe" if "el hefe" in vl else ("Cake Nightclub" if "cake" in vl else ("Maya Dayclub" if "maya" in vl else venue_name))
     subj = f"You're on the list: {canon} \u2014 {subj_dates} \u2014 Playmaker Entertainment"
     return subj, render_scottsdale_venue_text(first_name, canon, short_labels), render_scottsdale_venue(first_name, canon, short_labels)
+
+
+PROMOTER_SLACK_INVITE = (
+    "https://join.slack.com/t/playmakerente-frr3522/shared_invite/"
+    "zt-4hfdayaac-JRguw6Cuh0S9kpPd06EA4w"
+)
+PROMOTER_WELCOME_SUBJECT = "Welcome to Playmaker Entertainment – Next Steps"
+PROMOTER_WELCOME_PARAS = [
+    "We’re so excited that you want to work with Playmaker Entertainment!",
+    "As our next step, please join our official Playmaker Slack workspace using the invitation link below:",
+    PROMOTER_SLACK_INVITE,
+    "Once you join, we’ll add you to our #newhire channel, where you’ll receive onboarding information, updates, and instructions on getting started with the Playmaker team.",
+    "Welcome to Playmaker! We’re looking forward to working with you.",
+]
+
+
+def promoter_welcome_text():
+    """Exact plain-text wording for new promoter applications."""
+    return "\n\n".join(PROMOTER_WELCOME_PARAS)
+
+
+def render_promoter_welcome():
+    """Same PME chrome as guest confirmations (header, logo, colors, footer)."""
+    return _read("promoter_welcome.html")
