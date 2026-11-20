@@ -23,19 +23,13 @@ books, cancels or emails, and it does not change booking behaviour.
 
 
 ## Daily report (10:00 AM MST, `#generalchat`)
-Once a day at 10:00 AM America/Phoenix, AMY Worker posts a short operations
-report to `#generalchat` (`C0CJK07GMHV`, the workspace general channel;
+Once a day at 10:00 AM America/Phoenix, AMY Worker posts tonight's guest-list
+totals to `#generalchat` (`C0CJK07GMHV`, the workspace general channel;
 override with `SLACK_DAILY_REPORT_CHANNEL`). Booking updates stay in
-`#amy-bookings`. The report is built only from live AMY queue data: bookings
-completed in the last 24 hours (by venue, guest counts F/M), new sign-ups
-received, upcoming confirmed bookings for the next 7 days by night and venue,
-queue counts (pending / claimed / manual / failed), and open holds that need
-Tom (manual / needs_review / submission_uncertain) whose last night is today
-or later, excluding intentionally parked jobs (Valerie NYE; Sydney Stevens
-Dec 21, ref `1a1f476cef115d1c`). Older past-date manuals are counted in a
-"+N older past-date manual jobs not shown" note, not listed.
-Check-ins are always "not tracked yet". No pay or commission figures, and
-no guest emails or phones (first name + last initial only).
+`#amy-bookings`. The report is built only from confirmed AMY bookings for
+tonight's Phoenix date (dayclubs included): each venue's signup (party)
+count and Girls/Guys (F/M), plus a unique-job Total. No names, holds, queue,
+last-24h, new sign-ups, check-ins, or pay figures.
 
 It posts at most once per Phoenix calendar day. The last-posted date is
 saved on the volume (`SLACK_DAILY_REPORT_STATE`, default
