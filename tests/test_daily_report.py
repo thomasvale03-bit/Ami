@@ -14,6 +14,13 @@ PHX = ZoneInfo('America/Phoenix')
 TEN_AM = datetime(2026, 11, 20, 10, 0, tzinfo=PHX).timestamp()
 NINE_AM = datetime(2026, 11, 20, 9, 0, tzinfo=PHX).timestamp()
 THREE_PM = datetime(2026, 11, 20, 15, 0, tzinfo=PHX).timestamp()
+NINE_PM = datetime(2026, 11, 20, 21, 0, tzinfo=PHX).timestamp()
+ELEVEN_PM = datetime(2026, 11, 20, 23, 0, tzinfo=PHX).timestamp()
+ELEVEN_PM_LATE = datetime(2026, 11, 20, 23, 30, tzinfo=PHX).timestamp()
+ONE_AM = datetime(2026, 11, 21, 1, 0, tzinfo=PHX).timestamp()
+TWO_AM = datetime(2026, 11, 21, 2, 59, tzinfo=PHX).timestamp()
+THREE_AM = datetime(2026, 11, 21, 3, 0, tzinfo=PHX).timestamp()
+SAT_ELEVEN_PM = datetime(2026, 11, 21, 23, 0, tzinfo=PHX).timestamp()
 
 
 def job(ref, state, name='Jessica Alba', venues=('Hakkasan Nightclub',), start='2026-11-20',
@@ -211,7 +218,7 @@ class ScheduleAndDedupeTest(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.dir.name, 'daily-report.json')
         self.posted = []
-        self.now = [TEN_AM]
+        self.now = [ELEVEN_PM]
         self.jobs = [job('done-tao', 'done', name='Estefany Barraza',
                          venues=('TAO Nightclub',), start='2026-11-20', female=2, male=0,
                          updated=TEN_AM - 60, bookings=[booked('TAO Nightclub', '2026-11-20')])]
@@ -224,20 +231,45 @@ class ScheduleAndDedupeTest(unittest.TestCase):
                              state_path=self.path, clock=lambda: self.now[0],
                              channel=channel, history_client=history_client)
 
-    def test_due_false_before_10am_true_at_and_after(self):
-        self.assertFalse(dr.due(NINE_AM, None))
-        self.assertTrue(dr.due(TEN_AM, None))
-        self.assertTrue(dr.due(THREE_PM, None))
-        self.assertFalse(dr.due(TEN_AM, '2026-11-20'))
-        self.assertTrue(dr.due(TEN_AM, '2026-11-19'))
+    def test_due_only_from_11pm_through_3am_for_that_night(self):
+        self.assertIsNone(dr.report_night(NINE_AM))
+        self.assertIsNone(dr.report_night(TEN_AM))
+        self.assertIsNone(dr.report_night(THREE_PM))
+        self.assertIsNone(dr.report_night(NINE_PM))
+        self.assertEqual(dr.report_night(ELEVEN_PM).isoformat(), '2026-11-20')
+        self.assertEqual(dr.report_night(ELEVEN_PM_LATE).isoformat(), '2026-11-20')
+        self.assertEqual(dr.report_night(ONE_AM).isoformat(), '2026-11-20')
+        self.assertEqual(dr.report_night(TWO_AM).isoformat(), '2026-11-20')
+        self.assertIsNone(dr.report_night(THREE_AM))
+        self.assertEqual(dr.report_night(SAT_ELEVEN_PM).isoformat(), '2026-11-21')
 
-    def test_tick_does_not_post_before_10am(self):
-        self.now[0] = NINE_AM
-        self.assertIsNone(self._reporter().tick())
+        self.assertFalse(dr.due(NINE_PM, None))
+        self.assertFalse(dr.due(TEN_AM, None))
+        self.assertTrue(dr.due(ELEVEN_PM, None))
+        self.assertTrue(dr.due(ONE_AM, None))
+        self.assertFalse(dr.due(ELEVEN_PM, '2026-11-20'))
+        self.assertFalse(dr.due(ONE_AM, '2026-11-20'))
+        self.assertTrue(dr.due(ELEVEN_PM, '2026-11-19'))
+        self.assertFalse(dr.due(THREE_AM, None))
+        self.assertTrue(dr.due(SAT_ELEVEN_PM, '2026-11-20'))
+
+    def test_old_10am_last_posted_date_does_not_block_11pm(self):
+        Path = __import__('pathlib').Path
+        Path(self.path).write_text(json.dumps({'last_posted_date': '2026-11-20'}))
+        text = self._reporter().tick()
+        self.assertIsNotNone(text)
+        self.assertIn("*Tonight's guest list — Fri 11/20*", text)
+        saved = json.loads(open(self.path).read())
+        self.assertEqual(saved['last_posted_night'], '2026-11-20')
+
+    def test_tick_does_not_post_before_11pm(self):
+        for ts in (NINE_AM, TEN_AM, THREE_PM, NINE_PM):
+            self.now[0] = ts
+            self.assertIsNone(self._reporter().tick())
         self.assertEqual(self.posted, [])
         self.assertFalse(os.path.exists(self.path))
 
-    def test_tick_posts_once_at_10am_and_saves_date(self):
+    def test_tick_posts_once_at_11pm_and_saves_night(self):
         text = self._reporter().tick()
         self.assertEqual(len(self.posted), 1)
         self.assertEqual(text, self.posted[0])
@@ -246,25 +278,34 @@ class ScheduleAndDedupeTest(unittest.TestCase):
         self.assertIn('Total: 1 | 2F/0M', text)
         self.assertNotIn('Estefany', text)
         saved = json.loads(open(self.path).read())
-        self.assertEqual(saved['last_posted_date'], '2026-11-20')
+        self.assertEqual(saved['last_posted_night'], '2026-11-20')
 
-    def test_restart_same_day_does_not_double_post(self):
+    def test_restart_same_night_does_not_double_post(self):
         r1 = self._reporter()
         r1.tick()
-        self.now[0] = THREE_PM
+        self.now[0] = ELEVEN_PM_LATE
         r2 = self._reporter()
         self.assertIsNone(r2.tick())
+        self.now[0] = ONE_AM
+        r3 = self._reporter()
+        self.assertIsNone(r3.tick())
         self.assertEqual(len(self.posted), 1)
 
-    def test_late_start_after_10am_posts_once_if_missing(self):
-        self.now[0] = THREE_PM
+    def test_missed_11pm_still_posts_until_3am_for_that_evening(self):
+        self.now[0] = ONE_AM
         text = self._reporter().tick()
         self.assertIsNotNone(text)
         self.assertIn("*Tonight's guest list — Fri 11/20*", text)
-        self.assertNotIn('3:00 PM', text)
+        self.assertIn('TAO: 1 | 2F/0M', text)
         self.assertEqual(len(self.posted), 1)
         self.assertIsNone(self._reporter().tick())
         self.assertEqual(len(self.posted), 1)
+
+    def test_after_3am_missed_night_is_skipped(self):
+        self.now[0] = THREE_AM
+        self.assertIsNone(self._reporter().tick())
+        self.assertEqual(self.posted, [])
+        self.assertFalse(os.path.exists(self.path))
 
     def test_channel_history_guard_when_state_file_missing(self):
         class Hist:
@@ -276,7 +317,7 @@ class ScheduleAndDedupeTest(unittest.TestCase):
 
         self.assertIsNone(self._reporter(history_client=Hist()).tick())
         self.assertEqual(self.posted, [])
-        self.assertEqual(json.loads(open(self.path).read())['last_posted_date'], '2026-11-20')
+        self.assertEqual(json.loads(open(self.path).read())['last_posted_night'], '2026-11-20')
 
     def test_history_failure_fails_open_and_still_posts_from_state_guard(self):
         class Hist:
@@ -294,15 +335,15 @@ class ScheduleAndDedupeTest(unittest.TestCase):
         self.assertIsNotNone(self._reporter().tick())
         self.assertEqual(len(self.posted), 1)
 
-    def test_next_day_posts_again(self):
+    def test_next_night_posts_again(self):
         self._reporter().tick()
-        self.now[0] = datetime(2026, 11, 21, 10, 0, tzinfo=PHX).timestamp()
-        # The fixture job is Nov 20 only; 21st still posts (possibly none confirmed).
+        self.now[0] = SAT_ELEVEN_PM
+        # The fixture job is Nov 20 only; Saturday still posts (none confirmed).
         text = self._reporter().tick()
         self.assertIsNotNone(text)
         self.assertIn("*Tonight's guest list — Sat 11/21*", text)
         self.assertEqual(len(self.posted), 2)
-        self.assertEqual(json.loads(open(self.path).read())['last_posted_date'], '2026-11-21')
+        self.assertEqual(json.loads(open(self.path).read())['last_posted_night'], '2026-11-21')
 
     def test_report_channel_defaults_to_generalchat_and_is_configurable(self):
         self.assertEqual(dr.DEFAULT_CHANNEL, 'C0CJK07GMHV')

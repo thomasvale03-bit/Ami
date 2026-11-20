@@ -1,16 +1,18 @@
-"""Daily 10 AM MST tonight guest-list totals, posted to #generalchat.
+"""Daily 11:00 PM MST tonight guest-list totals, posted to #generalchat.
 
 Only confirmed bookings for tonight's America/Phoenix date, by venue:
 signup (party) counts and Girls/Guys (F/M). No names, holds, queue,
 last-24h, sign-up, or pay figures. No guest emails or phones.
 
-Posts at most once per America/Phoenix calendar day. The last-posted date
-is saved to a dedicated state file so restarts do not double-post. An
-optional channel-history check is a second guard if that file is missing.
-A missed 10:00 slot still posts later the same day; nothing posts before 10:00.
+Posts at most once per night at 11:00 PM America/Phoenix. The last-posted
+night is saved to a dedicated state file so restarts do not double-post.
+An optional channel-history check is a second guard if that file is missing.
+A missed 11:00 PM slot may still post until 3:00 AM for that same evening's
+date; nothing posts before 11:00 PM. Older last_posted_date values from the
+retired 10 AM schedule are ignored, so tonight's 11 PM post is not skipped.
 """
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import logging
 import os
@@ -24,7 +26,8 @@ from .views import (EMAIL_RE, SECRET_RE, SECRET_URL_RE, on_date, project,
 
 log = logging.getLogger('amy.slack.daily_report')
 PHOENIX = ZoneInfo('America/Phoenix')
-REPORT_HOUR = 10
+REPORT_HOUR = 23  # 11:00 PM Phoenix
+LATE_UNTIL_HOUR = 3  # missed 11 PM may post until 03:00, not including 3 AM
 REPORT_TITLE = "Tonight's guest list"
 DEFAULT_CHANNEL = 'C0CJK07GMHV'  # #generalchat (workspace general; no #general)
 CHANNEL_ENV = 'SLACK_DAILY_REPORT_CHANNEL'
@@ -130,12 +133,12 @@ def tonight_totals(jobs, today):
             'jobs': total_jobs, 'female': total_f, 'male': total_m}
 
 
-def build(jobs, status=None, now=None):
+def build(jobs, status=None, now=None, night=None):
     now = time.time() if now is None else now
     when = datetime.fromtimestamp(now, PHOENIX)
-    today = when.date()
-    return {'date': today.isoformat(), 'when': when,
-            'tonight': tonight_totals(jobs, today)}
+    night = night or when.date()
+    return {'date': night.isoformat(), 'when': when, 'night': night,
+            'tonight': tonight_totals(jobs, night)}
 
 
 def _fmt_party(f, m):
@@ -147,8 +150,8 @@ def _fmt_report_day(d):
 
 
 def render(data, *, test=False):
-    when = data['when']
-    header = f"*{REPORT_TITLE} — {_fmt_report_day(when)}*"
+    night = data.get('night') or data['when'].date()
+    header = f"*{REPORT_TITLE} — {_fmt_report_day(night)}*"
     if test:
         header = 'TEST — ' + header
     t = data['tonight']
@@ -178,12 +181,30 @@ def sanitize(text):
     return text
 
 
-def due(now, last_posted_date):
-    """True when it is 10:00 AM MST or later and today's report has not posted."""
+def report_night(now):
+    """Phoenix night this tick may post, or None if outside the 11 PM–3 AM window.
+
+    11:00 PM–11:59 PM: tonight's date. 12:00 AM–2:59 AM: the previous evening.
+    3:00 AM through 10:59 PM: do not post.
+    """
     local = datetime.fromtimestamp(now, PHOENIX)
-    if local.hour < REPORT_HOUR:
+    if local.hour >= REPORT_HOUR:
+        return local.date()
+    if local.hour < LATE_UNTIL_HOUR:
+        return local.date() - timedelta(days=1)
+    return None
+
+
+def due(now, last_posted_night):
+    """True in the 11 PM–3 AM window when that night's report has not posted.
+
+    last_posted_night is the evening's date (YYYY-MM-DD). The retired 10 AM
+    last_posted_date field is not consulted.
+    """
+    night = report_night(now)
+    if night is None:
         return False
-    return last_posted_date != local.date().isoformat()
+    return last_posted_night != night.isoformat()
 
 
 def load_state(path):
@@ -236,7 +257,7 @@ def history_has_today(client, channel, today, now=None):
     """True if the report channel already has today's official report. Fail-open to False.
 
     Messages prefixed with TEST — are previews and do not count, so a test post
-    never blocks the scheduled 10:00 AM run.
+    never blocks the scheduled 11:00 PM run.
     """
     if client is None or not channel:
         return False
@@ -266,13 +287,13 @@ class DailyReporter:
         self.channel = channel or report_channel()
         self.history_client = history_client
 
-    def _already_posted(self, today, now):
+    def _already_posted(self, night, now):
         state = load_state(self.path)
-        if state.get('last_posted_date') == today.isoformat():
+        if state.get('last_posted_night') == night.isoformat():
             return True
-        if history_has_today(self.history_client, self.channel, today, now):
+        if history_has_today(self.history_client, self.channel, night, now):
             # Persist so later ticks do not keep hitting history.
-            state['last_posted_date'] = today.isoformat()
+            state['last_posted_night'] = night.isoformat()
             state['last_posted_via'] = 'channel-history'
             try:
                 save_state(self.path, state)
@@ -282,13 +303,12 @@ class DailyReporter:
         return False
 
     def tick(self):
-        """Build and post today's report if due. Returns the text posted, or None."""
+        """Build and post tonight's report if due. Returns the text posted, or None."""
         now = self.clock()
-        local = datetime.fromtimestamp(now, PHOENIX)
-        today = local.date()
-        if not due(now, load_state(self.path).get('last_posted_date')):
+        night = report_night(now)
+        if night is None or not due(now, load_state(self.path).get('last_posted_night')):
             return None
-        if self._already_posted(today, now):
+        if self._already_posted(night, now):
             return None
         try:
             jobs = self.api.jobs(limit=1000)
@@ -296,7 +316,7 @@ class DailyReporter:
         except Exception as exc:  # noqa: BLE001
             log.warning('daily report skipped; AMY API unavailable: %s', type(exc).__name__)
             return None
-        text = sanitize(render(build(jobs, status, now)))
+        text = sanitize(render(build(jobs, status, now, night=night)))
         if not text.strip():
             return None
         try:
@@ -305,11 +325,11 @@ class DailyReporter:
             log.exception('daily report Slack post failed')
             return None
         try:
-            save_state(self.path, {'last_posted_date': today.isoformat(),
+            save_state(self.path, {'last_posted_night': night.isoformat(),
                                    'last_posted_ts': now})
         except OSError as exc:
             log.warning('daily report posted but state not saved: %s', type(exc).__name__)
-        log.info('posted daily report for %s (%s chars)', today.isoformat(), len(text))
+        log.info('posted daily report for %s (%s chars)', night.isoformat(), len(text))
         return text
 
     def run_forever(self, interval=None, sleep=time.sleep):
@@ -325,4 +345,4 @@ class DailyReporter:
 
 __all__ = ['DailyReporter', 'build', 'render', 'sanitize', 'due', 'short_venue',
            'tonight_totals', 'REPORT_TITLE', 'DEFAULT_CHANNEL', 'report_channel',
-           'make_channel_poster']
+           'make_channel_poster', 'report_night']
