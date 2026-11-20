@@ -211,8 +211,9 @@ def validate_completion(raw, metadata, require_team_receipt=True):
             if (venue, night) not in expected and not mdc_extra and not fallback:
                 raise Conflict('Receipt must match exact source date/venue')
             party = record.get('party')
-            expected_party = {'male_count': int(raw.get('male_count') or 0),
-                              'female_count': int(raw.get('female_count') or 0)}
+            import request_plan
+            female, male = request_plan.party_for_night(raw, night)
+            expected_party = {'male_count': int(male), 'female_count': int(female)}
             if party != expected_party:
                 raise Conflict('Receipt party counts must match the source')
             if record.get('closed') or record.get('access_code_required'):

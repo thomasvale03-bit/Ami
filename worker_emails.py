@@ -120,10 +120,15 @@ def team_email(ref, raw, request, bookings, update=False, pending=None):
     if posh.get("order_number"):
         source = f"Posh #{posh['order_number']} {posh.get('event_name') or ''}".strip()
     nights = []
+    import request_plan
+    per_night = request_plan.night_parties(raw)
     for b in sorted(bookings, key=lambda b: (b["date"], b["venue"])):
         event = (b.get("event") or "").strip()
         when = f" - {b['event_time']}" if b.get("event_time") else ""
+        f, m = request_plan.party_for_night(raw, b["date"], request["female_count"], request["male_count"])
+        party_bit = f" ({f}F {m}M)" if per_night else ""
         nights.append(f"{_long(b['date'])} — {b['venue']}" + (f" ({event}{when})" if event else "")
+                      + party_bit
                       + f"\n✅ Signed up — Order ID {b['order_id']}"
                       + (f"\n{b['confirmation_url']}" if b.get("confirmation_url") else ""))
     text = "\n".join([
@@ -236,9 +241,13 @@ def drais_team_email(ref, raw, request, bookings):
              f"Promoter: {request.get('promoter') or raw.get('promoter') or 'Not provided'}",
              *_promoter_contact(raw)]
     # Thomas: no phone numbers in emails; Drai's is confirmation-email only (no Speakeasy).
+    import request_plan
+    per_night = request_plan.night_parties(raw)
     for b in sorted(bookings, key=lambda b: b["date"]):
+        nf, nm = request_plan.party_for_night(raw, b["date"], request["female_count"], request["male_count"])
+        party_bit = f"({nf}F {nm}M) " if per_night else ""
         lines.append(f"{DRAIS_VENUE}, {date.fromisoformat(b['date']).strftime('%a')} {b['date']} "
-                     f"(confirmation email sent, no Speakeasy signup)")
+                     f"{party_bit}(confirmation email sent, no Speakeasy signup)")
     lines += [f"Source: {source}", f"AMY ref: {ref}"]
     text = "\n".join(lines)
     label = date_label(request["start_date"], request["end_date"])

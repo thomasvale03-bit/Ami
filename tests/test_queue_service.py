@@ -445,3 +445,28 @@ def test_owner_requeue_refuses_submitted_or_done(raw):
     assert s.get('mock')['state'] == 'manual'
     assert api(s, '/queue/requeue/mock', {'owner_approval': 'pt861u'})[0] == 409
     assert api(s, '/queue/requeue/unknown', {'owner_approval': 'pt861u'})[0] == 409
+
+
+def test_complete_accepts_per_night_party(raw):
+    raw.update(start_date='2026-11-21', end_date='2026-11-22',
+               venues=['LAVO Party Brunch', 'TAO Nightclub'],
+               female_count=2, male_count=0,
+               itinerary='2026-11-21 LAVO Party Brunch; 2026-11-22 TAO Nightclub',
+               comments='Party by night: 2026-11-21 1F 0M; 2026-11-22 2F 0M')
+    s, token = assigned(raw)
+    receipts = [dict(kind='guest', id='G'), dict(kind='team', id='T')]
+    wrong = {'evidence': {'verified': True, 'bookings': [
+        dict(verified=True, venue='LAVO Party Brunch', date='2026-11-21', order_id='A',
+             party={'male_count': 0, 'female_count': 2}),
+        dict(verified=True, venue='TAO Nightclub', date='2026-11-22', order_id='B',
+             party={'male_count': 0, 'female_count': 2}),
+    ], 'email_receipts': receipts}}
+    assert update(s, token, 'complete', wrong)[0] == 409
+    good = {'evidence': {'verified': True, 'bookings': [
+        dict(verified=True, venue='LAVO Party Brunch', date='2026-11-21', order_id='A',
+             party={'male_count': 0, 'female_count': 1}),
+        dict(verified=True, venue='TAO Nightclub', date='2026-11-22', order_id='B',
+             party={'male_count': 0, 'female_count': 2}),
+    ], 'email_receipts': receipts}}
+    assert update(s, token, 'complete', good)[1]['state'] == 'done'
+

@@ -67,6 +67,7 @@ class FakeTao:
         self.posted_value, self.listing_value, self.submit_fn = posted, listing, submit
         self.dayclubs = dayclubs
         self.submits = []
+        self.guest_parties = []
 
     def reset(self):
         pass
@@ -86,6 +87,8 @@ class FakeTao:
 
     def submit(self, listing, guest, *, rehearse, screenshot_path, before_submit):
         self.submits.append((listing['event'], rehearse))
+        self.guest_parties.append({'female_count': guest.get('female_count'), 'male_count': guest.get('male_count'),
+                                   'event': listing.get('event')})
         if self.submit_fn:
             return self.submit_fn(before_submit)
         if rehearse:
@@ -766,3 +769,46 @@ def test_duplicate_without_prior_id_stays_manual(tmp_path):
     nothing = (200, {'result': {'sent': False, 'duplicate': True, 'prior': None}})
     api.send_responses = [nothing, nothing]
     assert worker.run_once()['status'] == 'manual'
+
+
+def test_night_party_note_books_lavo_as_one_female(tmp_path):
+    """A Party by night note books Saturday as 1F even when the request is 2F."""
+    s, api, worker = make(tmp_path, tao=FakeTao(dayclubs=True))
+    payload = raw(
+        start_date='2026-11-21', end_date='2026-11-22',
+        venues=['LAVO Party Brunch', 'TAO Nightclub', 'Marquee Dayclub'],
+        female_count='2', male_count='0',
+        itinerary='2026-11-21 LAVO Party Brunch + Marquee Dayclub; 2026-11-22 TAO Nightclub + Marquee Dayclub',
+        comments='Party by night: 2026-11-21 1F 0M; 2026-11-22 2F 0M',
+    )
+    s.enqueue('ouns', payload, NOW)
+    result = worker.run_once()
+    assert result['status'] == 'done', result
+    parties = {(b['venue'], b['date']): b['party'] for b in result['evidence']['bookings']}
+    sat = {'male_count': 0, 'female_count': 1}
+    sun = {'male_count': 0, 'female_count': 2}
+    assert parties[('LAVO Party Brunch', '2026-11-21')] == sat
+    assert parties[('Marquee Dayclub', '2026-11-21')] == sat
+    assert parties[('TAO Nightclub', '2026-11-22')] == sun
+    assert parties[('Marquee Dayclub', '2026-11-22')] == sun
+    by_event = {p['event']: p for p in worker.tao.guest_parties}
+    assert by_event['Guest List - LAVO Party Brunch']['female_count'] == 1
+    assert by_event['Guest List - TAO Nightclub']['female_count'] == 2
+
+
+def test_drais_night_party_email_only_uses_per_night_counts(tmp_path):
+    s, api, worker = make(tmp_path, drais=FakeDrais())
+    payload = raw(
+        venues=["Drai's After Hours"], start_date='2026-11-21', end_date='2026-11-22',
+        female_count='2', male_count='0',
+        itinerary="2026-11-21 Drai's After Hours; 2026-11-22 Drai's After Hours",
+        comments='Party by night: 2026-11-21 1F 0M; 2026-11-22 2F 0M',
+    )
+    s.enqueue('drais-ouns', payload, NOW)
+    result = worker.run_once()
+    assert result['status'] == 'done', result
+    parties = {(b['venue'], b['date']): b['party'] for b in result['evidence']['bookings']}
+    assert parties[("Drai's After Hours", '2026-11-21')] == {'male_count': 0, 'female_count': 1}
+    assert parties[("Drai's After Hours", '2026-11-22')] == {'male_count': 0, 'female_count': 2}
+    assert any("Sat 2026-11-21 (1F 0M)" in p['text'] for p in api.sent if p['to'].startswith('team@'))
+
