@@ -115,6 +115,8 @@ backup path). No reinstall is required unless a new scope is added —
 | `SLACK_ALLOWED_USERS` | optional comma list of user IDs allowed to ask |
 | `SLACK_WORKER_STATE` | `/data/slack-worker/state.json` (volume at `/data`) |
 | `RAILWAY_DOCKERFILE_PATH` | `slack_worker/Dockerfile` |
+| `SLACK_USER_TOKEN` | optional: AMYI's user token (xoxp) from the AMY Worker app; turns on AMYI user-account replies |
+| `SLACK_FLYER_CHANNEL` | optional, default `C0CK42NLM9A` (#weeklyevents) |
 
 
 ## Jacob (`jacob-slack-worker`)
@@ -169,3 +171,47 @@ running the same `slack_worker` package with `SLACK_PERSONA=jacob`.
 | `SLACK_NEWHIRE_CHANNEL` | default `C0CJZ69MPB7` (`#newhire`) |
 | `SLACK_WORKER_STATE` | `/data/slack-worker/state.json` (its own volume at `/data`) |
 | `RAILWAY_DOCKERFILE_PATH` | `slack_worker/Dockerfile` |
+
+## AMYI's own user account replies (`SLACK_USER_TOKEN`)
+
+AMYI also has a normal Slack *user* account (`U0CJYJRMRL6`, infojarvis,
+display name AMYI). With `SLACK_USER_TOKEN` set (the AMY Worker app's
+**User OAuth Token**, `xoxp-…`, authorized by AMYI), `amy-slack-worker`
+answers as that account too (`slack_worker/user_identity.py`):
+
+* every teammate DM to AMYI, plus channel @mentions of AMYI and untagged
+  replies in threads AMYI is already in;
+* same read-only AMY tools, voice, guardrails and per-DM / per-thread
+  history (last ~30 messages) as AMY Worker; posts with AMYI's user token;
+* never answers its own messages, AMY Worker, or other bots;
+* a catch-up loop replays DMs to AMYI missed during a reconnect, but only
+  messages newer than process start minus 2 minutes (a deploy never answers
+  old conversations).
+
+Off for `SLACK_PERSONA=jacob` and whenever `SLACK_USER_TOKEN` is unset.
+
+App changes (manifest in `docs/slack_amy_worker_manifest.json`): bot scope
+`files:read`; user scopes `im:history im:read chat:write files:read
+files:write users:read channels:history channels:read groups:history`;
+user events `message.im message.channels message.groups`. Save the manifest,
+then reinstall the app **while signed in as AMYI** so the user token belongs
+to AMYI, and copy the User OAuth Token into `SLACK_USER_TOKEN`.
+
+## Flyers → #weeklyevents
+
+When Tom (`SLACK_OWNER_USER_ID`) DMs an image to AMY Worker or to AMYI, the
+worker downloads it (`files:read`) and posts it to #weeklyevents
+(`C0CK42NLM9A`, override with `SLACK_FLYER_CHANNEL`) as that same identity,
+then replies "Posted it to #weeklyevents". WhatsApp share boilerplate is
+dropped; any other text Tom typed becomes the caption. Each file id posts
+once (`flyers-posted.json` on the volume), and a file whose name and size
+are already in the channel's recent history is not posted again.
+
+## Operations-director prompt
+
+`slack_worker/company_playbook.md` is folded into AMY's system prompt: AMY
+acts as Playmaker's operations director (concise, decisions escalate to
+Tom, never invent availability or guarantees) and always separates *lead*,
+*submission*, *confirmed* and *check-in*. It contains no pay figures; pay
+questions still go to Tom. When Tom himself is talking, the reply treats him
+as the owner and does not "escalate to Tom". Jacob's prompt is unchanged.

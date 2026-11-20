@@ -20,7 +20,7 @@ import os
 import threading
 import time
 
-from . import commands, llm, persona
+from . import commands, flyers, llm, persona, user_identity
 from .amy_api import AmyApi
 from .catchup import Catchup, RepliedSet, should_answer_channel
 from .guardrails import apply_guardrails, needs_escalation, escalation_reply, ESCALATION_REPLY
@@ -398,9 +398,15 @@ def build_app():
     replied = RepliedSet()
     flagsink = FlagSink()
     onboarding = OnboardingStore() if persona.is_jacob() else None
+    posted_flyers = flyers.PostedSet() if persona.is_amy() else None
     welcomed = onboarding
 
-    def handle(event, say, thread=None):
+    def handle(event, say, thread=None, *, client=None, self_user=None, identity_note='',
+               download_token=None, poster=None):
+        """Answer one message. client/self_user/identity_note select the identity
+        (AMY Worker bot by default, AMYI's user account when given)."""
+        client = client or app.client
+        poster = poster or client
         user = event.get('user') or ''
         channel = event.get('channel') or ''
         ts = event.get('ts') or ''
@@ -416,9 +422,24 @@ def build_app():
                 if channel and ts:
                     replied.mark(channel, ts)
                 return
-            history, context = load_conversation(app.client, event, thread)
-            incoming = event.get('text') or ''
             is_im = event.get('channel_type') == 'im' or (channel or '').startswith('D')
+            if persona.is_amy() and flyers.is_flyer_event(event):
+                done, skipped, failed = flyers.share_flyers(
+                    event, download_token=download_token or os.environ.get('SLACK_BOT_TOKEN', ''),
+                    poster=poster, posted=posted_flyers)
+                say(text=flyers.confirmation(done, skipped, failed), thread_ts=thread)
+                if channel and ts:
+                    replied.mark(channel, ts)
+                return
+            if self_user:
+                history, context = load_conversation(client, event, thread, bot_user=self_user)
+            else:
+                history, context = load_conversation(client, event, thread)
+            incoming = event.get('text') or ''
+            if persona.is_amy():
+                for note in (identity_note, user_identity.identity_context(user)):
+                    if note:
+                        context = (context + '\n' + note) if context else note
             if persona.is_jacob() and onboarding and user:
                 note = onboarding_mod.onboarding_note(onboarding.get(user))
                 if note:
@@ -427,14 +448,16 @@ def build_app():
                 lookups, incoming, history=history, context=context,
                 user_id=user, onboarding=onboarding, user={'id': user}, is_im=is_im)
             who = persona.name()
-            if needs_escalation(incoming, persona=who):
+            is_owner = persona.is_amy() and user == (os.environ.get('SLACK_OWNER_USER_ID') or TOM_USER_ID)
+            escalate = needs_escalation(incoming, persona=who) and not is_owner
+            if escalate:
                 outgoing = apply_guardrails(
                     escalation_reply(incoming, persona=who),
                     amy_confirmed=True, source='escalation', persona=who)[0]
             say(text=outgoing, thread_ts=thread)
             if channel and ts:
                 replied.mark(channel, ts)
-            if needs_escalation(incoming, persona=who):
+            if escalate:
                 log.warning('escalation flagged channel=%s ts=%s user=%s', channel, ts, user)
                 try:
                     flagsink.send(escalation_note(event, outgoing, channel_label=event.get('channel_name')))
@@ -459,6 +482,40 @@ def build_app():
         handle(event, lambda **kw: app.client.chat_postMessage(
             channel=event.get('channel'), unfurl_links=False, unfurl_media=False, **kw), thread)
 
+    amyi = None
+    if user_identity.enabled():
+        try:
+            amyi = user_identity.AmyiUser.from_env()
+        except Exception as exc:  # noqa: BLE001
+            log.error('AMYI user identity disabled: %s', type(exc).__name__)
+            amyi = None
+    app._amyi = amyi
+
+    def amyi_reply(event, thread):
+        """Answer as AMYI's own user account (user token)."""
+        handle(event, lambda **kw: amyi.client.chat_postMessage(
+            channel=event.get('channel'), unfurl_links=False, unfurl_media=False, **kw), thread,
+            client=amyi.client, self_user=amyi.self_id, identity_note=user_identity.IDENTITY_NOTE,
+            download_token=amyi.token, poster=amyi.client)
+    app._amyi_reply = amyi_reply
+
+    def maybe_amyi(event):
+        """True if AMYI's user account handled (or owns) this message event."""
+        if amyi is None:
+            return False
+        try:
+            where = amyi.route(event)
+        except Exception as exc:  # noqa: BLE001
+            log.warning('AMYI route failed: %s', type(exc).__name__)
+            return False
+        if not where:
+            return False
+        if where == 'dm':
+            amyi_reply(event, event.get('thread_ts'))
+        else:
+            amyi_reply(event, event.get('thread_ts') or event.get('ts'))
+        return where == 'dm'
+
     @app.event('app_mention')
     def on_mention(event, say):
         handle(event, say, thread=event.get('thread_ts') or event.get('ts'))
@@ -471,7 +528,11 @@ def build_app():
                  event.get('subtype') or '-', event.get('channel') or '', event.get('ts') or '',
                  event.get('user') or event.get('bot_id') or '',
                  event.get('thread_ts') or '', event.get('channel_type') or '')
-        if event.get('subtype') or event.get('bot_id'):
+        if maybe_amyi(event):
+            return  # a DM to AMYI's user account; the bot is not in it
+        subtype = event.get('subtype')
+        if event.get('bot_id') or (subtype and not (
+                subtype == 'file_share' and event.get('channel_type') == 'im')):
             return
         if event.get('channel_type') == 'im':
             handle(event, say, thread=event.get('thread_ts'))
@@ -559,6 +620,12 @@ def main():
         threading.Thread(target=watcher.run_forever, name='amy-watcher', daemon=True).start()
     catchup = Catchup(app.client, say_reply, replied)
     threading.Thread(target=catchup.run_forever, name='amy-catchup', daemon=True).start()
+    if getattr(app, '_amyi', None) is not None:
+        amyi_catchup = user_identity.AmyiCatchup(app._amyi, app._amyi_reply, replied)
+        threading.Thread(target=amyi_catchup.run_forever, name='amyi-catchup', daemon=True).start()
+        log.info('AMYI user account replies on (user=%s)', app._amyi.self_id)
+    elif persona.is_amy():
+        log.info('AMYI user account replies off (SLACK_USER_TOKEN not set)')
     SocketModeHandler(app, os.environ['SLACK_APP_TOKEN']).start()
 
 
