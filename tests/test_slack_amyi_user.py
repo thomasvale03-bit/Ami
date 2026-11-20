@@ -182,7 +182,7 @@ class PromptTest(unittest.TestCase):
     def test_operations_director_rules(self):
         text = prompt.SYSTEM_PROMPT
         for phrase in ('operations director', 'Lead', 'Submission', 'Confirmed reservation', 'Verified check-in',
-                       'Escalations go to Tom', 'Verified attendance', 'Never invent availability',
+                       'Escalations go to Tom', 'Verified attendance', 'Never invent venue availability',
                        "JEWEL's last night is Nov 21, 2026", 'LAVO is temporary', 'Never claim TAO access'):
             self.assertIn(phrase, text)
 
