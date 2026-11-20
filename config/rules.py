@@ -89,6 +89,8 @@ VENUE_ALIASES = {
     "palm tree beach club": "Palm Tree Beach Club",
     "palm tree beach": "Palm Tree Beach Club",
     "lavo party brunch": "LAVO Party Brunch",
+    "lavo italian restaurant lv": "LAVO Party Brunch",
+    "lavo italian restaurant": "LAVO Party Brunch",
     "lavo": "LAVO Party Brunch",
     "liv": "LIV Nightclub",
     "liv nightclub": "LIV Nightclub",

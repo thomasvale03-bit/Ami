@@ -67,6 +67,8 @@ def live_catalog():
         venue = (event.get("location") or "").strip()
         if not venue:
             continue
+        from config import rules
+        venue = rules.normalize_venue_name(venue)
         try:
             start = datetime.strptime((event.get("start") or "")[:19], "%Y-%m-%d %H:%M:%S")
         except ValueError:
