@@ -20,8 +20,8 @@ import re
 import time
 from zoneinfo import ZoneInfo
 
-from .views import (ATTENTION, EMAIL_RE, IN_FLIGHT, PHONE_RE, fmt_day, guest_name,
-                    nights, on_date, project, saved_bookings, scrub,
+from .views import (ATTENTION, EMAIL_RE, IN_FLIGHT, SECRET_RE, SECRET_URL_RE,
+                    fmt_day, guest_name, nights, on_date, project, saved_bookings,
                     venues as venue_names)
 
 log = logging.getLogger('amy.slack.daily_report')
@@ -41,7 +41,7 @@ FAILED_STATES = frozenset({'failed'})
 HOLD_LIMIT = 15
 UPCOMING_DAYS = 7
 DEFAULT_CHANNEL = 'C0CKWF6FHAL'  # #amy-bookings
-DOLLAR_AMOUNT_RE = __import__('re').compile(r'\$\s*\d')
+DOLLAR_AMOUNT_RE = re.compile(r'\$\s*\d+(?:,\d{3})*(?:\.\d+)?')
 
 
 def public_name(name):
@@ -51,9 +51,11 @@ def public_name(name):
         return 'Unknown'
     if len(parts) == 1:
         return parts[0]
-    last = parts[-1]
-    initial = next((ch.upper() for ch in last if ch.isalpha()), last[0].upper())
-    return f'{parts[0]} {initial}.'
+    for last in reversed(parts[1:]):
+        initial = next((ch.upper() for ch in last if ch.isalpha()), None)
+        if initial:
+            return f'{parts[0]} {initial}.'
+    return parts[0]
 
 
 def counts_of(job):
@@ -240,12 +242,13 @@ def open_holds(jobs):
             'guest': public_name(p['guest']),
             'venues': p['venues'],
             'dates': p['dates'],
+            'start': p['start'] or '9999-99-99',
             'party': p['party'],
             'state': p['state'],
             'reason': p['reason'],
             'ref': p['ref'],
         })
-    holds.sort(key=lambda h: (h['dates'], h['guest']))
+    holds.sort(key=lambda h: (h['start'], h['guest']))
     return {'holds': holds, 'parked': parked}
 
 
@@ -341,13 +344,17 @@ def render(data):
 
 
 def sanitize(text):
-    """Last-line defense: never let contact details or dollar amounts through."""
-    text = scrub(text, limit=12000)
+    """Last-line defense for secrets, emails, and dollar amounts.
+
+    Do not run the phone scrubber on the assembled report: ISO dates in
+    reasons (2026-12-25) and hex job refs with long digit runs
+    (1a1d718786368942) look like phone fragments. Reasons are already
+    passed through short_reason/scrub when each job is projected.
+    """
+    text = SECRET_RE.sub('[hidden]', str(text or ''))
+    text = SECRET_URL_RE.sub('[hidden]', text)
+    text = EMAIL_RE.sub('[email]', text)
     text = DOLLAR_AMOUNT_RE.sub('[amount]', text)
-    # scrub() already redacts emails/phones; also drop any leftover raw patterns.
-    if EMAIL_RE.search(text) or PHONE_RE.search(text):
-        text = EMAIL_RE.sub('[email]', text)
-        text = PHONE_RE.sub('[phone]', text)
     return text
 
 
