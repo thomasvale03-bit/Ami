@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -107,6 +108,9 @@ class BuildAndRenderTest(unittest.TestCase):
             job('hold-open', 'manual', name='Corey Thomas', venues=('TAO Nightclub',),
                 start='2026-11-20', female=2, male=1, reason='Needs a code from Tom',
                 email='corey@example.com', phone='702-555-0100'),
+            job('hold-past', 'manual', name='Ashley Past', venues=('OMNIA Nightclub',),
+                start='2026-11-13', female=2, male=0,
+                reason='Past or invalid source date; never move to tonight'),
             job('1a1f476cef115d1c', 'manual', name='Sydney Stevens', venues=('Marquee Dayclub',),
                 start='2026-12-21', female=9, male=0, reason='Just cancel it'),
             job('hold-valerie', 'manual', name='Valerie Cole', venues=('OMNIA Nightclub',),
@@ -118,7 +122,7 @@ class BuildAndRenderTest(unittest.TestCase):
         ]
         # job() always sets 'ref' from first arg; the sydney one overwrote via kw? check
         # I passed ref= as kw after positional ref='hold-sydney'. Fix after if needed.
-        self.status = {'counts': {'done': 3, 'queued': 1, 'manual': 3, 'assigned': 1, 'failed': 1},
+        self.status = {'counts': {'done': 3, 'queued': 1, 'manual': 4, 'assigned': 1, 'failed': 1},
                        'intake_receipts': [{'key': 'r1', 'source': 'website', 'state': 'pending',
                                             'created': TEN_AM - 600}]}
 
@@ -132,7 +136,7 @@ class BuildAndRenderTest(unittest.TestCase):
         q = dr.queue_counts(self.jobs, self.status)
         self.assertEqual(q['pending'], 1)  # queued
         self.assertEqual(q['claimed'], 1)  # assigned
-        self.assertEqual(q['manual'], 3)
+        self.assertEqual(q['manual'], 4)
         self.assertEqual(q['failed'], 1)
 
     def test_failed_is_zero_when_state_unused(self):
@@ -168,12 +172,15 @@ class BuildAndRenderTest(unittest.TestCase):
         self.assertNotIn('Hakkasan Nightclub', sat['venues'])
 
     def test_open_holds_exclude_parked_and_use_public_names(self):
-        h = dr.open_holds(self.jobs)
+        today = datetime.fromtimestamp(TEN_AM, PHX).date()
+        h = dr.open_holds(self.jobs, today)
         names = [x['guest'] for x in h['holds']]
         self.assertIn('Corey T.', names)
         self.assertNotIn('Sydney S.', names)
         self.assertNotIn('Valerie C.', names)
+        self.assertNotIn('Ashley P.', names)
         self.assertEqual(h['parked'], 2)
+        self.assertEqual(h['older'], 1)
 
     def test_render_is_plain_real_data_no_pay_no_contacts_checkins_line(self):
         text = dr.sanitize(dr.render(dr.build(self.jobs, self.status, TEN_AM)))
@@ -183,8 +190,9 @@ class BuildAndRenderTest(unittest.TestCase):
         self.assertIn('*New sign-ups received:* 3 (1 website, 1 Posh, 1 intake pending)', text)
         self.assertIn('*Upcoming bookings (next 7 days):*', text)
         self.assertIn('Juan P.', text)
-        self.assertIn('*Queue:* pending 1, claimed 1, manual 3, failed 1', text)
-        self.assertIn('*Open holds needing Tom:* 1 (2 intentionally parked, not listed)', text)
+        self.assertIn('*Queue:* pending 1, claimed 1, manual 4, failed 1', text)
+        self.assertIn('*Open holds needing Tom:* 1 (2 intentionally parked, not listed, +1 older past-date manual jobs not shown)', text)
+        self.assertNotIn('Ashley P.', text)
         self.assertIn('Corey T.', text)
         self.assertIn('Needs a code from Tom', text)
         self.assertNotIn('Sydney', text)
@@ -219,13 +227,38 @@ class BuildAndRenderTest(unittest.TestCase):
             job('dec', 'manual', name='Alex Roe', venues=('Marquee Nightclub',),
                 start='2026-12-25', reason='Marquee Nightclub 2026-12-25: guest list not posted'),
             job('nov', 'manual', name='Corey Thomas', venues=('TAO Nightclub',),
+                start='2026-11-20', reason='Needs a code from Tom'),
+            job('past', 'manual', name='Ashley Past', venues=('OMNIA Nightclub',),
                 start='2026-11-13', reason='Past or invalid source date; never move to tonight'),
         ]
         text = dr.sanitize(dr.render(dr.build(jobs, {}, TEN_AM)))
         self.assertLess(text.index('Corey T.'), text.index('Alex R.'))
+        self.assertNotIn('Ashley P.', text)
+        self.assertIn('+1 older past-date manual jobs not shown', text)
         self.assertIn('2026-12-25', text)
         self.assertIn('(ref dec)', text)
         self.assertNotIn('[phone]', text)
+
+    def test_open_holds_keeps_today_and_range_ending_today_drops_ended_yesterday(self):
+        today = datetime.fromtimestamp(TEN_AM, PHX).date()
+        jobs = [
+            job('today', 'manual', name='Today Guest', start='2026-11-20'),
+            job('range-today', 'manual', name='Range End Today', start='2026-11-18', end='2026-11-20'),
+            job('ended-yesterday', 'manual', name='Ended Yesterday', start='2026-11-18', end='2026-11-19'),
+            job('future', 'manual', name='Future Guest', start='2026-11-26'),
+            job('undated', 'manual', name='No Date', start=''),
+        ]
+        h = dr.open_holds(jobs, today)
+        names = [x['guest'] for x in h['holds']]
+        # Soonest last-night-today-or-later first; undated (no start) last.
+        self.assertEqual(names, ['Range T.', 'Today G.', 'Future G.', 'No D.'])
+        self.assertEqual(h['older'], 1)
+        self.assertNotIn('Ended Y.', names)
+
+    def test_render_test_prefix_does_not_look_like_the_scheduled_post(self):
+        text = dr.sanitize(dr.render(dr.build(self.jobs, self.status, TEN_AM), test=True))
+        self.assertTrue(text.startswith('TEST — *Playmaker daily report*'))
+        self.assertNotEqual(text.split('\n', 1)[0], '*Playmaker daily report* — Fri Nov 20, 10:00 AM MST')
 
 
 class ScheduleAndDedupeTest(unittest.TestCase):
@@ -241,7 +274,7 @@ class ScheduleAndDedupeTest(unittest.TestCase):
     def tearDown(self):
         self.dir.cleanup()
 
-    def _reporter(self, api=None, history_client=None, channel='C0CKWF6FHAL'):
+    def _reporter(self, api=None, history_client=None, channel='C0CJK07GMHV'):
         return DailyReporter(api or FakeApi(self.jobs), self.posted.append,
                              state_path=self.path, clock=lambda: self.now[0],
                              channel=channel, history_client=history_client)
@@ -323,6 +356,57 @@ class ScheduleAndDedupeTest(unittest.TestCase):
         self.assertEqual(len(self.posted), 2)
         self.assertEqual(json.loads(open(self.path).read())['last_posted_date'], '2026-11-21')
 
+    def test_report_channel_defaults_to_generalchat_and_is_configurable(self):
+        self.assertEqual(dr.DEFAULT_CHANNEL, 'C0CJK07GMHV')
+        self.assertEqual(dr.report_channel(), 'C0CJK07GMHV')
+        with mock.patch.dict(os.environ, {'SLACK_DAILY_REPORT_CHANNEL': 'C123NEWID'}):
+            self.assertEqual(dr.report_channel(), 'C123NEWID')
+        # Bookings channel env must not silently retarget the daily report.
+        with mock.patch.dict(os.environ, {'SLACK_UPDATES_CHANNEL': 'C0CKWF6FHAL'}, clear=False):
+            os.environ.pop('SLACK_DAILY_REPORT_CHANNEL', None)
+            self.assertEqual(dr.report_channel(), 'C0CJK07GMHV')
+
+    def test_history_guard_ignores_test_prefix_and_counts_official_posts(self):
+        today = datetime.fromtimestamp(TEN_AM, PHX).date()
+
+        class Hist:
+            def __init__(self, messages):
+                self.messages = messages
+
+            def conversations_history(self, **kw):
+                return {'messages': self.messages}
+
+        test_only = Hist([{'text': 'TEST — *Playmaker daily report* — Fri Nov 20, 12:15 PM MST'}])
+        self.assertFalse(dr.history_has_today(test_only, 'C0CJK07GMHV', today, TEN_AM))
+        official = Hist([{'text': '*Playmaker daily report* — Fri Nov 20, 10:00 AM MST'}])
+        self.assertTrue(dr.history_has_today(official, 'C0CJK07GMHV', today, TEN_AM))
+
+    def test_channel_poster_joins_when_not_in_channel_then_posts(self):
+        calls = []
+
+        class Client:
+            def __init__(self):
+                self.joined = False
+
+            def chat_postMessage(self, **kw):
+                calls.append(('post', kw['channel'], kw['text'][:20]))
+                if not self.joined:
+                    err = type('E', (Exception,), {})()
+                    err.response = type('R', (), {'data': {'error': 'not_in_channel'}})()
+                    raise err
+
+            def conversations_join(self, **kw):
+                calls.append(('join', kw['channel']))
+                self.joined = True
+
+        post = dr.make_channel_poster(Client(), 'C0CJK07GMHV')
+        post('TEST — hello')
+        self.assertEqual(calls, [
+            ('post', 'C0CJK07GMHV', 'TEST — hello'),
+            ('join', 'C0CJK07GMHV'),
+            ('post', 'C0CJK07GMHV', 'TEST — hello'),
+        ])
+
 
 class AppHookTest(unittest.TestCase):
     def test_amy_persona_starts_daily_reporter_jacob_does_not(self):
@@ -332,8 +416,11 @@ class AppHookTest(unittest.TestCase):
         import inspect
         src = inspect.getsource(sw_app.main)
         self.assertIn('DailyReporter', src)
+        self.assertIn('make_channel_poster', src)
+        self.assertIn('report_channel', src)
         self.assertIn('amy-daily-report', src)
         self.assertIn('if persona.is_jacob()', src)
+        self.assertNotIn('router.post, channel=router.target', src)
         # The reporter is constructed only in the else (amy) branch, after the jacob return path.
         jacob_idx = src.index('if persona.is_jacob()')
         reporter_idx = src.index('DailyReporter')
