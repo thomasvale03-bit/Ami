@@ -197,7 +197,7 @@ def test_trip_with_tao_and_urvenue_nights_one_email_each(tmp_path):
     assert worker.run_once()["status"] == "done"
     assert [p["to"] for p in api.sent] == ["guest@example.invalid", TEAM]
     g = api.sent[0]
-    assert "Order ID ORDER-" in g["text"] and "XS Nightclub (Rufus Du Sol — on the guest list)" in g["text"]
+    assert "Order ID ORDER-" in g["text"] and "XS Nightclub (Rufus Du Sol, 10:30pm — on the guest list)" in g["text"]
     assert "Your Wynn Resorts app reservation" in g["html"] and "TAO Group Hospitality Rewards" in g["html"]
     assert "My Itinerary" in g["text"]
 

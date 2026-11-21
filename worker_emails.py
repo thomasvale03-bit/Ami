@@ -59,8 +59,14 @@ def update_subject(subject, bookings):
     """'Updated:' repeat subject (owner rule) made unique by the order IDs it
     covers, so /send-branded never mistakes a new order for an already-sent
     confirmation, while a retry of the same update is still deduped."""
-    ids = sorted({str(b.get("order_id"))[:8] for b in bookings if b.get("order_id")})
-    tail = f" (Order {' + '.join(ids)})" if ids else ""
+    # urvenue refs (UV-...) are internal and never shown to the guest; those
+    # nights are named by venue + date instead, which keeps each update's
+    # subject unique for /send-branded dedupe (Thomas, Nov 21 2026).
+    ids = sorted({str(b.get("order_id"))[:8] for b in bookings if b.get("order_id") and not is_urvenue(b)})
+    uv = sorted({(b["date"], b["venue"]) for b in bookings if is_urvenue(b)})
+    parts = ([f"Order {' + '.join(ids)}"] if ids else []) + [
+        f"{v} {date.fromisoformat(d).strftime('%b')} {date.fromisoformat(d).day}" for d, v in uv]
+    tail = f" ({' + '.join(parts)})" if parts else ""
     return ("Updated: " + subject + tail).replace(",", "").replace(";", "")
 
 
@@ -279,7 +285,29 @@ def _urvenue_html(page, bookings, email=None, rules=None):
         page = page.replace("Follow the steps to grab your passes before you head out.", hero)
         a, b = page.index("<!-- How to get passes -->"), page.index("<!-- Before you go -->")
         return page[:a] + "".join(parts) + page[b:]
+    page = _label_tao_steps(page, [x["venue"] for x in _sorted(bookings) if not is_urvenue(x)])
+    b = page.index("<!-- Before you go -->")
     return page[:b] + "".join(parts) + page[b:]
+
+
+TAO_LABEL = ('<p style="margin:12px 0 0 0;font-family:\'Inter\',Helvetica,Arial,sans-serif;font-size:13px;'
+             'letter-spacing:2px;text-transform:uppercase;color:#D4AF37;font-weight:700;">For {names}</p>')
+
+
+def _label_tao_steps(page, venues):
+    """Mixed TAO + urvenue trip: say which venues the TAO pass steps are for."""
+    if not venues:
+        return page
+    a = page.index("<!-- How to get passes -->")
+    end = page.index("</td></tr>", a)
+    return page[:end] + "\n      " + TAO_LABEL.format(names=_html.escape(_names(venues))) + page[end:]
+
+
+def _card_event(b):
+    """Night-card subtitle: urvenue nights also show the start time when known."""
+    event = (b.get("event") or "").strip()
+    when = (b.get("event_time") or "").strip() if is_urvenue(b) else ""
+    return " \u00b7 ".join(x for x in (event, when) if x) or b.get("event")
 
 
 def guest_email(request, bookings, update=False, pending=None):
@@ -298,7 +326,8 @@ def guest_email(request, bookings, update=False, pending=None):
     for b in sorted(bookings, key=lambda b: (b["date"], b["venue"])):
         event = (b.get("event") or "").strip()
         if is_urvenue(b):
-            inner = f"{event} — on the guest list" if event else "on the guest list"
+            show = ", ".join(x for x in (event, (b.get("event_time") or "").strip()) if x)
+            inner = f"{show} — on the guest list" if show else "on the guest list"
         else:
             inner = f"{event} — Order ID {b['order_id']}" if event else f"Order ID {b['order_id']}"
         lines.append(f"{_long(b['date'])} - {b['venue']} ({inner})")
@@ -316,7 +345,7 @@ def guest_email(request, bookings, update=False, pending=None):
         "Questions? Email info@playmakerentertainment.com",
         "Playmaker Entertainment",
     ])
-    rows = [(html_emails._short_date(b["date"]), b["venue"], b.get("event"))
+    rows = [(html_emails._short_date(b["date"]), b["venue"], _card_event(b))
             for b in sorted(bookings, key=lambda b: (b["date"], b["venue"]))]
     fallback_nights = [html_emails._short_date(b["date"]) for b in bookings if b.get("fallback")]
     html = html_emails.render_confirmation(
