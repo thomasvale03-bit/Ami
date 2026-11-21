@@ -745,24 +745,88 @@ def _choose_item(page, modal):
             modal.locator("select").nth(i).select_option(label=LIST_ITEM)
             _wait(page, 600)
             return
+    if _choose_ng_item(page, modal):
+        return
     opener = modal.get_by_text(re.compile(r"Select Item", re.I))
     if not _visible(opener):
         raise UrvenueError("urvenue 'Select Item' dropdown not found")
-    opener.first.click()
+    try:
+        opener.first.click(timeout=5000)
+    except Exception:  # noqa: BLE001 - something sits on top: force it
+        opener.first.click(force=True, timeout=5000)
     _wait(page, 800)
-    option = page.get_by_text(LIST_ITEM, exact=True)
-    picked = False
+    if not _pick_option(page, page.get_by_text(LIST_ITEM, exact=True)):
+        raise UrvenueError(f"urvenue list item {LIST_ITEM!r} not offered")
+    _wait(page, 600)
+
+
+NG_VALUE_JS = r"""(n) => Array.from(n.querySelectorAll('.ng-value-label, .ng-value'))
+  .map(e => e.textContent.trim()).filter(Boolean)"""
+
+
+def _pick_option(page, option):
     try:
         for i in range(option.count() - 1, -1, -1):
             if option.nth(i).is_visible():
-                option.nth(i).click()
-                picked = True
-                break
+                try:
+                    option.nth(i).click(timeout=5000)
+                except Exception:  # noqa: BLE001
+                    option.nth(i).click(force=True, timeout=5000)
+                return True
     except Exception:  # noqa: BLE001
-        picked = False
-    if not picked:
+        return False
+    return False
+
+
+def _choose_ng_item(page, modal):
+    """Angular ng-select (the live site): its search <input> overlays the
+    '- Select Item -' placeholder and intercepts clicks, so open it through
+    .ng-select-container (force if needed), pick General List from the
+    dropdown panel and read the chosen value back. False if there is none."""
+    ngs = modal.locator(".ng-select")
+    if not ngs.count():
+        return False
+    target = None
+    for i in range(ngs.count()):
+        n = ngs.nth(i)
+        values = n.evaluate(NG_VALUE_JS)
+        if LIST_ITEM in values:
+            return True                      # already chosen
+        if re.search(r"Select Item", n.inner_text() or "", re.I):
+            target = n
+            break
+    if target is None:
+        return False
+    container = target.locator(".ng-select-container").first
+    opened = False
+    for how in ({}, {"force": True}):
+        try:
+            container.click(timeout=5000, **how)
+            opened = True
+            break
+        except Exception:  # noqa: BLE001
+            continue
+    if not opened:
+        try:
+            target.locator("input").first.click(force=True, timeout=5000)
+        except Exception:  # noqa: BLE001
+            raise UrvenueError("urvenue 'Select Item' dropdown would not open") from None
+    _wait(page, 600)
+    options = page.locator(".ng-dropdown-panel .ng-option").filter(
+        has_text=re.compile(rf"^\s*{re.escape(LIST_ITEM)}\s*$"))
+    if not options.count():
+        try:   # long lists: type to filter
+            target.locator("input").first.fill(LIST_ITEM, timeout=3000)
+            _wait(page, 600)
+        except Exception:  # noqa: BLE001
+            pass
+    if not _pick_option(page, options):
         raise UrvenueError(f"urvenue list item {LIST_ITEM!r} not offered")
     _wait(page, 600)
+    values = target.evaluate(NG_VALUE_JS)
+    if LIST_ITEM not in values:
+        raise UrvenueError(f"urvenue list item {LIST_ITEM!r} not selected (shows {values[:3]})")
+    return True
 
 
 def _check_modal(modal):

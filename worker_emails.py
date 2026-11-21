@@ -112,13 +112,113 @@ def _sorted(bookings):
     return sorted(bookings, key=lambda b: (b["date"], b["venue"]))
 
 
-def urvenue_note(bookings):
-    """Check-in line for LIV / LIV Beach nights (name on the door list)."""
-    venues = [b["venue"] for b in _sorted(bookings) if is_urvenue(b) and not is_wynn(b)]
-    if not venues:
+LIV_VENUES = ("LIV Nightclub", "LIV Beach")
+LIV_HEADINGS = {"LIV Nightclub": "LIV @ FONTAINEBLEAU HOTEL", "LIV Beach": "LIV BEACH @ FONTAINEBLEAU HOTEL"}
+LIV_TOP = ("TOM\u2019s V (PME) GUESTLIST", "(Footfall promoter)", "", "Save or Screenshot This EMAIL to get in")
+LIV_BOTTOM = ("-IMPORTANT-", "\U0001F6A8come earlier to avoid a big line wait & dress to impress\U0001F6A8", "",
+              "NO ATHLETIC GEAR", "NO SHORTS(men)", "", "\U0001F525This Email Is Your Ticket \U0001F525", "",
+              "*U R on TOM Vale (PME) guestlist", "-Show this EMAIL at Check in & ID")
+LIV_NO_TERMS = "Guestlist terms will be confirmed"
+
+
+def is_liv(b):
+    return is_urvenue(b) and b.get("venue") in LIV_VENUES
+
+
+def _liv_day(iso):
+    d = date.fromisoformat(iso)
+    return f"{d.strftime('%A %b')} {d.day}"
+
+
+def liv_nights(bookings, rules=None):
+    """[(venue, [(night label lines...)], ...)] per LIV venue, Tom's format.
+    Terms only from the rules file (never guessed)."""
+    import liv_rules
+    rules = liv_rules.load() if rules is None else rules
+    out = []
+    for venue in LIV_VENUES:
+        nights = [b for b in _sorted(bookings) if is_liv(b) and b["venue"] == venue]
+        if not nights:
+            continue
+        blocks = []
+        for b in nights:
+            rule = liv_rules.for_night(venue, b["date"], rules)
+            event = rule.get("event") or (b.get("event") or "").strip()
+            lines = [f"{_liv_day(b['date'])}" + (f" - {event}" if event else "")]
+            if rule.get("men"):
+                lines.append(f"M - {rule['men']}")
+            if rule.get("women"):
+                lines.append(f"F - {rule['women']}")
+            if rule.get("cutoff"):
+                lines.append(f"Guestlist til {rule['cutoff']}")
+            if not liv_rules.has_terms(rule):
+                lines.append(LIV_NO_TERMS)
+            if rule.get("notes"):
+                lines.append(rule["notes"])
+            blocks.append(lines)
+        out.append((venue, blocks))
+    return out
+
+
+def liv_missing(bookings, rules=None):
+    """LIV / LIV Beach nights in this email with no terms on file."""
+    import liv_rules
+    rules = liv_rules.load() if rules is None else rules
+    return [(b["venue"], b["date"]) for b in _sorted(bookings)
+            if is_liv(b) and not liv_rules.has_terms(liv_rules.for_night(b["venue"], b["date"], rules))]
+
+
+def urvenue_note(bookings, rules=None):
+    """Tom's LIV / LIV Beach guest-list text (Thomas, Nov 21 2026)."""
+    groups = liv_nights(bookings, rules)
+    if not groups:
         return ""
-    return (f"{_names(venues)}: no app or passes needed. Your name is on Playmaker Entertainment's guest list at "
-            "the door. Head to the guest list line, give your name and show your ID.")
+    lines = list(LIV_TOP)
+    for venue, blocks in groups:
+        lines += ["", LIV_HEADINGS[venue]]
+        for block in blocks:
+            lines += [""] + block
+    lines += [""] + list(LIV_BOTTOM)
+    return "\n".join(lines)
+
+
+def _liv_html(bookings, rules=None):
+    groups = liv_nights(bookings, rules)
+    if not groups:
+        return ""
+    e = _html.escape
+    p = ('<p style="margin:0 0 4px 0;font-family:\'Inter\',Helvetica,Arial,sans-serif;font-size:15px;'
+         'line-height:23px;color:#E6E6E6;">{}</p>')
+    gold = ('<p style="margin:18px 0 8px 0;font-family:\'Inter\',Helvetica,Arial,sans-serif;font-size:13px;'
+            'letter-spacing:2px;color:#D4AF37;font-weight:700;">{}</p>')
+    parts = [
+        '<p style="margin:0 0 2px 0;font-family:\'Playfair Display\',Georgia,serif;font-size:22px;line-height:28px;'
+        f'color:#FFFFFF;font-weight:700;">{e(LIV_TOP[0])}</p>',
+        p.format(e(LIV_TOP[1])),
+        '<p style="margin:12px 0 0 0;font-family:\'Inter\',Helvetica,Arial,sans-serif;font-size:15px;color:#FFFFFF;">'
+        f'<strong>{e(LIV_TOP[3])}</strong></p>',
+    ]
+    for venue, blocks in groups:
+        parts.append(gold.format(e(LIV_HEADINGS[venue])))
+        for block in blocks:
+            parts.append('<p style="margin:10px 0 2px 0;font-family:\'Inter\',Helvetica,Arial,sans-serif;'
+                         f'font-size:15px;color:#FFFFFF;"><strong>{e(block[0])}</strong></p>')
+            parts += [p.format(e(x)) for x in block[1:]]
+    bottom = [x for x in LIV_BOTTOM]
+    parts.append(gold.format(e(bottom[0])))
+    parts.append(p.format(e(bottom[1])))
+    parts.append('<p style="margin:12px 0 4px 0;font-family:\'Inter\',Helvetica,Arial,sans-serif;font-size:15px;'
+                 f'color:#FFFFFF;font-weight:700;">{e(bottom[3])}<br>{e(bottom[4])}</p>')
+    parts.append('<p style="margin:14px 0 4px 0;font-family:\'Inter\',Helvetica,Arial,sans-serif;font-size:17px;'
+                 f'color:#FFFFFF;font-weight:700;">{e(bottom[6])}</p>')
+    parts.append(p.format(e(bottom[8]) + "<br>" + e(bottom[9])))
+    body = "\n      ".join(parts)
+    return ('    <!-- LIV guest list (Tom\'s format) -->\n'
+            '    <tr><td bgcolor="#0d0d0d" class="px bg-card" style="background-color:#0d0d0d;background-image:'
+            'linear-gradient(#0d0d0d,#0d0d0d);padding:30px 40px 0 40px;">\n'
+            '      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+            'style="background-color:#141414;border-left:3px solid #D4AF37;border-radius:6px;">'
+            '<tr><td style="padding:20px 22px;">\n      ' + body + '\n      </td></tr></table>\n    </td></tr>\n\n')
 
 
 def _wynn_steps(email=None):
@@ -159,24 +259,25 @@ def _wynn_html(bookings, email=None):
                .replace("{{steps}}", "\n".join(steps)))
 
 
-def _urvenue_html(page, bookings, email=None):
+def _urvenue_html(page, bookings, email=None, rules=None):
     """urvenue nights: Wynn app steps (XS / Encore) and/or the LIV door-list
     check-in. They replace the TAO passes steps when no TAO night is in the
     email, otherwise they are added after them."""
     parts = []
     if any(is_wynn(b) for b in bookings):
         parts.append(_wynn_html(bookings, email))
-    note = urvenue_note(bookings)
-    if note:
-        only_liv = all(is_urvenue(b) and not is_wynn(b) for b in bookings)
-        parts.append(html_emails._read("partials/urvenue_details.html")
-                     .replace("{{heading}}", "How to check in" if only_liv else "LIV check-in")
-                     .replace("{{body}}", _html.escape(note)))
+    liv = _liv_html(bookings, rules)
+    if liv:
+        parts.append(liv)
     if not parts:
         return page
     only = all(is_urvenue(b) for b in bookings)
     a, b = page.index("<!-- How to get passes -->"), page.index("<!-- Before you go -->")
     if only:
+        hero = ("Save this email and show it with your ID at check-in." if all(is_liv(x) for x in bookings)
+                else "Your check-in details are below.")
+        page = page.replace("Follow the steps to grab your passes before you head out.", hero)
+        a, b = page.index("<!-- How to get passes -->"), page.index("<!-- Before you go -->")
         return page[:a] + "".join(parts) + page[b:]
     return page[:b] + "".join(parts) + page[b:]
 
@@ -188,6 +289,11 @@ def guest_email(request, bookings, update=False, pending=None):
     waiting = pending_note(pending)
     label = date_label(request["start_date"], request["end_date"])
     notice = html_emails.FALLBACK_NOTICE
+    rules = None
+    if any(is_liv(b) for b in bookings):
+        import liv_rules
+        rules = liv_rules.load()  # read at send time: Tom edits it weekly
+    liv_text = urvenue_note(bookings, rules)
     lines = []
     for b in sorted(bookings, key=lambda b: (b["date"], b["venue"])):
         event = (b.get("event") or "").strip()
@@ -204,7 +310,7 @@ def guest_email(request, bookings, update=False, pending=None):
         + "You're on the Playmaker Entertainment guest list. Here's what you're set for:\n" + "\n".join(lines)
         + (("\n\n" + waiting) if waiting else "")
         + (("\n\n" + wynn_note(bookings, request["email"])) if wynn_note(bookings) else "")
-        + (("\n\n" + urvenue_note(bookings)) if urvenue_note(bookings) else ""),
+        + (("\n\n" + liv_text) if liv_text else ""),
         "Arrive early and bring a valid, government-issued 21+ photo ID. Guest-list admission is "
         "subject to each venue's rules, dress code, and capacity.",
         "Questions? Email info@playmakerentertainment.com",
@@ -217,7 +323,7 @@ def guest_email(request, bookings, update=False, pending=None):
         first, rows, html_emails.party_size(request["female_count"], request["male_count"]),
         " ".join(x for x in ((UPDATE_NOTE if update else ""), waiting) if x) or None,
         fallback_nights=fallback_nights or None)
-    html = _urvenue_html(html, bookings, request["email"])
+    html = _urvenue_html(html, bookings, request["email"], rules)
     subject = guest_subject(request["start_date"], request["end_date"])
     if update:
         subject = update_subject(subject, bookings)
@@ -261,6 +367,8 @@ def team_email(ref, raw, request, bookings, update=False, pending=None):
         "",
         "— Nights —",
         "\n\n".join(nights),
+        *(["", "LIV night terms MISSING (sent without M/F/cutoff; add them to the LIV rules file): "
+            + "; ".join(f"{v} {n}" for v, n in liv_missing(bookings))] if liv_missing(bookings) else []),
         *(["", "— Waiting (list not posted yet; booked later in one Updated email) —",
             "\n".join(f"{_long(n)} — {v}" for v, n in sorted(pending, key=lambda p: (p[1], p[0])))]
           if pending else []),
