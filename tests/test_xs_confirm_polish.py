@@ -32,6 +32,7 @@ def test_mixed_trip_labels_tao_steps():
     html = we.guest_email(REQ, [MDC, XS])["html"]
     passes = html[html.index("<!-- How to get passes -->"):html.index("<!-- Before you go -->")]
     assert "For Marquee Dayclub" in passes
+    assert passes.index("</table>") < passes.index("For Marquee Dayclub")  # not inside the divider cell
     assert passes.index("For Marquee Dayclub") < passes.index("Wynn Resorts app reservation")
     two = {**MDC, "venue": "OMNIA Nightclub", "date": "2026-11-21"}
     assert "For OMNIA Nightclub and Marquee Dayclub" in we.guest_email(REQ, [two, MDC, XS])["html"]
