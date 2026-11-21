@@ -299,7 +299,7 @@ def _label_tao_steps(page, venues):
     if not venues:
         return page
     a = page.index("<!-- How to get passes -->")
-    end = page.index("</td></tr>", a)
+    end = page.index("</table>", a) + len("</table>")   # after the gold divider, not inside it
     return page[:end] + "\n      " + TAO_LABEL.format(names=_html.escape(_names(venues))) + page[end:]
 
 
