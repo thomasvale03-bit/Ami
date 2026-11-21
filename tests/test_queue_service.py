@@ -155,7 +155,7 @@ def test_held_exceptions_not_claimed(raw, ref):
 
 @pytest.mark.parametrize('change', [
     {'start_date': '2026-11-09'}, {'venues': []}, {'venues': ['Unknown']},
-    {'venues': ['LIV Nightclub']}, {'venues': ["Drai's After Hours", 'TAO Nightclub']},
+    {'venues': ["Drai's After Hours", 'TAO Nightclub']},
     {'_action_needed': ['ambiguous date', 'review']},
 ])
 def test_source_constraints_preserve_payload(raw, change):

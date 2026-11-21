@@ -14,6 +14,7 @@
 #   AMY_WORKER_MODE=dry-run         (live also needs AMY_WORKER_LIVE_CONFIRM=yes)
 #   AMY_WORKER_DRAIS=true
 #   SPEAKEASY_EMAIL=... SPEAKEASY_PASSWORD=...
+#   URVENUE_EMAIL=info@playmakerentertainment.com URVENUE_PASSWORD=...  (LIV / XS / Encore on urvenue.me)
 # Monitor alerts (in-worker sweep/audit, worker_monitor.py): /workspace/amy-worker/alert.env
 #   (mode 600) with AMYI_WEBHOOK_URL=... and AMYI_WEBHOOK_AUTH=<full Authorization value>.
 #   Sourced at start; the monitor also re-reads it before each alert, so no restart

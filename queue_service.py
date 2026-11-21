@@ -96,7 +96,7 @@ def source_policy(ref, raw, today):
             return 'Party size missing; manual review required'
         venues = [rules.normalize_venue_name(v) for v in raw.get('venues', [])]
         if any(rules.is_manual_venue(v) for v in venues):
-            return 'LIV, XS, LIV Beach and EBC stay manual'
+            return 'Venue stays manual'
         if not venues or any(not rules.is_known_vegas_venue(v) and not rules.is_manual_venue(v) for v in venues):
             return 'Unspecified/unsupported venue; reviewed routing required'
         drais = [v for v in venues if rules.is_drais(v)]

@@ -140,6 +140,7 @@ class Store:
 
     # Exact reason the worker writes when a list is simply not posted yet.
     UNPOSTED_REASON = 'guest list not posted on TAO yet; nothing submitted'
+    UNPOSTED_REASON_URVENUE = 'guest list not posted on urvenue yet; nothing submitted'
 
     def revive_stranded_unposted(self, db, now):
         """Before Nov 19 2026 a not-yet-posted list used the 3-claim retry limit,
@@ -152,8 +153,9 @@ class Store:
         from queue_service import PHOENIX
         from datetime import datetime
         today = datetime.fromtimestamp(now, PHOENIX).date().isoformat()
-        rows = db.execute("""SELECT * FROM queue_jobs WHERE state='manual' AND reason LIKE ?
-            AND COALESCE(json_extract(raw,'$.start_date'),'') > ?""", ('%' + self.UNPOSTED_REASON + '%', today)).fetchall()
+        rows = db.execute("""SELECT * FROM queue_jobs WHERE state='manual' AND (reason LIKE ? OR reason LIKE ?)
+            AND COALESCE(json_extract(raw,'$.start_date'),'') > ?""",
+                          ('%' + self.UNPOSTED_REASON + '%', '%' + self.UNPOSTED_REASON_URVENUE + '%', today)).fetchall()
         revived = []
         for row in rows:
             raw, meta = json.loads(row['raw']), json.loads(row['metadata'] or '{}')

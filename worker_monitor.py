@@ -57,7 +57,7 @@ EXCEPTION_STATES = ("manual", "submission_uncertain", "needs_review")
 CLAIMED_STATES = ("assigned", "claimed", "running", "awaiting_human_verification")
 DEFAULT_ALERT_ENV = "/workspace/amy-worker/alert.env"
 
-NOTIFY_ONLY_RE = re.compile(r"\b(zouk|ghostbar|xs|encore beach club|ebc|liv)\b", re.I)
+NOTIFY_ONLY_RE = re.compile(r"\b(zouk|ghostbar)\b", re.I)
 SCOTTSDALE_RE = re.compile(r"\b(riot house|almost famous|el hefe|cake)\b", re.I)
 NOT_POSTED_RE = re.compile(r"guest list not posted|no guest list posted", re.I)
 WORKER_ERROR_RE = re.compile(r"^\s*worker error\b", re.I)

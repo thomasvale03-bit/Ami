@@ -75,6 +75,112 @@ def pending_note(pending):
             "it opens and send you one updated confirmation." + ((" " + nye) if nye else ""))
 
 
+URVENUE_SYSTEM = "urvenue"
+
+
+def is_urvenue(b):
+    return (b or {}).get("system") == URVENUE_SYSTEM
+
+
+# Wynn venues booked on urvenue: Wynn emails the guest and the reservation
+# lives in the Wynn Resorts app (Thomas, Nov 21 2026). LIV / LIV Beach do not
+# get this section.
+WYNN_VENUES = frozenset({"XS Nightclub", "Encore Beach Club", "Encore Beach Club At Night"})
+WYNN_INTRO = "Your guest list reservation for {names} lives in the Wynn Resorts app."
+WYNN_STEPS = (
+    ("Check your email.", "Wynn sends you a confirmation once we book you, and you're on the list from that moment."),
+    ("Open the Wynn Resorts app.", "Tap the link in that Wynn confirmation. If you don't have the app yet, "
+                                   "it takes you to download it first."),
+    ("Sign in or join Wynn Rewards with the same email you signed up with.",
+     "That's how the app finds your reservation."),
+    ("Find it under My Itinerary.", "It's right on the app's home screen."),
+    ("Show your QR code at the door.", "One QR code covers your whole reservation. It's tied to your account "
+                                       "and can't be transferred."),
+)
+
+
+def is_wynn(b):
+    return is_urvenue(b) and b.get("venue") in WYNN_VENUES
+
+
+def _names(venues):
+    venues = list(dict.fromkeys(venues))
+    return venues[0] if len(venues) == 1 else ", ".join(venues[:-1]) + " and " + venues[-1]
+
+
+def _sorted(bookings):
+    return sorted(bookings, key=lambda b: (b["date"], b["venue"]))
+
+
+def urvenue_note(bookings):
+    """Check-in line for LIV / LIV Beach nights (name on the door list)."""
+    venues = [b["venue"] for b in _sorted(bookings) if is_urvenue(b) and not is_wynn(b)]
+    if not venues:
+        return ""
+    return (f"{_names(venues)}: no app or passes needed. Your name is on Playmaker Entertainment's guest list at "
+            "the door. Head to the guest list line, give your name and show your ID.")
+
+
+def _wynn_steps(email=None):
+    steps = list(WYNN_STEPS)
+    if email:
+        head, body = steps[2]
+        steps[2] = (head.replace("the same email you signed up with",
+                                 f"the same email you signed up with ({email})"), body)
+    return steps
+
+
+def wynn_note(bookings, email=None):
+    """Plain-text Wynn Resorts app steps for XS / Encore nights."""
+    venues = [b["venue"] for b in _sorted(bookings) if is_wynn(b)]
+    if not venues:
+        return ""
+    steps = "\n".join(f"{i}. {head} {body}" for i, (head, body) in enumerate(_wynn_steps(email), 1))
+    return WYNN_INTRO.format(names=_names(venues)) + "\n" + steps
+
+
+def _wynn_html(bookings, email=None):
+    venues = [b["venue"] for b in _sorted(bookings) if is_wynn(b)]
+    row = html_emails._read("partials/wynn_steps.html")
+    steps = []
+    for i, (head, body) in enumerate(_wynn_steps(email), 1):
+        steps.append(
+            '        <tr>\n'
+            '          <td width="44" valign="top" style="padding:0 14px 18px 0;"><table role="presentation" '
+            'cellpadding="0" cellspacing="0" border="0"><tr><td align="center" width="32" height="32" bgcolor="#D4AF37" '
+            'style="width:32px;height:32px;border-radius:16px;font-family:\'Inter\',Helvetica,Arial,sans-serif;'
+            f'font-size:15px;font-weight:700;color:#0d0d0d;">{i}</td></tr></table></td>\n'
+            '          <td valign="top" style="padding:4px 0 18px 0;font-family:\'Inter\',Helvetica,Arial,sans-serif;'
+            f'font-size:15px;line-height:23px;color:#E6E6E6;"><strong style="color:#FFFFFF;">{_html.escape(head)}</strong>'
+            f'<br>{_html.escape(body)}</td>\n'
+            '        </tr>')
+    return (row.replace("{{heading}}", "Your Wynn Resorts app reservation")
+               .replace("{{intro}}", _html.escape(WYNN_INTRO.format(names=_names(venues))))
+               .replace("{{steps}}", "\n".join(steps)))
+
+
+def _urvenue_html(page, bookings, email=None):
+    """urvenue nights: Wynn app steps (XS / Encore) and/or the LIV door-list
+    check-in. They replace the TAO passes steps when no TAO night is in the
+    email, otherwise they are added after them."""
+    parts = []
+    if any(is_wynn(b) for b in bookings):
+        parts.append(_wynn_html(bookings, email))
+    note = urvenue_note(bookings)
+    if note:
+        only_liv = all(is_urvenue(b) and not is_wynn(b) for b in bookings)
+        parts.append(html_emails._read("partials/urvenue_details.html")
+                     .replace("{{heading}}", "How to check in" if only_liv else "LIV check-in")
+                     .replace("{{body}}", _html.escape(note)))
+    if not parts:
+        return page
+    only = all(is_urvenue(b) for b in bookings)
+    a, b = page.index("<!-- How to get passes -->"), page.index("<!-- Before you go -->")
+    if only:
+        return page[:a] + "".join(parts) + page[b:]
+    return page[:b] + "".join(parts) + page[b:]
+
+
 def guest_email(request, bookings, update=False, pending=None):
     """bookings: [{venue, date, event, event_time, order_id}] (TAO only).
     pending: [(venue, iso)] nights of this request not bookable yet."""
@@ -85,7 +191,10 @@ def guest_email(request, bookings, update=False, pending=None):
     lines = []
     for b in sorted(bookings, key=lambda b: (b["date"], b["venue"])):
         event = (b.get("event") or "").strip()
-        inner = f"{event} — Order ID {b['order_id']}" if event else f"Order ID {b['order_id']}"
+        if is_urvenue(b):
+            inner = f"{event} — on the guest list" if event else "on the guest list"
+        else:
+            inner = f"{event} — Order ID {b['order_id']}" if event else f"Order ID {b['order_id']}"
         lines.append(f"{_long(b['date'])} - {b['venue']} ({inner})")
         if b.get("fallback"):
             lines.append(notice)
@@ -93,7 +202,9 @@ def guest_email(request, bookings, update=False, pending=None):
         f"Hi {first},",
         ((UPDATE_NOTE + "\n\n") if update else "")
         + "You're on the Playmaker Entertainment guest list. Here's what you're set for:\n" + "\n".join(lines)
-        + (("\n\n" + waiting) if waiting else ""),
+        + (("\n\n" + waiting) if waiting else "")
+        + (("\n\n" + wynn_note(bookings, request["email"])) if wynn_note(bookings) else "")
+        + (("\n\n" + urvenue_note(bookings)) if urvenue_note(bookings) else ""),
         "Arrive early and bring a valid, government-issued 21+ photo ID. Guest-list admission is "
         "subject to each venue's rules, dress code, and capacity.",
         "Questions? Email info@playmakerentertainment.com",
@@ -106,6 +217,7 @@ def guest_email(request, bookings, update=False, pending=None):
         first, rows, html_emails.party_size(request["female_count"], request["male_count"]),
         " ".join(x for x in ((UPDATE_NOTE if update else ""), waiting) if x) or None,
         fallback_nights=fallback_nights or None)
+    html = _urvenue_html(html, bookings, request["email"])
     subject = guest_subject(request["start_date"], request["end_date"])
     if update:
         subject = update_subject(subject, bookings)
@@ -130,7 +242,9 @@ def team_email(ref, raw, request, bookings, update=False, pending=None):
         party_bit = f" ({f}F {m}M)" if per_night else ""
         nights.append(f"{_long(b['date'])} — {b['venue']}" + (f" ({event}{when})" if event else "")
                       + party_bit
-                      + f"\n✅ Signed up — Order ID {b['order_id']}"
+                      + (f"\n✅ Added to the {b['venue']} guest list on urvenue ({b.get('list_item') or 'General List'}, "
+                         f"owner Thomas Vale) — Ref {b['order_id']}" if is_urvenue(b)
+                         else f"\n✅ Signed up — Order ID {b['order_id']}")
                       + (f"\n{b['confirmation_url']}" if b.get("confirmation_url") else ""))
     text = "\n".join([
         ("Updated — no action needed. Another order was added for this guest (new order, added venue or "
