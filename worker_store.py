@@ -116,6 +116,7 @@ class Store:
                     return [self.decode(db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone(), token=True) for ref in refs]
             if not allow_new:
                 raise Conflict('New jobs are claimed only in the hourly pickup window (:00 through :09 Phoenix)')
+            self.revive_stranded_unposted(db, now)
             rows = db.execute("""SELECT * FROM queue_jobs WHERE state IN ('queued','retry') AND due<=?
                 ORDER BY COALESCE(json_extract(raw,'$.start_date'),'9999-12-31'),created,ref""", (now,)).fetchall()
             from queue_service import source_policy, PHOENIX
@@ -136,6 +137,48 @@ class Store:
             if slot is not None:
                 db.execute('INSERT INTO queue_batches VALUES(?,?)', (slot, json.dumps(refs)))
             return [self.decode(db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone(), token=True) for ref in refs]
+
+    # Exact reason the worker writes when a list is simply not posted yet.
+    UNPOSTED_REASON = 'guest list not posted on TAO yet; nothing submitted'
+
+    def revive_stranded_unposted(self, db, now):
+        """Before Nov 19 2026 a not-yet-posted list used the 3-claim retry limit,
+        so future requests (e.g. LAVO Brunch Dec 5/12/19) were parked as manual
+        and never re-checked even after TAO posted the list. Put those back in
+        retry so the live feed is read again: only future-dated jobs whose
+        reason is exactly "not posted", with nothing submitted or booked, and
+        no other job for the same guest on overlapping dates (that needs a
+        person). Returns the revived refs."""
+        from queue_service import PHOENIX
+        from datetime import datetime
+        today = datetime.fromtimestamp(now, PHOENIX).date().isoformat()
+        rows = db.execute("""SELECT * FROM queue_jobs WHERE state='manual' AND reason LIKE ?
+            AND COALESCE(json_extract(raw,'$.start_date'),'') > ?""", ('%' + self.UNPOSTED_REASON + '%', today)).fetchall()
+        revived = []
+        for row in rows:
+            raw, meta = json.loads(row['raw']), json.loads(row['metadata'] or '{}')
+            progress = meta.get('progress') or {}
+            if progress.get('submitting') or progress.get('bookings') or meta.get('evidence') or meta.get('revived'):
+                continue
+            email = (raw.get('email') or '').strip().lower()
+            start, end = raw.get('start_date') or '', raw.get('end_date') or raw.get('start_date') or ''
+            overlap = False
+            for other in db.execute("SELECT ref, raw FROM queue_jobs WHERE ref<>?", (row['ref'],)).fetchall():
+                oraw = json.loads(other['raw'])
+                if (oraw.get('email') or '').strip().lower() != email:
+                    continue
+                os_, oe = oraw.get('start_date') or '', oraw.get('end_date') or oraw.get('start_date') or ''
+                if os_ and start and os_ <= end and start <= oe:
+                    overlap = True
+                    break
+            if overlap:
+                continue
+            meta['revived'] = {'from_reason': row['reason'], 'at': now}
+            db.execute("""UPDATE queue_jobs SET state='retry',attempts=0,due=?,updated=?,metadata=?,
+                          reason=? WHERE ref=? AND state='manual'""",
+                       (now, now, json.dumps(meta), 'Revived: list not posted earlier; re-checking TAO', row['ref']))
+            revived.append(row['ref'])
+        return revived
 
     def exceptions(self, limit=100):
         """Jobs a person must look at: manual, uncertain submits, and paused or
