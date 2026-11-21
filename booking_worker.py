@@ -209,6 +209,11 @@ class DraisBooker:
                 browser.close()
 
 
+def _reused(item):
+    """A booking copied in from another job's verified ledger entry."""
+    return bool(((item or {}).get("meta") or {}).get("reused_from_job"))
+
+
 class UrvenueBooker:
     """urvenue.me (UrGuestlist): LIV, LIV Beach, XS, Encore Beach Club (+ At
     Night). See urvenue.py."""
@@ -674,7 +679,12 @@ class Worker:
             # Only the first partial confirmation goes out early; nights booked
             # later wait until the whole request is done (one Updated email).
             confirmation = None
-            if bookings and not drais and not already:
+            # Bookings reused from another job (the guest already got that
+            # confirmation) are not news: with nothing newly booked, the guest
+            # gets the normal hold email instead of a fresh, non-"Updated"
+            # confirmation that repeats old nights (Elaina W., Nov 21 2026).
+            fresh = [b for b in bookings if not _reused(b)]
+            if fresh and not drais and not already:
                 receipts = self._send_emails(job, ref, token, raw, bookings, drais=False,
                                              pending=[(v, n) for v, n, _ in waiting])
                 confirmation = next((r["id"] for r in receipts if r["kind"] == "guest"), None)
@@ -685,7 +695,7 @@ class Worker:
                 # nights ("Still to come"), so it counts as the hold notice;
                 # otherwise one hold-status email goes out (deduped).
                 self._notify_hold(job, ref, token, raw, [(v, n, "unposted") for v, n, _ in waiting],
-                                  booked=bool(bookings), confirmation_id=confirmation)
+                                  booked=bool(fresh), confirmation_id=confirmation)
             first = waiting[0][2]
             reason = first.reason if len(waiting) == 1 else (
                 f"{len(waiting)} night(s) waiting for their guest list to be posted ("
@@ -1088,6 +1098,10 @@ class Worker:
                            and (self.ledger.get(night_key(ref, r["venue"], r["date"])) or {}).get("at", 0) <= sent_at]
             if set(order_ids) - set(covered):
                 saved, update = {}, True
+        if not update and not drais and not saved and any(_reused(b) for b in bookings):
+            # Part of this email repeats a booking the guest was already sent
+            # (reused from another job): it is an "Updated:" confirmation.
+            update = True
         payloads = dict(build(update))
         if not update and not drais and not saved.get("guest") and (self._hold_marker(job, ref) or {}).get("via") == "hold_email":
             # The guest already got a hold-status email for this request: the

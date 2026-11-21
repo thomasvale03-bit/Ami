@@ -137,7 +137,13 @@ function ngWire(d){{
   ng.querySelector('.ng-select-container').addEventListener('mousedown', open);
 }}
 function itemValue(d){{ const ng = d.querySelector('ng-select'); return ng ? (ng.dataset.value||'') : d.querySelector('#item').value; }}
+const NO_ITEMS = {json.dumps(bool(ev.get('no_items')))};
 document.getElementById('add').onclick = () => {{
+  if (NO_ITEMS) {{  // real site: SweetAlert, no form (LIV NYE, Nov 21 2026)
+    const w = document.createElement('div'); w.className='swal2-popup swal2-modal swal2-show';
+    w.innerHTML = '<h2>Oops..</h2><div>There are no items available</div><button class="swal2-confirm">OK</button>';
+    document.body.appendChild(w); w.querySelector('button').onclick = () => w.remove(); return;
+  }}
   const d = document.createElement('div'); d.className='modal show'; d.id='modal';
   d.innerHTML = `<div>Add Guests <button class=close aria-label=Close>&times;</button></div>
     ${{NG ? NGSEL : '<select id=item><option>- Select Item -</option><option>General List</option></select>'}}

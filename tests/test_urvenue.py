@@ -505,3 +505,104 @@ def test_browser_wrong_password_stops_before_anything(site_browser, monkeypatch)
         assert "wrong" not in str(exc.value)
     finally:
         site.__exit__()
+
+
+# --- "There are no items available" + reused bookings (Nov 21 2026) ----------
+
+def test_no_items_nye_liv_falls_back_then_holds_with_ticket_link(tmp_path):
+    """LIV NYE has no guest list items: closed -> OMNIA-first fallback; no NYE
+    list anywhere -> one hold email carrying the promoter ticket link."""
+    class NoItems(FakeUrvenue):
+        def add(self, venue, night, guest, **kw):
+            raise urvenue.NotOpen("no guest list items", "Tiesto - NYE")
+    tao = FakeTao(posted=False)
+    s, api, worker = mk(tmp_path, NoItems(), tao)
+    s.enqueue("n", raw(venues=["LIV"], start_date="2026-12-31", end_date="2026-12-31"), NOW)
+    assert worker.run_once()["status"] == "retry"
+    assert tao.submits == []
+    assert len(api.sent) == 1
+    hold = api.sent[0]
+    assert "on hold" in hold["subject"] and hold["bcc"] == TEAM
+    assert "utm_id=68d79ff587c84397b19f00330a1e6107" in hold["text"]
+    assert "OMNIA doesn't have a guest list on NYE" in hold["text"]
+    assert s.get("n")["state"] == "retry"
+
+
+def test_no_items_liv_beach_goes_on_hold(tmp_path):
+    class NoItems(FakeUrvenue):
+        def add(self, venue, night, guest, **kw):
+            raise urvenue.NotOpen("no guest list items", "Day")
+    s, api, worker = mk(tmp_path, NoItems())
+    s.enqueue("nb", raw(venues=["LIV Beach"]), NOW)
+    assert worker.run_once()["status"] == "retry"
+    assert len(api.sent) == 1 and "on hold" in api.sent[0]["subject"]
+
+
+def _seed_reused(worker, ref, venue, night, order="0138d09f-cc19-4a55-8bca-bc94f5c1b269"):
+    worker.ledger.put(bw.night_key(ref, venue, night), {
+        "state": "booked",
+        "record": {"date": night, "order_id": order, "party": {"female_count": 2, "male_count": 1},
+                   "venue": venue, "verified": True},
+        "meta": {"event": "Bijou", "event_time": "11:00 AM", "reused_from_job": "older-job",
+                 "confirmation_url": f"https://tickets.taogroup.com/orders/confirmation/{order}/ordered=true"}})
+
+
+def test_reused_only_with_unposted_night_sends_hold_not_fresh_confirmation(tmp_path):
+    uv = FakeUrvenue({("LIV Nightclub", "2026-11-25"): "notposted"})
+    s, api, worker = mk(tmp_path, uv, FakeTao(dayclubs=True))
+    _seed_reused(worker, "e", "Marquee Dayclub", "2026-11-25")
+    s.enqueue("e", raw(venues=["LIV"]), NOW)
+    assert worker.run_once()["status"] == "retry"
+    assert len(api.sent) == 1
+    hold = api.sent[0]
+    assert "on hold" in hold["subject"] and "You're on the Playmaker" not in hold["subject"]
+    assert "Any nights that already went through" not in hold["text"]
+    assert worker.tao.submits == []  # Marquee Dayclub never rebooked
+    # list posts -> ONE "Updated:" confirmation with both nights, one team email
+    uv.outcomes.clear()
+    api.now += 3600
+    worker.now = lambda: api.now
+    assert worker.run_once()["status"] == "done"
+    guest = [p for p in api.sent if p["to"] == "guest@example.invalid"]
+    assert len(guest) == 2 and guest[-1]["subject"].startswith("Updated: You're on the Playmaker")
+    assert "Marquee Dayclub" in guest[-1]["text"] and "LIV Nightclub" in guest[-1]["text"]
+    assert len([p for p in api.sent if p["to"] == TEAM]) == 1
+    assert worker.tao.submits == [] and len(uv.adds) == 1
+
+
+def test_reused_plus_new_booking_is_an_updated_confirmation(tmp_path):
+    uv = FakeUrvenue()
+    s, api, worker = mk(tmp_path, uv, FakeTao(dayclubs=True))
+    _seed_reused(worker, "hb", "Marquee Dayclub", "2026-11-25")
+    s.enqueue("hb", raw(venues=["XS"]), NOW)
+    assert worker.run_once()["status"] == "done"
+    guest, team = api.sent
+    assert guest["subject"].startswith("Updated: You're on the Playmaker") and "UV-" not in guest["subject"]
+    assert worker.tao.submits == [] and len(uv.adds) == 1
+
+
+def test_fresh_partial_confirmation_unchanged_when_nothing_reused(tmp_path):
+    """A newly booked night + an unposted night still gets the early partial
+    confirmation ("Still to come"), as before."""
+    uv = FakeUrvenue({("LIV Nightclub", "2026-11-26"): "notposted"})
+    s, api, worker = mk(tmp_path, uv)
+    s.enqueue("p", raw(venues=["XS", "LIV"], start_date="2026-11-25", end_date="2026-11-26",
+                       itinerary={"2026-11-25": ["XS Nightclub"], "2026-11-26": ["LIV Nightclub"]}), NOW)
+    assert worker.run_once()["status"] == "retry"
+    guest = [p for p in api.sent if p["to"] == "guest@example.invalid"]
+    assert len(guest) == 1 and guest[0]["subject"].startswith("You're on the Playmaker")
+    assert "Still to come" in guest[0]["text"]
+
+
+def test_browser_no_items_popup_is_closed_not_error(site_browser):
+    start, mock = site_browser
+    site = start({("2386", "1121561"): ("LIV Nightclub", {"2026-12-31": {"name": "Tiesto - NYE", "status": "Open",
+                                                                         "hours": "10:30pm to 4:00am",
+                                                                         "no_items": True}})})
+    try:
+        with pytest.raises(urvenue.NotOpen) as exc:
+            urvenue.add_guest("LIV Nightclub", date(2026, 12, 31), GUEST, ref="ni",
+                              before_submit=lambda: pytest.fail("must not reach submit"))
+        assert exc.value.status == "no guest list items" and "Tiesto" in exc.value.event
+    finally:
+        site.__exit__()
