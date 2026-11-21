@@ -518,6 +518,9 @@ def _zoho_send(to, subject, text, html, sender, bcc=None):
         except smtplib.SMTPAuthenticationError:
             raise
         except Exception as e:  # noqa: BLE001
+            import email_suppression
+            if email_suppression.is_hard_reject(e):
+                raise
             log.warning("Zoho SMTP %s:%s failed: %s: %s", host, port, type(e).__name__, e)
             last = e
     raise last
@@ -537,6 +540,10 @@ def send_branded(service, payload, _sleep=None):
         return 400, "need to (one address), subject, html, text"
     if bcc and ("@" not in bcc or any(c in bcc for c in "\r\n,;")):
         return 400, "need to (one address), subject, html, text"
+    import email_suppression
+    if email_suppression.is_suppressed(to):
+        log.info("Branded send skipped for %s: previously rejected or bounced", to)
+        return 422, {"sent": False, "rejected": True, "detail": "rejected address (suppressed; will not retry)"}
     now = time.time()
     with _branded_lock:
         _branded_times[:] = [t for t in _branded_times if now - t < 3600]
@@ -586,10 +593,22 @@ def send_branded(service, payload, _sleep=None):
             log.info("Branded email sent via zoho to %s from %s (id %s)", to, sender, mid)
             return 200, {"sent": True, "id": mid, "from": sender, "via": "zoho"}
         except Exception as e:  # noqa: BLE001
+            if email_suppression.is_hard_reject(e):
+                email_suppression.record(to, reason="rejected", error=f"{type(e).__name__}: {e}", source="zoho")
+                log.warning("Branded zoho hard reject for %s (%s: %s); not falling back to gmail",
+                            to, type(e).__name__, e)
+                return 422, {"sent": False, "rejected": True, "detail": str(e)}
             log.warning("Branded zoho send failed (%s: %s); falling back to gmail", type(e).__name__, e)
     body = (gmail_client.build_message(to, subject, text, sender, html=html, bcc=bcc or None, from_name=from_name) if from_name
             else gmail_client.build_message(to, subject, text, sender, html=html, bcc=bcc or None))
-    resp = _gmail_call(lambda: service.users().messages().send(userId="me", body=body).execute(), _sleep=_sleep)
+    try:
+        resp = _gmail_call(lambda: service.users().messages().send(userId="me", body=body).execute(), _sleep=_sleep)
+    except Exception as e:  # noqa: BLE001
+        if email_suppression.is_hard_reject(e):
+            email_suppression.record(to, reason="rejected", error=f"{type(e).__name__}: {e}", source="gmail")
+            log.warning("Branded gmail hard reject for %s (%s: %s)", to, type(e).__name__, e)
+            return 422, {"sent": False, "rejected": True, "detail": str(e)}
+        raise
     log.info("Branded email sent via gmail to %s from %s (id %s)", to, sender, (resp or {}).get("id"))
     return 200, {"sent": True, "id": (resp or {}).get("id"), "from": sender, "via": "gmail"}
 
