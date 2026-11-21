@@ -209,7 +209,13 @@ def test_stops_are_terminal_with_reasons(tmp_path, tao, expected, state):
     result = worker.run_once()
     assert result['status'] == expected, result
     assert s.get('a')['state'] == state
-    assert api.sent == []
+    if expected == 'retry':
+        # Held (list not open / closed): ONE hold-status email to the guest, team@ on BCC.
+        assert [p['to'] for p in api.sent] == ['guest@example.invalid']
+        assert api.sent[0]['bcc'] == 'team@playmakerentertainment.com'
+        assert 'on hold for now' in api.sent[0]['subject']
+    else:
+        assert api.sent == []
 
 
 def test_duplicate_suspicion_goes_manual(tmp_path):

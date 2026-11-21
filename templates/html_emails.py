@@ -356,3 +356,65 @@ def promoter_welcome_text():
 def render_promoter_welcome():
     """Same PME chrome as guest confirmations (header, logo, colors, footer)."""
     return _read("promoter_welcome.html")
+
+
+# --- Guest "on hold" status (list not open yet / access code) ---------------
+
+HOLD_BRANDS = {
+    "playmaker": {
+        "name": "Playmaker Entertainment",
+        "logo": ('    <tr><td align="center" class="px" style="padding:34px 40px 10px 40px;">\n'
+                 '      <a href="https://playmakerentertainment.com" target="_blank" style="text-decoration:none;">\n'
+                 '        <img class="logo" src="https://playmakerentertainment.com/brand/logo-email.jpg" width="260" '
+                 'alt="Playmaker Entertainment" style="display:block;width:260px;max-width:100%;height:auto;border:0;'
+                 'color:#D4AF37;font-family:Georgia,serif;font-size:22px;font-weight:bold;letter-spacing:2px;">\n'
+                 '      </a>\n    </td></tr>'),
+        "footer": ('Questions? Email <a href="mailto:info@playmakerentertainment.com" style="color:#C9A84C;'
+                   'text-decoration:none;">info@playmakerentertainment.com</a><br>\n'
+                   '      <a href="https://playmakerentertainment.com" target="_blank" style="color:#C9A84C;'
+                   'text-decoration:none;">playmakerentertainment.com</a>'),
+    },
+    "guestlistgo": {
+        "name": "GuestlistGo",
+        "logo": ('    <tr><td align="center" class="px" style="padding:34px 40px 10px 40px;">\n'
+                 '      <a href="https://guestlistgo.me" target="_blank" style="text-decoration:none;'
+                 'font-family:Georgia,serif;font-size:28px;font-weight:bold;letter-spacing:2px;color:#D4AF37;">'
+                 'GuestlistGo</a>\n    </td></tr>'),
+        "footer": ('Questions? Just reply to this email.<br>\n'
+                   '      <a href="https://guestlistgo.me" target="_blank" style="color:#C9A84C;'
+                   'text-decoration:none;">guestlistgo.me</a>'),
+    },
+}
+
+
+def _hold_para(text):
+    return ('<p style="margin:18px 0 0 0;font-family:\'Inter\',Helvetica,Arial,sans-serif;font-size:16px;'
+            f'line-height:24px;color:#BDBDBD;">{text}</p>')
+
+
+def render_hold_status(first_name, rows, paragraphs, brand="playmaker", ticket_url=None, headline=None):
+    """Branded "your request is on hold" email. rows: [(date_label, venue,
+    status)], paragraphs: plain-text paragraphs (escaped here)."""
+    b = HOLD_BRANDS.get(brand) or HOLD_BRANDS["playmaker"]
+    items = "".join(
+        '<tr><td style="padding:10px 0;border-bottom:1px solid #241f12;font-family:\'Inter\',Helvetica,Arial,'
+        'sans-serif;font-size:15px;line-height:22px;color:#F5F5F5;">'
+        f'<strong>{_h.escape(d)}</strong> &middot; {_h.escape(v)}<br>'
+        f'<span style="color:#D4AF37;font-size:13px;">{_h.escape(s)}</span></td></tr>'
+        for d, v, s in rows)
+    body = [_hold_para(f"Hi {_h.escape(first_name or 'there')},")]
+    body.append(_hold_para(_h.escape(paragraphs[0])))
+    body.append('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+                f'style="margin:14px 0 0 0;">{items}</table>')
+    for p in paragraphs[1:]:
+        html = _h.escape(p)
+        if ticket_url and ticket_url in p:
+            esc = _h.escape(ticket_url)
+            html = html.replace(esc, f'<a href="{esc}" target="_blank" style="color:#D4AF37;'
+                                     f'text-decoration:underline;word-break:break-all;">NYE tickets</a>')
+        body.append(_hold_para(html))
+    page = _read("hold_status.html")
+    return _fill(page, TITLE=_h.escape(headline or "Your guest list request is on hold"),
+                 PREHEADER=_h.escape(paragraphs[0]), LOGO=b["logo"], EYEBROW="Request received",
+                 HEADLINE=_h.escape(headline or "On hold for now"), BODY="\n".join(body),
+                 SIGNOFF=_h.escape(b["name"]), FOOTER=b["footer"])

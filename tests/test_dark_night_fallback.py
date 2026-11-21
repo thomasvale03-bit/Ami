@@ -123,7 +123,9 @@ def test_dark_night_retries_when_fallbacks_also_unposted_even_if_other_nights_bo
     assert "other nights already booked" not in (result.get("reason") or "")
     assert "DEFAULT_ROUTING" in (result.get("reason") or "")
     assert s.get("j")["state"] == "retry"
-    assert api.sent == []
+    # One hold-status email (Sunday on hold); the confirmation waits for the whole trip.
+    assert len(api.sent) == 1 and "on hold" in api.sent[0]["subject"]
+    assert "Sunday November 15 - JEWEL Nightclub" in api.sent[0]["text"]
     # Friday and Saturday were booked; Sunday was not submitted.
     assert len(worker.tao.submits) == 2
     ev = (s.get("j").get("metadata") or {}).get("progress") or {}
@@ -138,7 +140,7 @@ def test_operating_venue_unposted_still_retries(tmp_path):
     assert result["status"] == "retry", result
     assert "guest list not posted" in result["reason"]
     assert worker.tao.submits == []
-    assert api.sent == []
+    assert len(api.sent) == 1 and "on hold" in api.sent[0]["subject"]
 
 
 def test_operating_venue_unposted_retries_when_other_nights_booked(tmp_path):

@@ -70,8 +70,9 @@ def pending_note(pending):
     if not pending:
         return ""
     items = "; ".join(f"{_long(n)} - {v}" for v, n in sorted(pending, key=lambda p: (p[1], p[0])))
+    nye = nye_note([n for _, n in pending])
     return (f"Still to come: {items}. That guest list isn't posted yet. We'll sign you up as soon as "
-            "it opens and send you one updated confirmation.")
+            "it opens and send you one updated confirmation." + ((" " + nye) if nye else ""))
 
 
 def guest_email(request, bookings, update=False, pending=None):
@@ -255,3 +256,128 @@ def drais_team_email(ref, raw, request, bookings):
     html = "<pre>" + _html.escape(text, quote=False) + "</pre>"
     return {"to": TEAM_TO, "subject": subject, "text": text, "html": html,
             "dedupe_query": f'to:{TEAM_TO} subject:"{subject}" "AMY ref: {ref}"'}
+
+
+
+# --- Guest "on hold" status email (Thomas, Nov 21 2026) ----------------------
+# When a request (or some of its nights) is waiting for a guest list that is
+# not open yet, needs an access code, or is closed with no open fallback, the
+# guest hears about it once: ONE email per trip/ref covering every held night,
+# to the guest with team@ on BCC. A new hold email goes out only when the hold
+# materially changes (a new night/venue/status on hold), never per hourly retry.
+
+HOLD_KINDS = ("unposted", "access_code", "closed")
+HOLD_STATUS = {
+    "unposted": "Guest list isn't open yet",
+    "access_code": "This list needs an access code right now",
+    "closed": "Guest list isn't open yet",
+}
+HOLD_SUBJECT_STATUS = {
+    "unposted": "list not open yet",
+    "access_code": "access code needed",
+    "closed": "list not open yet",
+}
+GUESTLISTGO_FROM = "confirmations@guestlistgo.me"
+
+
+def is_nye(iso):
+    d = date.fromisoformat(iso)
+    return d.month == 12 and d.day == 31
+
+
+def nye_ticket_url():
+    """Promoter-tracked TAO link (utm_source=promoter&utm_id=...)."""
+    import ticketsauce
+    return ticketsauce.promoter_link(rules.TAO_PROMOTER_URL)
+
+
+def nye_note(nights):
+    """Guest line for a New Year's Eve night still waiting (OMNIA has no NYE
+    guest list; NYE lists open in late December)."""
+    if not any(is_nye(n) for n in nights or ()):
+        return ""
+    url = nye_ticket_url()
+    return ("Heads up for New Year's Eve: OMNIA doesn't have a guest list on NYE, and New Year's Eve "
+            "guest lists usually don't open until late December. If you'd rather lock in your NYE plans "
+            "now, tickets are here: " + url)
+
+
+def hold_brand(raw):
+    raw = raw or {}
+    if raw.get("source") == "guestlistgo" or (raw.get("promoter") or "").replace(" ", "").lower() == "guestlistgo" \
+            or (raw.get("brand") or "").lower() == "guestlistgo":
+        return "guestlistgo"
+    return "playmaker"
+
+
+def hold_signature(held):
+    return sorted({f"{v}|{n}|{k}" for v, n, k in held})
+
+
+def _hold_short(iso):
+    d = date.fromisoformat(iso)
+    return f"{d.strftime('%b')} {d.day}"
+
+
+def hold_email(ref, raw, request, held, update=False, booked=False):
+    """held: [(venue, iso_night, kind)] with kind in HOLD_KINDS."""
+    held = sorted({(v, n, k if k in HOLD_KINDS else "unposted") for v, n, k in held}, key=lambda x: (x[1], x[0]))
+    brand = hold_brand(raw)
+    name = "GuestlistGo" if brand == "guestlistgo" else "Playmaker Entertainment"
+    contact = ("Questions? Just reply to this email." if brand == "guestlistgo"
+               else "Questions? Email info@playmakerentertainment.com")
+    first = request.get("first_name") or "there"
+    label = date_label(request["start_date"], request["end_date"])
+    kinds = {k for _, _, k in held}
+    many = len({n for _, n, _ in held}) > 1
+    if kinds == {"access_code"}:
+        why = ("the guest lists for those dates need an access code right now" if many
+               else "the guest list for that date needs an access code right now")
+    elif "access_code" in kinds:
+        why = "some of those guest lists aren't open yet or need an access code right now"
+    else:
+        why = ("the guest lists for those dates aren't open yet" if many
+               else "the guest list for that date isn't open yet")
+    intro = (f"Thanks for your guest list request for {label}. We received it, but {why}, "
+             "so your request is on hold for now.")
+    if update:
+        intro = f"Quick update on your guest list request for {label}: {why}, so your request is on hold for now."
+    lines = [f"{_long(n)} - {v}: {HOLD_STATUS[k]}" for v, n, k in held]
+    paras = [intro]
+    paras.append("We'll sign you up as soon as the list opens and send you a confirmation email. "
+                 "There's nothing else you need to do right now.")
+    if booked:
+        paras.append("Any nights that already went through stay active, and your confirmation email will list everything.")
+    nye = nye_note([n for _, n, _ in held])
+    if nye:
+        paras.append(nye)
+    text = "\n\n".join([
+        f"Hi {first},",
+        intro,
+        "On hold:\n" + "\n".join(lines),
+        *paras[1:],
+        contact,
+        name,
+    ])
+    rows = [(_hold_short(n), v, HOLD_STATUS[k]) for v, n, k in held]
+    html = html_emails.render_hold_status(first, rows, paras, brand=brand,
+                                          ticket_url=nye_ticket_url() if nye else None)
+    subject = f"We received your guest list request for {label} - on hold for now"
+    if update:
+        nights = " + ".join(dict.fromkeys(_hold_short(n) for _, n, _ in held))
+        status = " / ".join(dict.fromkeys(HOLD_SUBJECT_STATUS[k] for _, _, k in held))
+        subject = f"Updated: guest list request for {label} - {nights} on hold ({status})"
+    subject = subject.replace(",", "").replace(";", "")
+    for body in (text, html):
+        low = body.lower()
+        if "skip the line" in low or "jarvis" in low:
+            raise ValueError("Hold email must not promise skip-the-line or mention Jarvis")
+        if brand == "guestlistgo" and "playmaker" in low:
+            raise ValueError("GuestlistGo hold email must not mention Playmaker")
+    payload = {"to": request["email"], "subject": subject, "text": text, "html": html,
+               "dedupe_query": f'to:{request["email"]} subject:"{subject}"'}
+    if request["email"].strip().lower() != TEAM_TO.lower():
+        payload["bcc"] = TEAM_TO
+    if brand == "guestlistgo":
+        payload["from"] = GUESTLISTGO_FROM
+    return payload
