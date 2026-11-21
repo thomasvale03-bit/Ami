@@ -829,6 +829,25 @@ def _choose_ng_item(page, modal):
     return True
 
 
+NO_ITEMS_RE = re.compile(r"no items available", re.I)
+
+
+def _no_items_popup(page):
+    """SweetAlert 'There are no items available' after '+ Add Guest': dismiss
+    it and say so. Nothing was opened or submitted."""
+    try:
+        pop = page.locator(".swal2-popup, .swal2-modal, [role=dialog]").filter(has_text=NO_ITEMS_RE)
+        if not pop.count() or not pop.first.is_visible():
+            return False
+        try:
+            pop.first.locator(".swal2-confirm, button").filter(has_text=re.compile(r"^\s*OK\s*$", re.I)).first.click(timeout=3000)
+        except Exception:  # noqa: BLE001
+            page.keyboard.press("Escape")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _check_modal(modal):
     """List item chosen and owner preset, read back from the form."""
     selects = modal.evaluate(SELECTED_JS)
@@ -889,6 +908,10 @@ def add_guest(venue, night, guest, *, ref, rehearse=False, screenshot_path=None,
             _wait(page, 1500)
             modal = _modal(page)
             if modal is None:
+                if _no_items_popup(page):
+                    # "Oops.. There are no items available" (e.g. LIV NYE, Nov 21
+                    # 2026): this night has no guest list to add to = closed.
+                    raise NotOpen("no guest list items", info.get("event") or "")
                 raise UrvenueError("urvenue 'Add Guests' form did not open")
             _choose_item(page, modal)
             box = modal.locator("textarea")
