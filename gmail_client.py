@@ -536,10 +536,31 @@ def set_labels(service, message_id, label_ids, add=(), remove=()):
     ).execute()
 
 
-def build_message(to, subject, body, sender, cc=None, bcc=None, message_id=None, attachments=None, html=None,
+# Synthetic Message-ID style ids (pm-web-<ref>-<date>@..., gg-web-...) are
+# never mailboxes. Nov 21 2026: a positional-arg shift (bcc inserted before
+# message_id) made send_once BCC its Message-ID, so Zoho bounced 550 5.1.1.
+SYNTHETIC_ADDR_RE = re.compile(r"^\s*<?(pm|gg)-web-[^@\s]*@", re.I)
+
+
+def _real_recipients(value, message_id=None):
+    """Drop synthetic ids (and the message's own Message-ID) from a recipient
+    header value; real addresses pass through unchanged."""
+    if not value:
+        return value
+    mid = (message_id or "").strip("<> ").lower()
+    keep = [a.strip() for a in str(value).split(",")
+            if a.strip() and not SYNTHETIC_ADDR_RE.match(a) and a.strip("<> ").lower() != mid]
+    return ", ".join(keep) or None
+
+
+def build_message(to, subject, body, sender, cc=None, *, bcc=None, message_id=None, attachments=None, html=None,
                   headers=None, inline_images=None, from_name="Playmaker Entertainment"):
     """attachments: list of file paths to attach (images). html: optional
-    text/html alternative; body stays as the plain-text fallback."""
+    text/html alternative; body stays as the plain-text fallback.
+    Everything after cc is keyword-only so a Message-ID can never land in Bcc."""
+    if not _real_recipients(to, message_id):
+        raise ValueError("refusing to send to a synthetic id")
+    cc, bcc = _real_recipients(cc, message_id), _real_recipients(bcc, message_id)
     msg = EmailMessage()
     msg["From"] = f"{from_name} <{sender}>"
     msg["To"] = to
@@ -798,7 +819,7 @@ def send_once(service, message_id, to, subject, body, sender, cc=None, dedupe_qu
         return False
     service.users().messages().send(
         userId="me",
-        body=build_message(to, subject, body, sender, cc, message_id, attachments=attachments, html=html,
+        body=build_message(to, subject, body, sender, cc, message_id=message_id, attachments=attachments, html=html,
                            headers=headers, inline_images=inline_images),
     ).execute()
     return True
