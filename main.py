@@ -1379,6 +1379,11 @@ def send_follow_ups(service, mode, allowlist=None, today=None, store=None):
     late = _int_env("FOLLOW_UP_MAX_LATE_DAYS", 7)
     sent = deferred = 0
     merged = {}
+    import email_suppression
+    try:
+        email_suppression.ingest_bounces(service)
+    except Exception:
+        log.exception("Bounce ingest failed; continuing follow-up pass")
     for conf in gmail_client.recent_confirmations(service):
         last_night = conf.get("last_night")
         address = re.sub(r".*<([^>]+)>.*", r"\1", conf["to"]).strip().lower()
@@ -1412,6 +1417,9 @@ def send_follow_ups(service, mode, allowlist=None, today=None, store=None):
             continue  # too overdue: don't send a stale follow-up after an outage
         if allowlist is not None and address not in allowlist:
             continue
+        if email_suppression.is_suppressed(address):
+            log.info("Follow-up skipped for %s: previously rejected or bounced", address)
+            continue
         try:
             blocked = marketing_blocked(service, address, store)
         except Exception:
@@ -1434,11 +1442,20 @@ def send_follow_ups(service, mode, allowlist=None, today=None, store=None):
             log.info("[dry run] would send follow-up to %s (last night %s)", address, last_night)
             continue
         # Any follow-up to this guest in the last 60 days counts: never again.
-        if gmail_client.send_once(service, f"amy-followup-{conf['id']}@playmakerentertainment.com",
+        try:
+            ok = gmail_client.send_once(service, f"amy-followup-{conf['id']}@playmakerentertainment.com",
                                   address, subject, body, sender=rules.SENDER_EMAIL,
                                   html=html_emails.render_follow_up(conf["first_name"], optin_url, unsub_url, venues=conf.get("venues", [])),
                                   headers=newsletter.list_unsubscribe_headers(unsub_url),
-                                  dedupe_query=f'to:{address} {FOLLOW_UP_SEARCH} newer_than:60d'):
+                                  dedupe_query=f'to:{address} {FOLLOW_UP_SEARCH} newer_than:60d')
+        except Exception as e:
+            if email_suppression.is_hard_reject(e):
+                email_suppression.record(address, reason="rejected", error=f"{type(e).__name__}: {e}", source="follow-up")
+                log.warning("Follow-up rejected for %s; will not retry", address)
+            else:
+                log.exception("Follow-up send failed for %s; skipping this guest", address)
+            continue
+        if ok:
             log.info("Follow-up sent to %s (last night %s)", address, last_night)
             sent += 1
     if deferred:
