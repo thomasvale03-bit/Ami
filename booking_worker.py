@@ -472,7 +472,7 @@ def box_lock(ref):
 class Worker:
     def __init__(self, api, ledger, tao=None, drais=None, *, mode="dry-run", evidence_dir=None,
                  now=None, sleep=time.sleep, email_wait_seconds=None, duplicate_check=None, alerts=None,
-                 job_time_cap=None):
+                 job_time_cap=None, hold_emails=None):
         self.api, self.ledger, self.mode = api, ledger, mode
         self.tao, self.drais = tao or TaoBooker(), drais or DraisBooker()
         self.evidence_dir = Path(evidence_dir or os.environ.get("AMY_WORKER_DIR", "/data/worker")) / "evidence"
@@ -488,6 +488,11 @@ class Worker:
         self.duplicate_check = (os.environ.get("AMY_WORKER_DUPLICATE_CHECK", "false").lower() == "true"
                                 if duplicate_check is None else duplicate_check)
         self.alerts = (os.environ.get("AMY_WORKER_ALERTS", "").lower() == "true" if alerts is None else alerts)
+        # Thomas, Nov 21 2026: email the guest (team@ on BCC) once when their
+        # request goes on hold (list not open yet / access code / closed with
+        # no open fallback), and again only when the hold materially changes.
+        self.hold_emails = (os.environ.get("AMY_WORKER_HOLD_EMAIL", "true").lower() not in ("0", "false", "no", "off")
+                            if hold_emails is None else hold_emails)
 
     # -- one cycle --
     def run_once(self):
@@ -634,7 +639,18 @@ class Worker:
         from config import rules
         drais = any(rules.is_drais(v) for v in raw.get("venues") or [])
         waiting = []
-        bookings = self._book_all(job, raw, rehearse=False, token=token, waiting=waiting)
+        self._booked_so_far = []
+        try:
+            bookings = self._book_all(job, raw, rehearse=False, token=token, waiting=waiting)
+        except Stop as stop:
+            # A closed / access-code night with no open fallback stops the job
+            # before the end; the guest still hears (once) what is on hold.
+            if (not drais and stop.action == "retry" and stop.extra.get("hold_kind")
+                    and stop.extra.get("venue") and stop.extra.get("night")):
+                held = [(v, n, "unposted") for v, n, _ in waiting]
+                held.append((stop.extra["venue"], stop.extra["night"], stop.extra["hold_kind"]))
+                self._notify_hold(job, ref, token, raw, held, booked=bool(self._booked_so_far))
+            raise
         if waiting:
             # Some nights of this request are only waiting for their guest list
             # to be posted. Confirm everything booked so far in ONE guest and
@@ -646,9 +662,19 @@ class Worker:
                 ((job.get("metadata") or {}).get("progress") or {}).get("emails")
             # Only the first partial confirmation goes out early; nights booked
             # later wait until the whole request is done (one Updated email).
+            confirmation = None
             if bookings and not drais and not already:
-                self._send_emails(job, ref, token, raw, bookings, drais=False,
-                                  pending=[(v, n) for v, n, _ in waiting])
+                receipts = self._send_emails(job, ref, token, raw, bookings, drais=False,
+                                             pending=[(v, n) for v, n, _ in waiting])
+                confirmation = next((r["id"] for r in receipts if r["kind"] == "guest"), None)
+            elif already and not drais:
+                confirmation = (already or {}).get("guest")
+            if not drais:
+                # The partial confirmation above already names the waiting
+                # nights ("Still to come"), so it counts as the hold notice;
+                # otherwise one hold-status email goes out (deduped).
+                self._notify_hold(job, ref, token, raw, [(v, n, "unposted") for v, n, _ in waiting],
+                                  booked=bool(bookings), confirmation_id=confirmation)
             first = waiting[0][2]
             reason = first.reason if len(waiting) == 1 else (
                 f"{len(waiting)} night(s) waiting for their guest list to be posted ("
@@ -695,6 +721,7 @@ class Worker:
         self._job_raw = raw
         progress = ((job.get("metadata") or {}).get("progress") or {}).get("bookings") or {}
         out = []
+        self._booked_so_far = out
         self.tao.reset()
         nights = source_nights(raw)
         for venue, night in nights:
@@ -816,6 +843,9 @@ class Worker:
         if venue not in rules.NIGHTCLUBS:
             if stop.extra.get("kind") == "unposted":
                 raise Stop("retry", stop.reason, kind="unposted")
+            if stop.action == "retry" and stop.extra.get("kind") == "access_code":
+                raise Stop("retry", stop.reason, kind="access_code", venue=venue, night=night,
+                           hold_kind="access_code")
             raise stop
         if stop.extra.get("kind") == "unposted" and venue_operates_that_night(venue, night_date):
             raise Stop("retry", f"{venue} {night}: guest list not posted on TAO yet; nothing submitted",
@@ -849,7 +879,9 @@ class Worker:
         if last_stop.action == "uncertain":
             raise last_stop
         raise Stop("retry", f"{venue} {night}: closed, access-code or not operating; "
-                   "DEFAULT_ROUTING fallbacks also not bookable yet; nothing submitted")
+                   "DEFAULT_ROUTING fallbacks also not bookable yet; nothing submitted",
+                   venue=venue, night=night,
+                   hold_kind="access_code" if stop.extra.get("kind") == "access_code" else "closed")
 
     def _shot_path(self, ref, venue, night, suffix):
         safe = "".join(c if c.isalnum() else "-" for c in venue)
@@ -970,6 +1002,10 @@ class Worker:
             if set(order_ids) - set(covered):
                 saved, update = {}, True
         payloads = dict(build(update))
+        if not update and not drais and not saved.get("guest") and (self._hold_marker(job, ref) or {}).get("via") == "hold_email":
+            # The guest already got a hold-status email for this request: the
+            # confirmation for the night(s) that booked is an "Updated:" one.
+            payloads["guest"] = dict(build(True))["guest"]
         receipts = []
         for kind in ("guest", "team"):
             payload = payloads[kind]
@@ -985,6 +1021,78 @@ class Worker:
             self.api.update(ref, token, "progress", {"progress": {"emails": {kind: message_id}}})
             receipts.append({"kind": kind, "id": message_id})
         return receipts
+
+    # -- guest hold-status email --
+    def _hold_marker(self, job, ref):
+        local = (self.ledger.get(f"{ref}|hold_notified") or {})
+        server = (((job or {}).get("metadata") or {}).get("progress") or {}).get("hold_notified") or {}
+        if not local and not server:
+            return {}
+        merged = {**server, **local}
+        merged["signature"] = sorted(set(server.get("signature") or []) | set(local.get("signature") or []))
+        merged["rejected"] = bool(server.get("rejected") or local.get("rejected"))
+        return merged
+
+    def _save_hold_marker(self, ref, token, marker):
+        marker = {**marker, "at": self.now()}
+        self.ledger.put(f"{ref}|hold_notified", marker)
+        if token:
+            try:
+                self.api.update(ref, token, "progress", {"progress": {"hold_notified": marker}})
+            except Exception:  # noqa: BLE001
+                log.exception("Could not save hold_notified marker on the server for %s", ref)
+        return marker
+
+    def _notify_hold(self, job, ref, token, raw, held, booked=False, confirmation_id=None):
+        """ONE hold-status email per trip: sent when the hold first appears or
+        gains a night/venue/status, never on a plain hourly retry. Respects
+        suppression: any rejection stops hold emails for this ref for good.
+        Never raises; a failed send is retried at the next pickup."""
+        if not self.hold_emails or not held:
+            return None
+        try:
+            import worker_emails
+            from rules_engine import normalize_guest_request
+            sig = worker_emails.hold_signature(held)
+            prior = self._hold_marker(job, ref)
+            if prior.get("rejected"):
+                return None
+            notified = set(prior.get("signature") or [])
+            if not set(sig) - notified:
+                return prior
+            if confirmation_id and not prior:
+                # The guest confirmation (with "Still to come") already told them.
+                return self._save_hold_marker(ref, token, {"signature": sorted(notified | set(sig)),
+                                                           "via": "confirmation", "message_id": confirmation_id})
+            request = normalize_guest_request(raw)
+            payload = worker_emails.hold_email(ref, raw, request, held, update=bool(prior), booked=booked)
+            if not worker_emails.allowed_recipient(payload["to"]):
+                return None
+            code, body = self.api.send_branded({**payload, "report_prior": True})
+            result = (body or {}).get("result") if isinstance(body, dict) else None
+            if not isinstance(result, dict) and isinstance(body, dict) and ("sent" in body or "rejected" in body):
+                result = body
+            mid = None
+            if code == 200 and isinstance(result, dict) and result.get("sent") and result.get("id"):
+                mid = result["id"]
+            elif code == 200 and isinstance(result, dict) and result.get("duplicate"):
+                mid = (result.get("prior") or {}).get("id") or "duplicate"
+            elif code == 422 or (isinstance(result, dict) and result.get("rejected")):
+                log.warning("Hold email for %s rejected/suppressed; never retried", ref)
+                return self._save_hold_marker(ref, token, {**prior, "signature": sorted(notified | set(sig)),
+                                                           "rejected": True})
+            else:
+                log.warning("Hold email for %s not sent (HTTP %s); will try at the next pickup", ref, code)
+                return None
+            marker = self._save_hold_marker(ref, token, {"signature": sorted(notified | set(sig)),
+                                                         "via": "hold_email", "message_id": str(mid),
+                                                         "subject": payload["subject"],
+                                                         "sends": int(prior.get("sends") or 0) + 1})
+            log.info("Hold email for %s sent (%s)", ref, mid)
+            return marker
+        except Exception:  # noqa: BLE001 - a hold notice must never break the job
+            log.exception("Hold email for %s failed", ref)
+            return None
 
     def _send_one(self, kind, payload, order_ids=(), updated=None):
         deadline = self.now() + self.email_wait
