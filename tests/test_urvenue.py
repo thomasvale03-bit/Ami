@@ -22,6 +22,7 @@ def urvenue_env(monkeypatch, tmp_path):
     monkeypatch.setenv("URVENUE_PASSWORD", "x")  # dummy; tests never log in for real
     monkeypatch.setenv("AMY_WORKER_DIR", str(tmp_path / "wd"))
     monkeypatch.delenv("URVENUE_VENUE_IDS", raising=False)
+    monkeypatch.setenv("LIV_NIGHT_RULES", str(tmp_path / "no-liv-rules.json"))  # never the real file
 
 
 class FakeUrvenue:
@@ -85,8 +86,21 @@ def test_books_on_urvenue_and_confirms_once(tmp_path, venue, canon):
         assert "Your Wynn Resorts app reservation" in guest["html"] and "My Itinerary" in guest["html"]
         assert "no app or passes needed" not in guest["text"]
     else:
-        assert "no app or passes needed" in guest["text"] and "How to check in" in guest["html"]
+        # Tom's LIV format (Nov 21 2026); no terms on file -> none invented.
+        heading = "LIV BEACH @ FONTAINEBLEAU HOTEL" if canon == "LIV Beach" else "LIV @ FONTAINEBLEAU HOTEL"
+        for bit in ("TOM\u2019s V (PME) GUESTLIST", "(Footfall promoter)", "Save or Screenshot This EMAIL to get in",
+                    heading, "Wednesday Nov 25 - Rufus Du Sol", "Guestlist terms will be confirmed",
+                    "NO ATHLETIC GEAR", "NO SHORTS(men)", "This Email Is Your Ticket",
+                    "*U R on TOM Vale (PME) guestlist", "-Show this EMAIL at Check in & ID"):
+            assert bit in guest["text"], bit
+            assert bit.replace("&", "&amp;") in guest["html"], bit
+        for bad in ("M - ", "F - ", "Comp", "Guestlist til", "Text"):
+            assert bad not in guest["text"], bad
+        if canon == "LIV Nightclub":
+            assert "LIV BEACH" not in guest["text"]
         assert "wynn" not in (guest["text"] + guest["html"]).lower()
+        assert "LIV night terms MISSING" in team["text"]
+        assert "grab your passes" not in guest["html"] and "show it with your ID" in guest["html"]
     assert "urvenue" in team["text"] and "General List" in team["text"] and "Amy Ref: u" in team["text"]
     for p in api.sent:
         body = (p["text"] + p["html"] + p["subject"]).lower()
@@ -196,8 +210,81 @@ def test_liv_and_xs_trip_gets_both_sections(tmp_path):
     g = api.sent[0]
     assert "Your Wynn Resorts app reservation for XS Nightclub" in g["html"].replace("lives in", "") or \
         "reservation for XS Nightclub lives in the Wynn Resorts app" in g["text"]
-    assert "LIV Nightclub: no app or passes needed" in g["text"]
-    assert "LIV check-in" in g["html"] and "TAO Group Hospitality Rewards" not in g["html"]
+    assert "LIV @ FONTAINEBLEAU HOTEL" in g["text"] and "Saturday Nov 28 - Rufus Du Sol" in g["text"]
+    assert "Friday Nov 27" not in g["text"].split("TOM\u2019s V")[1]  # XS night is not in the LIV block
+    assert "LIV @ FONTAINEBLEAU HOTEL" in g["html"] and "TAO Group Hospitality Rewards" not in g["html"]
+
+
+def _rules(tmp_path, monkeypatch, nights):
+    import json
+    path = tmp_path / "liv-night-rules.json"
+    path.write_text(json.dumps({"_example": {"LIV Nightclub|2026-11-25": {"men": "EXAMPLE"}}, "nights": nights}))
+    monkeypatch.setenv("LIV_NIGHT_RULES", str(path))
+
+
+def _alerts(tmp_path):
+    import json
+    path = tmp_path / "w" / "alerts.jsonl"
+    return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_liv_rules_fill_the_night_block(tmp_path, monkeypatch):
+    _rules(tmp_path, monkeypatch, {"LIV Nightclub|2026-11-28": {"event": "Dom Dolla", "men": "Comp",
+                                                               "women": "Comp Open Bar", "cutoff": "1:30am"}})
+    s, api, worker = mk(tmp_path, FakeUrvenue())
+    s.enqueue("r", raw(venues=["LIV"], start_date="2026-11-28", end_date="2026-11-28"), NOW)
+    assert worker.run_once()["status"] == "done"
+    g, team = api.sent
+    assert "Saturday Nov 28 - Dom Dolla\nM - Comp\nF - Comp Open Bar\nGuestlist til 1:30am" in g["text"]
+    assert "Guestlist terms will be confirmed" not in g["text"]
+    assert "Guestlist til 1:30am" in g["html"]
+    assert "MISSING" not in team["text"]
+    assert _alerts(tmp_path) == []
+
+
+def test_liv_example_entries_are_never_used(tmp_path, monkeypatch):
+    _rules(tmp_path, monkeypatch, {})
+    s, api, worker = mk(tmp_path, FakeUrvenue())
+    s.enqueue("x", raw(venues=["LIV"]), NOW)
+    assert worker.run_once()["status"] == "done"
+    assert "EXAMPLE" not in api.sent[0]["text"] and "Guestlist terms will be confirmed" in api.sent[0]["text"]
+    notes = _alerts(tmp_path)
+    assert len(notes) == 1 and notes[0]["kind"] == "liv_rules_missing"
+    item = notes[0]["items"][0]
+    assert item["ref"] == "x" and item["dates"] == "2026-11-25" and "LIV Nightclub" in item["venue"]
+
+
+def test_liv_beach_and_liv_trip_two_headings_partial_rules(tmp_path, monkeypatch):
+    _rules(tmp_path, monkeypatch, {"LIV Beach|2026-11-28": {"men": "Comp", "women": "Comp", "cutoff": "3pm",
+                                                           "notes": "Pool open"}})
+    s, api, worker = mk(tmp_path, FakeUrvenue())
+    s.enqueue("b", raw(venues=["LIV Beach", "LIV"], start_date="2026-11-28", end_date="2026-11-28",
+                       itinerary={"2026-11-28": ["LIV Beach", "LIV Nightclub"]}), NOW)
+    assert worker.run_once()["status"] == "done"
+    t = api.sent[0]["text"]
+    assert t.index("LIV @ FONTAINEBLEAU HOTEL") < t.index("LIV BEACH @ FONTAINEBLEAU HOTEL")
+    beach = t.split("LIV BEACH @ FONTAINEBLEAU HOTEL")[1]
+    assert "Guestlist til 3pm" in beach and "Pool open" in beach
+    night = t.split("LIV @ FONTAINEBLEAU HOTEL")[1].split("LIV BEACH")[0]
+    assert "Guestlist terms will be confirmed" in night and "M - " not in night
+    assert _alerts(tmp_path)[0]["items"][0]["dates"] == "2026-11-28"
+
+
+def test_xs_confirmation_has_no_liv_block(tmp_path):
+    s, api, worker = mk(tmp_path, FakeUrvenue())
+    s.enqueue("w", raw(venues=["XS"]), NOW)
+    assert worker.run_once()["status"] == "done"
+    assert "TOM\u2019s V" not in api.sent[0]["text"] and _alerts(tmp_path) == []
+
+
+def test_rules_file_template_has_no_real_nights(tmp_path, monkeypatch):
+    import json
+    import liv_rules
+    monkeypatch.setenv("LIV_NIGHT_RULES", str(tmp_path / "new" / "rules.json"))
+    assert liv_rules.ensure_file() is True and liv_rules.ensure_file() is False
+    data = json.loads((tmp_path / "new" / "rules.json").read_text())
+    assert data["nights"] == {} and liv_rules.load() == {}
+    assert "Dom Dolla" in json.dumps(data["_example"])
 
 
 def test_urvenue_line_uses_the_guests_own_email():
@@ -332,6 +419,22 @@ def test_browser_adds_guest_and_verifies_row(site_browser, tmp_path):
         assert out["verified"] and out["event"] == "Kaskade" and out["event_time"] == "10:30pm"
         assert "Mock Guest" in out["row"] and calls == [1]
         assert out["confirmation_id"] == urvenue.confirmation_ref("r1", "XS Nightclub", "2026-12-04")
+    finally:
+        site.__exit__()
+
+
+def test_browser_ng_select_item_behind_input(site_browser, tmp_path):
+    """Live crash Nov 21 2026 (job 1a20042c105c1c11): the ng-select's <input>
+    covers '- Select Item -', so a plain click on the placeholder times out.
+    _choose_item opens it via .ng-select-container and verifies General List."""
+    start, mock = site_browser
+    site = start({("79", "1115"): ("XS Nightclub", {"2026-11-22": {"name": "Sunday", "status": "Open",
+                                                                   "hours": "10:30pm to 4:00am", "ng": True}})})
+    try:
+        out = urvenue.add_guest("XS Nightclub", date(2026, 11, 22), GUEST, ref="ng1",
+                                screenshot_path=str(tmp_path / "ng.png"), before_submit=lambda: None)
+        assert out["verified"] and "Mock Guest" in out["row"] and "General List" in out["row"]
+        assert (tmp_path / "ng.png").exists()
     finally:
         site.__exit__()
 

@@ -1107,7 +1107,36 @@ class Worker:
             self.ledger.put(f"{ref}|emails", {"receipts": dict(saved), "orders": order_ids})
             self.api.update(ref, token, "progress", {"progress": {"emails": {kind: message_id}}})
             receipts.append({"kind": kind, "id": message_id})
+            if kind == "guest" and not drais:
+                self._note_liv_rules_missing(ref, raw, rows, message_id)
         return receipts
+
+    def _note_liv_rules_missing(self, ref, raw, rows, message_id):
+        """A LIV / LIV Beach confirmation went out with no night terms on file:
+        leave a note in alerts.jsonl so Thomas can be told (never blocks)."""
+        try:
+            import worker_emails
+            missing = worker_emails.liv_missing(rows)
+            if not missing:
+                return
+            item = {"problem": "liv_rules_missing", "ref": ref, "guest": raw.get("name") or raw.get("email") or "",
+                    "venue": ", ".join(sorted({v for v, _ in missing})),
+                    "dates": ", ".join(n for _, n in missing), "state": "note",
+                    "reason": "LIV confirmation sent without night terms (M/F/guestlist cutoff); add them to the "
+                              "LIV rules file: " + "; ".join(f"{v} {n}" for v, n in missing),
+                    "message_id": message_id}
+            path = self.evidence_dir.parent / "alerts.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a") as fh:
+                fh.write(json.dumps({"kind": "liv_rules_missing", "at": self.now(), "items": [item],
+                                     "delivered": False, "why": "note for Thomas"}) + "\n")
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            log.warning("LIV confirmation for %s sent without night terms: %s", ref, missing)
+        except Exception:  # noqa: BLE001 - a note must never break the job
+            log.exception("could not write LIV rules note for %s", ref)
 
     # -- guest hold-status email --
     def _hold_marker(self, job, ref):

@@ -108,17 +108,46 @@ function draw(){{
   for (const r of rs) tb.innerHTML += `<tr><td>Active</td><td>${{r.name}}</td><td>General List</td><td>Thomas Vale</td><td>${{r.m+r.f}}</td><td>${{r.m}}</td><td>${{r.f}}</td></tr>`;
 }}
 document.getElementById('q').oninput = draw;
+// The real site uses an Angular ng-select: its search <input> sits on top of
+// the "- Select Item -" placeholder and swallows clicks (Nov 21 2026 crash).
+const NG = {json.dumps(bool(ev.get('ng')))};
+const NGSEL = `<ng-select class="ng-select" id=item style="display:block;width:300px">
+  <div class="ng-select-container" style="position:relative;height:34px;border:1px solid #ccc">
+    <div class="ng-value-container"><div class="ng-placeholder" style="padding:6px">- Select Item -</div>
+      <div class="ng-input" style="position:absolute;left:0;top:0;right:0;bottom:0">
+        <input type=text style="width:100%;height:100%;opacity:0.01;border:0"></div></div>
+    <span class="ng-arrow-wrapper"></span></div></ng-select>`;
+function ngWire(d){{
+  const ng = d.querySelector('ng-select'); if (!ng) return;
+  const open = () => {{
+    if (ng.querySelector('ng-dropdown-panel')) return;
+    const p = document.createElement('ng-dropdown-panel'); p.className='ng-dropdown-panel';
+    p.style.display='block';
+    p.innerHTML = '<div class="ng-dropdown-panel-items"><div class="ng-option"><span class="ng-option-label">VIP List</span></div><div class="ng-option"><span class="ng-option-label">General List</span></div></div>';
+    ng.appendChild(p);
+    p.querySelectorAll('.ng-option').forEach(o => o.addEventListener('mousedown', e => {{
+      e.preventDefault(); ng.dataset.value = o.textContent.trim();
+      ng.classList.add('ng-has-value');
+      ng.querySelector('.ng-placeholder').style.display='none';
+      let v = ng.querySelector('.ng-value'); if (!v) {{ v = document.createElement('div'); v.className='ng-value';
+        ng.querySelector('.ng-value-container').prepend(v); }}
+      v.innerHTML = '<span class="ng-value-label">' + o.textContent.trim() + '</span>';
+      p.remove(); }}));
+  }};
+  ng.querySelector('.ng-select-container').addEventListener('mousedown', open);
+}}
+function itemValue(d){{ const ng = d.querySelector('ng-select'); return ng ? (ng.dataset.value||'') : d.querySelector('#item').value; }}
 document.getElementById('add').onclick = () => {{
   const d = document.createElement('div'); d.className='modal show'; d.id='modal';
   d.innerHTML = `<div>Add Guests <button class=close aria-label=Close>&times;</button></div>
-    <select id=item><option>- Select Item -</option><option>General List</option></select>
+    ${{NG ? NGSEL : '<select id=item><option>- Select Item -</option><option>General List</option></select>'}}
     <select id=owner><option selected>Thomas Vale</option><option>Someone Else</option></select>
     <div>Add your booking below</div><textarea id=ta rows=8></textarea>
     <button id=go>Add Guests</button>`;
-  document.body.appendChild(d);
+  document.body.appendChild(d); ngWire(d);
   d.querySelector('.close').onclick = () => d.remove();
   d.querySelector('#go').onclick = () => {{
-    if (d.querySelector('#item').value !== 'General List') {{ alert('Select Item'); return; }}
+    if (itemValue(d) !== 'General List') {{ alert('Select Item'); return; }}
     const line = d.querySelector('#ta').value.trim();
     const m = line.match(/^(.*?)\\s+(\\S+@\\S+)\\s+(.*?)\\s*(!.*)?$/);
     const mm = (line.match(/(\\d+)M\\b/)||[0,0])[1]*1, ff = (line.match(/(\\d+)F\\b/)||[0,0])[1]*1;

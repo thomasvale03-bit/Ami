@@ -135,3 +135,13 @@ Untested from Railway's datacenter IPs.
   (one shell command, e.g. from AMYI's daily check). Log: `/workspace/amy-worker/worker.log`.
 * Probes: `python booking_worker.py --probe` (TAO) and `--probe-speakeasy`
   (logs in, opens one list, adds nothing).
+
+### LIV / LIV Beach night terms (Nov 21 2026)
+
+LIV and LIV Beach confirmations use Tom's "TOM's V (PME) GUESTLIST" format. The
+per-night terms (event, M, F, guestlist cutoff, notes) come from a JSON file read
+at send time: `LIV_NIGHT_RULES` (default `/home/box/agent-data/shared/liv-night-rules.json`).
+Keys are `"LIV Nightclub|YYYY-MM-DD"` or `"LIV Beach|YYYY-MM-DD"` under `"nights"`;
+see `liv_rules.py`. Nothing is guessed: a night with no entry shows the day and the
+urvenue event title plus "Guestlist terms will be confirmed", and the worker writes a
+`liv_rules_missing` note to `data/alerts.jsonl`.
