@@ -50,6 +50,7 @@ SHORT_VENUES = {
     'LIV Beach': 'LIV Beach',
     'LIV Dayclub': 'LIV Beach',
     'Encore Beach Club': 'EBC',
+    'Encore Beach Club At Night': 'EBC Night',
     'XS Nightclub': 'XS',
     'Ghostbar': 'Ghostbar',
     'ZOUK': 'ZOUK',

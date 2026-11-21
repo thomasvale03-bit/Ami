@@ -305,11 +305,12 @@ def test_source_policy_manual_clubs_and_omnia_jewel_rules():
     import queue_service as q
     today = date(2026, 11, 13)  # Friday
     liv = raw(venues=["LIV"], start_date="2026-11-14", end_date="2026-11-14")
-    assert "LIV" in q.source_policy("r", liv, today) or "manual" in q.source_policy("r", liv, today).lower()
+    # Nov 21 2026: LIV, XS and Encore are booked on urvenue (no longer manual).
+    assert q.source_policy("r", liv, today) == ""
     xs = raw(venues=["XS Nightclub"], start_date="2026-11-14", end_date="2026-11-14")
-    assert q.source_policy("r", xs, today)
+    assert q.source_policy("r", xs, today) == ""
     ebc = raw(venues=["EBC"], start_date="2026-11-14", end_date="2026-11-14")
-    assert q.source_policy("r", ebc, today)
+    assert q.source_policy("r", ebc, today) == ""
     # Deployed server policy kept (Nov 19 2026 merge): same-day OMNIA Fri/Sat
     # and JEWEL after Nov 21 go to review; OMNIA on another day is fine.
     omnia = raw(venues=["OMNIA Nightclub"], start_date="2026-11-13", end_date="2026-11-13")

@@ -209,6 +209,16 @@ class DraisBooker:
                 browser.close()
 
 
+class UrvenueBooker:
+    """urvenue.me (UrGuestlist): LIV, LIV Beach, XS, Encore Beach Club (+ At
+    Night). See urvenue.py."""
+
+    def add(self, venue, night, guest, *, ref, rehearse, screenshot_path, before_submit):
+        import urvenue
+        return urvenue.add_guest(venue, night, guest, ref=ref, rehearse=rehearse,
+                                 screenshot_path=screenshot_path, before_submit=before_submit)
+
+
 def _shot(page, path):
     if not path:
         return None
@@ -472,9 +482,10 @@ def box_lock(ref):
 class Worker:
     def __init__(self, api, ledger, tao=None, drais=None, *, mode="dry-run", evidence_dir=None,
                  now=None, sleep=time.sleep, email_wait_seconds=None, duplicate_check=None, alerts=None,
-                 job_time_cap=None, hold_emails=None):
+                 job_time_cap=None, hold_emails=None, urvenue=None):
         self.api, self.ledger, self.mode = api, ledger, mode
         self.tao, self.drais = tao or TaoBooker(), drais or DraisBooker()
+        self.urvenue = urvenue or UrvenueBooker()
         self.evidence_dir = Path(evidence_dir or os.environ.get("AMY_WORKER_DIR", "/data/worker")) / "evidence"
         self.now, self.sleep = now or time.time, sleep
         self.email_wait = (int(os.environ.get("AMY_WORKER_EMAIL_WAIT_SECONDS", "900"))
@@ -735,13 +746,13 @@ class Worker:
                            "check TAO/Speakeasy before any resubmit")
             # A nightclub already booked this date (requested or fallback)
             # fills that nightclub slot; a dayclub on the same date is separate.
-            if venue in rules.NIGHTCLUBS:
+            if rules.is_nightclub(venue):
                 existing = self._existing_night_booking(job["ref"], night, out)
-                if existing and (existing.get("record") or {}).get("venue") in rules.NIGHTCLUBS:
+                if existing and rules.is_nightclub((existing.get("record") or {}).get("venue")):
                     out.append(existing)
                     continue
             if any(rules.is_manual_venue(v) for v in (raw.get("venues") or [])):
-                raise Stop("manual", "LIV, XS, LIV Beach and EBC stay manual")
+                raise Stop("manual", "Requested venue stays manual")
             if rules.is_drais(venue):
                 if rules.venue_open_on(venue, date.fromisoformat(night)) is False:
                     continue
@@ -797,13 +808,13 @@ class Worker:
         from config import rules
         for item in booked:
             rec = item.get("record") or {}
-            if rec.get("verified") and rec.get("date") == night and rec.get("venue") in rules.NIGHTCLUBS and (
+            if rec.get("verified") and rec.get("date") == night and rules.is_nightclub(rec.get("venue")) and (
                     rec.get("order_id") or rec.get("system")):
                 return item
         prefix, suffix = f"{ref}|", f"|{night}"
         for key, entry in (self.ledger._load() or {}).items():
             rec = (entry or {}).get("record") or {}
-            if key.startswith(prefix) and key.endswith(suffix) and rec.get("venue") in rules.NIGHTCLUBS and rec.get("verified") and (
+            if key.startswith(prefix) and key.endswith(suffix) and rules.is_nightclub(rec.get("venue")) and rec.get("verified") and (
                     rec.get("order_id") or rec.get("system")):
                 return {"record": rec, "meta": (entry or {}).get("meta") or {}}
         return None
@@ -813,7 +824,7 @@ class Worker:
         from config import rules
         for item in booked:
             rec = item.get("record") or {}
-            if rec.get("date") == prev and rec.get("venue") in rules.NIGHTCLUBS:
+            if rec.get("date") == prev and rules.is_nightclub(rec.get("venue")):
                 return rec["venue"]
         return None
 
@@ -827,6 +838,22 @@ class Worker:
         from config import rules
         from rules_engine import fallback_venues_for, venue_operates_that_night
         night_date = date.fromisoformat(night)
+        if rules.is_urvenue(venue):
+            try:
+                return self._book_urvenue(ref, venue, night, request, rehearse, token)
+            except Stop as raised:
+                kind = raised.extra.get("kind")
+                if kind == "unposted":
+                    raise Stop("retry", raised.reason, kind="unposted")
+                if kind != "closed":
+                    raise
+                if venue not in rules.URVENUE_NIGHTCLUBS:
+                    # LIV Beach / Encore: hold (one hold email) and re-check hourly.
+                    raise Stop("retry", raised.reason, kind="closed", venue=venue, night=night,
+                               hold_kind="closed")
+                # LIV / XS closed: DEFAULT_ROUTING fallback (OMNIA first).
+                return self._fallback_nightclub(ref, venue, night, night_date, request, rehearse, token,
+                                                booked, Stop("retry", raised.reason, kind="unavailable"))
         if rules.venue_open_on(venue, night_date) is False:
             if venue not in rules.NIGHTCLUBS:
                 return None
@@ -850,6 +877,13 @@ class Worker:
         if stop.extra.get("kind") == "unposted" and venue_operates_that_night(venue, night_date):
             raise Stop("retry", f"{venue} {night}: guest list not posted on TAO yet; nothing submitted",
                        kind="unposted")
+        return self._fallback_nightclub(ref, venue, night, night_date, request, rehearse, token, booked, stop)
+
+    def _fallback_nightclub(self, ref, venue, night, night_date, request, rehearse, token, booked, stop):
+        """DEFAULT_ROUTING fallbacks (OMNIA first) for a requested nightclub
+        that is closed, needs a code, or is not operating that night."""
+        FALLBACK_KINDS = ("unposted", "unavailable", "access_code")
+        from rules_engine import fallback_venues_for
         prev = self._previous_nightclub(night, booked)
         last_stop = stop
         for alt in fallback_venues_for(night_date, prev, skip={venue}):
@@ -950,6 +984,59 @@ class Worker:
         record = {"verified": True, "venue": venue, "date": night, "order_id": result["confirmation_id"], "party": party}
         meta = {"event": result.get("event") or listing.get("event"), "event_time": listing.get("event_time"),
                 "confirmation_url": result.get("confirmation_url"), "screenshot": result.get("screenshot"),
+                "screenshot_sha256": _sha256(result.get("screenshot"))}
+        self._checkpoint(ref, token, key, {"state": "booked", "record": record, "meta": meta})
+        return {"record": record, "meta": meta}
+
+    def _book_urvenue(self, ref, venue, night, request, rehearse, token):
+        """LIV / LIV Beach / XS / Encore on urvenue.me: add the party to the
+        night's General List (owner Thomas Vale), verify the row, record it.
+        Pre-submit problems never touch the ledger's "submitting" state."""
+        import urvenue
+        key = night_key(ref, venue, night)
+        night_date = date.fromisoformat(night)
+        party = self._night_party(request, night)
+        guest = {**request, "female_count": party["female_count"], "male_count": party["male_count"]}
+        shot = self._shot_path(ref, venue, night, "rehearsal" if rehearse else "confirmation")
+        if not urvenue.has_password() and os.environ.get("URVENUE_ALLOW_SESSION_ONLY", "").lower() != "true":
+            raise Stop("retry", f"{venue} {night}: urvenue login not configured (URVENUE_PASSWORD missing "
+                       "in the worker env); nothing submitted", kind="login")
+
+        def before_submit():
+            if not rehearse:
+                self._checkpoint(ref, token, key, {"state": "submitting"})
+
+        try:
+            result = self.urvenue.add(venue, night_date, guest, ref=ref, rehearse=rehearse,
+                                      screenshot_path=shot, before_submit=before_submit)
+        except urvenue.NotPosted:
+            raise Stop("retry", f"{venue} {night}: guest list not posted on urvenue yet; nothing submitted",
+                       kind="unposted")
+        except urvenue.NotOpen as exc:
+            raise Stop("retry", f"{venue} {night}: urvenue list is {exc.status} ({exc.event}); nothing submitted",
+                       kind="closed")
+        except urvenue.LoginUnavailable as exc:
+            raise Stop("retry", f"{venue} {night}: {exc}; nothing submitted", kind="login")
+        except urvenue.AlreadyListed as exc:
+            raise Stop("manual", f"{venue} {night}: a guest with this name is already on the urvenue list "
+                       f"({exc.row[:120]}); not adding twice", kind="already_listed")
+        except urvenue.UrvenueError as exc:
+            raise Stop("manual", f"{venue} {night}: urvenue: {exc}; nothing submitted")
+        except urvenue.SubmissionUncertain as exc:
+            raise Stop("uncertain", f"{venue} {night}: {exc}; check the urvenue list, do not resubmit")
+        if rehearse:
+            if not result.get("rehearsal"):
+                raise Stop("manual", f"{venue} {night}: urvenue rehearsal stopped")
+            return {"venue": venue, "date": night, "rehearsal": True, "form_filled": True, "system": "urvenue",
+                    "event": result.get("event"), "screenshot": result.get("screenshot"),
+                    "page_url": result.get("page_url")}
+        if not result.get("verified") or not result.get("confirmation_id"):
+            raise Stop("uncertain", f"{venue} {night}: urvenue add not verified; check the list, do not resubmit")
+        record = {"verified": True, "venue": venue, "date": night, "order_id": result["confirmation_id"],
+                  "system": "urvenue", "party": party}
+        meta = {"event": result.get("event"), "event_time": result.get("event_time"),
+                "urvenue_row": result.get("row"), "list_item": result.get("list_item"),
+                "page_url": result.get("page_url"), "screenshot": result.get("screenshot"),
                 "screenshot_sha256": _sha256(result.get("screenshot"))}
         self._checkpoint(ref, token, key, {"state": "booked", "record": record, "meta": meta})
         return {"record": record, "meta": meta}
@@ -1368,11 +1455,22 @@ def main(argv=None):
     parser.add_argument("--mode", choices=("dry-run", "live"), default=None)
     parser.add_argument("--probe", action="store_true",
                         help="only check TAO reachability/Cloudflare from this host, then idle")
+    parser.add_argument("--probe-urvenue", nargs="+", metavar="VENUE_OR_DATE",
+                        help="read-only urvenue check: sign in, open VENUE's calendar and the DATE event "
+                             "(never adds a guest)")
     parser.add_argument("--probe-speakeasy", action="store_true",
                         help="only log into SpeakeasyGo and open one guest list (read-only)")
     args = parser.parse_args(argv)
     import browser_host
     browser_host.start()  # no-op unless AMY_BROWSER_LAUNCH=plain
+    if args.probe_urvenue:
+        import urvenue
+        venue = args.probe_urvenue[0]
+        night = date.fromisoformat(args.probe_urvenue[1]) if len(args.probe_urvenue) > 1 else None
+        result = urvenue.probe(venue, night)
+        log.info("URVENUE PROBE %s", json.dumps(result, default=str))
+        print(json.dumps(result, default=str))
+        return result
     if args.probe_speakeasy:
         try:
             result = probe_speakeasy()

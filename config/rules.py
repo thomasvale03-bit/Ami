@@ -25,14 +25,22 @@ DAYLIFE_VENUES = [
 
 PAUSED_VENUES = {"Drai's"}  # never submit unless explicitly reactivated
 
-# Human-only clubs (Thomas): the worker never books these.
-MANUAL_VENUES = {
+# Human-only clubs: the worker never books these. Empty since Nov 21 2026:
+# LIV, LIV Beach, XS and Encore are booked on urvenue.me (URVENUE_VENUES).
+MANUAL_VENUES = set()
+
+# Wynn / Fontainebleau clubs booked on Playmaker's urvenue.me (UrGuestlist)
+# account (Thomas, Nov 21 2026). ZOUK and Ghostbar stay notify-only.
+URVENUE_VENUES = {
     "LIV Nightclub",
-    "XS Nightclub",
     "LIV Beach",
-    "LIV Dayclub",
+    "XS Nightclub",
     "Encore Beach Club",
+    "Encore Beach Club At Night",
 }
+# urvenue nightclubs: a closed list falls back through DEFAULT_ROUTING
+# (OMNIA first) like the TAO nightclubs; the dayclubs go on hold instead.
+URVENUE_NIGHTCLUBS = {"LIV Nightclub", "XS Nightclub"}
 
 # Last night JEWEL may be booked automatically (owner: no JEWEL after Nov 21, 2026).
 JEWEL_LAST_NIGHT = "2026-11-21"
@@ -97,9 +105,18 @@ VENUE_ALIASES = {
     "xs": "XS Nightclub",
     "xs nightclub": "XS Nightclub",
     "liv beach": "LIV Beach",
-    "liv dayclub": "LIV Dayclub",
+    "liv las vegas": "LIV Nightclub",
+    "liv dayclub": "LIV Beach",
+    "liv beach club": "LIV Beach",
+    "encore beach club at night": "Encore Beach Club At Night",
+    "encore beach club night": "Encore Beach Club At Night",
+    "ebc at night": "Encore Beach Club At Night",
+    "encore at night": "Encore Beach Club At Night",
+    "encore nightclub": "Encore Beach Club At Night",
     "encore beach club": "Encore Beach Club",
+    "encore dayclub": "Encore Beach Club",
     "encore beach": "Encore Beach Club",
+    "encore": "Encore Beach Club",
     "ebc": "Encore Beach Club",
     "drai's": "Drai's",
     "drais": "Drai's",
@@ -152,11 +169,22 @@ def is_scottsdale(name):
 
 
 def is_known_vegas_venue(name):
-    return name in ALL_AUTHORIZED_VENUES or is_drais(name) or is_manual_venue(name)
+    return name in ALL_AUTHORIZED_VENUES or is_drais(name) or is_manual_venue(name) or is_urvenue(name)
+
+
+def is_urvenue(name):
+    """LIV, LIV Beach, XS, Encore Beach Club (+ At Night): booked on urvenue.me."""
+    key = (name or "").strip()
+    return VENUE_ALIASES.get(key.lower(), key) in URVENUE_VENUES
+
+
+def is_nightclub(name):
+    """TAO nightclubs plus the urvenue nightclubs (LIV, XS)."""
+    return name in NIGHTCLUBS or name in URVENUE_NIGHTCLUBS
 
 
 def is_manual_venue(name):
-    """LIV, XS, LIV Beach and EBC stay manual (never auto-booked)."""
+    """Venues that stay manual (never auto-booked). None since Nov 21 2026."""
     key = (name or "").strip()
     canonical = VENUE_ALIASES.get(key.lower(), key)
     return canonical in MANUAL_VENUES
@@ -276,8 +304,8 @@ VENUE_SCHEDULE = {
     "XS Nightclub": {"status": "tbd", "days": [], "doors": None, "closes": None},
     "LIV Nightclub": {"status": "tbd", "days": [], "doors": None, "closes": None},
     "LIV Beach": {"status": "tbd", "days": [], "doors": None, "closes": None},
-    "LIV Dayclub": {"status": "tbd", "days": [], "doors": None, "closes": None},
     "Encore Beach Club": {"status": "tbd", "days": [], "doors": None, "closes": None},
+    "Encore Beach Club At Night": {"status": "tbd", "days": [], "doors": None, "closes": None},
 }
 
 

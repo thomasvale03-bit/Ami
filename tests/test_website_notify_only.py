@@ -1,5 +1,5 @@
-"""Notify-only website venues (Thomas, Nov 14 2026): ZOUK, Ghostbar, XS,
-Encore Beach Club, LIV, LIV Beach. Accepted by intake; one branded team@ email
+"""Notify-only website venues (Thomas, Nov 14 2026): ZOUK and Ghostbar (LIV,
+LIV Beach, XS and Encore became bookable on urvenue, Nov 21 2026). Accepted by intake; one branded team@ email
 from info@; no Gmail intake insert, no queue receipt, no guest email, no phone."""
 import threading, unittest
 from datetime import datetime, timedelta
@@ -7,7 +7,8 @@ from unittest import mock
 import gmail_client, posh_webhook as pw
 import queue_service
 
-NOTIFY = ("ZOUK", "Ghostbar", "XS", "Encore Beach Club", "LIV", "LIV Beach")
+NOTIFY = ("ZOUK", "Ghostbar")
+URVENUE = ("XS", "Encore Beach Club", "Encore Beach Club At Night", "LIV", "LIV Beach")
 
 
 def payload(**kw):
@@ -27,7 +28,7 @@ def intake(dry=False):
 
 
 class NotifyOnly(unittest.TestCase):
-    def test_all_six_validate(self):
+    def test_notify_only_validate(self):
         for v in NOTIFY:
             clean, err = pw.validate_website(payload(venue=v, ref="pm-" + v[:3]))
             self.assertIsNone(err, v)
@@ -35,8 +36,7 @@ class NotifyOnly(unittest.TestCase):
             self.assertTrue(pw.is_notify_only("Las Vegas", v))
 
     def test_site_form_names_and_aliases_map(self):
-        for raw, want in (("ZOUK Nightclub", "ZOUK"), ("Ghost Bar", "Ghostbar"), ("XS Nightclub", "XS"),
-                          ("EBC", "Encore Beach Club"), ("LIV Nightclub", "LIV"), ("LIV Beach", "LIV Beach")):
+        for raw, want in (("ZOUK Nightclub", "ZOUK"), ("Ghost Bar", "Ghostbar")):
             clean, err = pw.validate_website(payload(venue=raw, city=""))
             self.assertIsNone(err, raw)
             self.assertEqual(clean["venue"], want, raw)
@@ -91,6 +91,48 @@ class NotifyOnly(unittest.TestCase):
         with mock.patch.object(pw, "send_branded") as sb:
             self.assertEqual(pw.accept_website(i, payload()), (200, "dry run (notify only)"))
         sb.assert_not_called()
+
+
+class UrvenueVenuesBookable(unittest.TestCase):
+    """Nov 21 2026: LIV, LIV Beach, XS and Encore go through normal intake
+    (queue job -> worker books on urvenue -> guest + team confirmation)."""
+
+    def test_site_names_map_and_are_bookable(self):
+        for raw, want in (("XS Nightclub", "XS"), ("XS", "XS"), ("EBC", "Encore Beach Club"),
+                          ("Encore Dayclub", "Encore Beach Club"), ("Encore Beach Club", "Encore Beach Club"),
+                          ("Encore Beach Club At Night", "Encore Beach Club At Night"),
+                          ("EBC At Night", "Encore Beach Club At Night"),
+                          ("LIV Nightclub", "LIV"), ("LIV", "LIV"), ("LIV Beach", "LIV Beach"),
+                          ("LIV Dayclub", "LIV Beach")):
+            clean, err = pw.validate_website(payload(venue=raw, city=""))
+            self.assertIsNone(err, raw)
+            self.assertEqual(clean["venue"], want, raw)
+            self.assertFalse(pw.is_notify_only("Las Vegas", want), raw)
+
+    def test_inserted_for_booking_not_notify_only(self):
+        for v in URVENUE:
+            i = intake()
+            with mock.patch.object(gmail_client, "send_once", return_value=True), \
+                 mock.patch.object(pw, "send_branded") as sb, \
+                 mock.patch.object(pw, "_delivered", return_value=False), \
+                 mock.patch.object(pw, "_mark_delivered"), \
+                 mock.patch.object(pw, "notify_team_website"):
+                self.assertEqual(pw.accept_website(i, payload(venue=v, ref="pm-u" + v[:4])), (200, "queued"), v)
+            i.service().users().messages().insert.assert_called_once()
+            sb.assert_not_called()
+
+    def test_canonical_rules_names(self):
+        from config import rules
+        for raw, want in (("LIV", "LIV Nightclub"), ("XS", "XS Nightclub"), ("LIV Beach", "LIV Beach"),
+                          ("Encore Beach Club", "Encore Beach Club"),
+                          ("Encore Beach Club At Night", "Encore Beach Club At Night")):
+            self.assertEqual(rules.normalize_venue_name(raw), want)
+            self.assertTrue(rules.is_urvenue(want))
+            self.assertTrue(rules.is_known_vegas_venue(want))
+            self.assertFalse(rules.is_manual_venue(want))
+        self.assertFalse(rules.is_urvenue("ZOUK"))
+        self.assertTrue(rules.is_nightclub("LIV Nightclub") and rules.is_nightclub("XS Nightclub"))
+        self.assertFalse(rules.is_nightclub("LIV Beach"))
 
 
 class ExistingVenuesUnchanged(unittest.TestCase):

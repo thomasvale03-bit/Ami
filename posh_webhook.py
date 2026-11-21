@@ -714,29 +714,24 @@ WEBSITE_MAX_BODY = 16 * 1024
 WEBSITE_VENUES = {
     "Las Vegas": {"OMNIA", "Hakkasan", "Marquee", "TAO", "JEWEL", "AYU", "Drai's After Hours",
                   "Marquee Dayclub", "TAO Beach Dayclub", "OMNIA Dayclub", "Liquid Pool Lounge",
-                  "Palm Tree Beach Club", "LAVO Party Brunch"},
+                  "Palm Tree Beach Club", "LAVO Party Brunch",
+                  # urvenue.me venues, booked by the worker (Thomas, Nov 21 2026)
+                  "LIV", "LIV Beach", "XS", "Encore Beach Club", "Encore Beach Club At Night"},
     "Scottsdale": {"Almost Famous", "Riot House", "Cake", "El Hefe", "Maya Day Club", "Maya Night Club"},
 }
 # Notify-only website venues (Thomas, Nov 14 2026): accepted by intake, but the
 # only action is one branded team@ email. No Gmail intake insert (so no parse,
 # booking job, OMNIA/closed-night fallback, Marquee Dayclub add or guest email).
+# Nov 21 2026: LIV, LIV Beach, XS and Encore moved to WEBSITE_VENUES (booked on
+# urvenue.me by the worker); ZOUK and Ghostbar stay notify-only.
 WEBSITE_NOTIFY_ONLY = {
-    "Las Vegas": {"ZOUK", "Ghostbar", "XS", "Encore Beach Club", "LIV", "LIV Beach"},
+    "Las Vegas": {"ZOUK", "Ghostbar"},
 }
 WEBSITE_NOTIFY_ONLY_ALIASES = (
     ("zouk nightclub", "Las Vegas", "ZOUK"),
     ("zouk", "Las Vegas", "ZOUK"),
     ("ghostbar", "Las Vegas", "Ghostbar"),
     ("ghost bar", "Las Vegas", "Ghostbar"),
-    ("xs nightclub", "Las Vegas", "XS"),
-    ("xs", "Las Vegas", "XS"),
-    ("encore beach club", "Las Vegas", "Encore Beach Club"),
-    ("encore beach", "Las Vegas", "Encore Beach Club"),
-    ("ebc", "Las Vegas", "Encore Beach Club"),
-    ("liv beach", "Las Vegas", "LIV Beach"),
-    ("liv nightclub", "Las Vegas", "LIV"),
-    ("liv las vegas", "Las Vegas", "LIV"),
-    ("liv", "Las Vegas", "LIV"),
 )
 
 
@@ -805,6 +800,23 @@ WEBSITE_VENUE_ALIASES = (
     ("palm tree beach", "Las Vegas", "Palm Tree Beach Club"),
     ("lavo party brunch", "Las Vegas", "LAVO Party Brunch"),
     ("lavo", "Las Vegas", "LAVO Party Brunch"),
+    ("encore beach club at night", "Las Vegas", "Encore Beach Club At Night"),
+    ("encore beach club night", "Las Vegas", "Encore Beach Club At Night"),
+    ("ebc at night", "Las Vegas", "Encore Beach Club At Night"),
+    ("encore at night", "Las Vegas", "Encore Beach Club At Night"),
+    ("encore nightclub", "Las Vegas", "Encore Beach Club At Night"),
+    ("encore beach club", "Las Vegas", "Encore Beach Club"),
+    ("encore dayclub", "Las Vegas", "Encore Beach Club"),
+    ("encore beach", "Las Vegas", "Encore Beach Club"),
+    ("encore", "Las Vegas", "Encore Beach Club"),
+    ("ebc", "Las Vegas", "Encore Beach Club"),
+    ("liv beach", "Las Vegas", "LIV Beach"),
+    ("liv dayclub", "Las Vegas", "LIV Beach"),
+    ("liv nightclub", "Las Vegas", "LIV"),
+    ("liv las vegas", "Las Vegas", "LIV"),
+    ("liv", "Las Vegas", "LIV"),
+    ("xs nightclub", "Las Vegas", "XS"),
+    ("xs", "Las Vegas", "XS"),
     ("almost famous", "Scottsdale", "Almost Famous"),
     ("riot house", "Scottsdale", "Riot House"),
     ("cake nightclub", "Scottsdale", "Cake"),
