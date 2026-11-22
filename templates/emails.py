@@ -2,6 +2,10 @@ from config import rules
 """Confirmation email templates, verbatim from the approved Playmaker wording."""
 
 
+# Thomas (Nov 21 2026): every guest confirmation states this near the booking details.
+CAPACITY_LINE = "All guest list spots are subject to capacity."
+
+
 def cutoff_sentence(female_cutoff=None, male_cutoff=None, single_cutoff=None,
                      first_300_male=False, cutoff_passed=False):
     if cutoff_passed and single_cutoff:
@@ -105,6 +109,7 @@ def consolidated_confirmation(first_name, guest_email, date_label, registrations
         ]
         if not registrations:
             parts.append("Please bring a current, valid government-issued photo ID. All guests must be 21+.")
+    parts.append(CAPACITY_LINE)
     parts += [
         "Guest-list admission is subject to each venue’s posted rules, arrival requirements, "
         "dress code, and capacity.",
@@ -258,6 +263,7 @@ def guest_signup_links_email(first_name, nights, promoter_url, drais=None):
     if drais:
         parts.append("Drai’s After Hours — no link needed, just show this at the door:\n\n"
                      + drais_guestlist(drais))
+    parts.append(CAPACITY_LINE)
     parts += [
         "Arrive early and bring a valid, government-issued 21+ photo ID. Guest-list "
         "admission is subject to each venue’s rules, dress code, and capacity.",
@@ -289,6 +295,7 @@ def guest_confirmation(first_name, nights, drais=None):
         parts.append(line)
     if drais:
         parts.append("Drai’s After Hours — just show this at the door:\n\n" + drais_guestlist(drais))
+    parts.append(CAPACITY_LINE)
     if nights:  # TAO venues issue passes through their app; Drai's-only has no wallet
         parts.append(
             "To access your passes:\n"
