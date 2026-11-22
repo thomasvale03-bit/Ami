@@ -22,3 +22,10 @@ def _no_flag_alert_threads(monkeypatch):
     sent = []
     monkeypatch.setattr(queue_service, "_dispatch_alert", lambda s, ref, now: sent.append(ref))
     return sent
+
+
+@pytest.fixture(autouse=True)
+def _no_real_night_rules(tmp_path, monkeypatch):
+    """Never read Tom's real LIV / XS night-rules files in tests."""
+    monkeypatch.setenv("LIV_NIGHT_RULES", str(tmp_path / "no-liv-rules.json"))
+    monkeypatch.setenv("XS_NIGHT_RULES", str(tmp_path / "no-xs-rules.json"))
