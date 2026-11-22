@@ -1008,6 +1008,12 @@ class Worker:
         party = self._night_party(request, night)
         guest = {**request, "female_count": party["female_count"], "male_count": party["male_count"]}
         shot = self._shot_path(ref, venue, night, "rehearsal" if rehearse else "confirmation")
+        import liv_rules
+        if liv_rules.is_no_list(liv_rules.for_night(venue, night), party["female_count"], party["male_count"]):
+            # Tom's night rules say "no list" (e.g. XS Calvin Harris): closed night,
+            # same as urvenue's "no items available" popup.
+            raise Stop("retry", f"{venue} {night}: no guest list that night per Tom's night rules; nothing submitted",
+                       kind="closed")
         if not urvenue.has_password() and os.environ.get("URVENUE_ALLOW_SESSION_ONLY", "").lower() != "true":
             raise Stop("retry", f"{venue} {night}: urvenue login not configured (URVENUE_PASSWORD missing "
                        "in the worker env); nothing submitted", kind="login")

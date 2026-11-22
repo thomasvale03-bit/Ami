@@ -4,6 +4,7 @@ Same wording/subjects AMYI used for queue jobs in November 2026
 ("You're on the Playmaker Entertainment guest list for <date>" to the guest,
 "Signed up: <name> — <date>" to team@). Pure functions: no sending here.
 """
+import re
 from datetime import date
 
 from config import rules
@@ -14,6 +15,12 @@ from templates import html_emails
 TEAM_TO = rules.PLAYMAKER_EMAIL
 # Never route guest-list mail to these (Thomas, Nov 8 2026: no Jarvis).
 BLOCKED_RECIPIENTS = frozenset({"infojarvis@mail.grokbot.com"})
+
+
+# Thomas (Nov 21 2026): guest emails never promise line-jumping of any kind.
+LINE_PRIORITY_RE = re.compile(r"skip(?:ping)?[\s-]+(?:the[\s-]+)?(?:line|queue)|line[\s-]+priority"
+                              r"|priority[\s-]+(?:entry|line|access)|(?:front|jump|bypass)[\s-]+(?:of[\s-]+)?the[\s-]+line",
+                              re.I)
 
 
 def _long(iso):
@@ -236,16 +243,50 @@ def _wynn_steps(email=None):
     return steps
 
 
-def wynn_note(bookings, email=None):
-    """Plain-text Wynn Resorts app steps for XS / Encore nights."""
+XS_VENUES = ("XS Nightclub",)
+
+
+def xs_terms(bookings, rules=None):
+    """[[label, line, ...]] per XS night with terms on Tom's night rules file
+    (never guessed: a night with no entry shows nothing)."""
+    import liv_rules
+    xs = [b for b in _sorted(bookings) if is_urvenue(b) and b.get("venue") in XS_VENUES]
+    if not xs:
+        return []
+    rules = liv_rules.load() if rules is None else rules
+    out = []
+    for b in xs:
+        rule = liv_rules.for_night(b["venue"], b["date"], rules)
+        if not liv_rules.has_terms(rule):
+            continue
+        event = rule.get("event") or (b.get("event") or "").strip()
+        lines = [f"XS {_liv_day(b['date'])}" + (f" - {event}" if event else "")]
+        if rule.get("women"):
+            lines.append(f"F - {rule['women']}")
+        if rule.get("men"):
+            lines.append(f"M - {rule['men']}")
+        if rule.get("cutoff"):
+            lines.append(f"Guestlist til {rule['cutoff']}")
+        if rule.get("drinks") and rule["drinks"].strip().upper() not in ("N/A", "NA", "NONE", "-"):
+            lines.append(f"Drinks - {rule['drinks']}")
+        if rule.get("notes"):
+            lines.append(rule["notes"])
+        out.append(lines)
+    return out
+
+
+def wynn_note(bookings, email=None, rules=None):
+    """Plain-text Wynn Resorts app steps for XS / Encore nights (+ XS terms)."""
     venues = [b["venue"] for b in _sorted(bookings) if is_wynn(b)]
     if not venues:
         return ""
     steps = "\n".join(f"{i}. {head} {body}" for i, (head, body) in enumerate(_wynn_steps(email), 1))
-    return WYNN_INTRO.format(names=_names(venues)) + "\n" + steps
+    terms = xs_terms(bookings, rules)
+    extra = ("\n\nXS guest list terms:\n" + "\n\n".join("\n".join(t) for t in terms)) if terms else ""
+    return WYNN_INTRO.format(names=_names(venues)) + "\n" + steps + extra
 
 
-def _wynn_html(bookings, email=None):
+def _wynn_html(bookings, email=None, rules=None):
     venues = [b["venue"] for b in _sorted(bookings) if is_wynn(b)]
     row = html_emails._read("partials/wynn_steps.html")
     steps = []
@@ -260,9 +301,31 @@ def _wynn_html(bookings, email=None):
             f'font-size:15px;line-height:23px;color:#E6E6E6;"><strong style="color:#FFFFFF;">{_html.escape(head)}</strong>'
             f'<br>{_html.escape(body)}</td>\n'
             '        </tr>')
-    return (row.replace("{{heading}}", "Your Wynn Resorts app reservation")
+    html = (row.replace("{{heading}}", "Your Wynn Resorts app reservation")
                .replace("{{intro}}", _html.escape(WYNN_INTRO.format(names=_names(venues))))
                .replace("{{steps}}", "\n".join(steps)))
+    return html + _xs_terms_html(xs_terms(bookings, rules))
+
+
+def _xs_terms_html(terms):
+    if not terms:
+        return ""
+    e = _html.escape
+    p = ('<p style="margin:0 0 4px 0;font-family:\'Inter\',Helvetica,Arial,sans-serif;font-size:15px;'
+         'line-height:23px;color:#E6E6E6;">{}</p>')
+    parts = ['<p style="margin:0 0 6px 0;font-family:\'Inter\',Helvetica,Arial,sans-serif;font-size:13px;'
+             'letter-spacing:2px;color:#D4AF37;font-weight:700;">XS GUEST LIST TERMS</p>']
+    for block in terms:
+        parts.append('<p style="margin:10px 0 2px 0;font-family:\'Inter\',Helvetica,Arial,sans-serif;'
+                     f'font-size:15px;color:#FFFFFF;"><strong>{e(block[0])}</strong></p>')
+        parts += [p.format(e(x)) for x in block[1:]]
+    return ('    <!-- XS guest list terms (Tom\'s night rules) -->\n'
+            '    <tr><td bgcolor="#0d0d0d" class="px bg-card" style="background-color:#0d0d0d;background-image:'
+            'linear-gradient(#0d0d0d,#0d0d0d);padding:12px 40px 0 40px;">\n'
+            '      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+            'style="background-color:#141414;border-left:3px solid #D4AF37;border-radius:6px;">'
+            '<tr><td style="padding:20px 22px;">\n      ' + "\n      ".join(parts)
+            + '\n      </td></tr></table>\n    </td></tr>\n\n')
 
 
 def _urvenue_html(page, bookings, email=None, rules=None):
@@ -271,7 +334,7 @@ def _urvenue_html(page, bookings, email=None, rules=None):
     email, otherwise they are added after them."""
     parts = []
     if any(is_wynn(b) for b in bookings):
-        parts.append(_wynn_html(bookings, email))
+        parts.append(_wynn_html(bookings, email, rules))
     liv = _liv_html(bookings, rules)
     if liv:
         parts.append(liv)
@@ -318,7 +381,7 @@ def guest_email(request, bookings, update=False, pending=None):
     label = date_label(request["start_date"], request["end_date"])
     notice = html_emails.FALLBACK_NOTICE
     rules = None
-    if any(is_liv(b) for b in bookings):
+    if any(is_liv(b) or b.get("venue") in XS_VENUES for b in bookings):
         import liv_rules
         rules = liv_rules.load()  # read at send time: Tom edits it weekly
     liv_text = urvenue_note(bookings, rules)
@@ -338,7 +401,7 @@ def guest_email(request, bookings, update=False, pending=None):
         ((UPDATE_NOTE + "\n\n") if update else "")
         + "You're on the Playmaker Entertainment guest list. Here's what you're set for:\n" + "\n".join(lines)
         + (("\n\n" + waiting) if waiting else "")
-        + (("\n\n" + wynn_note(bookings, request["email"])) if wynn_note(bookings) else "")
+        + (("\n\n" + wynn_note(bookings, request["email"], rules)) if wynn_note(bookings) else "")
         + (("\n\n" + liv_text) if liv_text else ""),
         "Arrive early and bring a valid, government-issued 21+ photo ID. Guest-list admission is "
         "subject to each venue's rules, dress code, and capacity.",
@@ -356,6 +419,9 @@ def guest_email(request, bookings, update=False, pending=None):
     subject = guest_subject(request["start_date"], request["end_date"])
     if update:
         subject = update_subject(subject, bookings)
+    for body in (text, html):
+        if LINE_PRIORITY_RE.search(body):
+            raise ValueError("Guest confirmation must not promise line-jumping")
     return {"to": request["email"], "subject": subject, "text": text, "html": html,
             "dedupe_query": f'to:{request["email"]} subject:"{subject}"'}
 
@@ -460,8 +526,7 @@ def _drais_html(first, nights, party):
     page = page[:a] + html_emails._read("partials/drais_details.html") + page[b:]
     page = (page.replace("https://booketing.com/microsite/pme/", "https://speakeasygo.com/ms/playmaker")
                 .replace("Book a VIP Table", "Tickets &amp; VIP Tables")
-                .replace("Follow the steps to grab your passes before you head out.", "Arrive before 3 AM.")
-                .replace("Skip the line and lock in your own table", "Lock in your own table"))
+                .replace("Follow the steps to grab your passes before you head out.", "Arrive before 3 AM."))
     return page
 
 
@@ -472,12 +537,11 @@ def drais_guest_email(request, bookings):
     text = (f"Hi {first},\n\nYou're on the list for:\n" + "\n".join(f"{d} - {v}" for d, v, _ in nights)
             + "\n\n" + DRAIS_TEXT + "\n\nTickets & VIP Tables: https://speakeasygo.com/ms/playmaker"
             "\n\nQuestions? Email info@playmakerentertainment.com\n\nPlaymaker Entertainment")
-    text = text.replace("Skip the line and lock in your own table", "Lock in your own table")
     html = _drais_html(first, nights, html_emails.party_size(request["female_count"], request["male_count"]))
     for body in (html, text):
         low = body.lower()
-        if "skip the line" in low or "discount" in low:
-            raise ValueError("Drai's email must not promise skip-the-line or discounts")
+        if LINE_PRIORITY_RE.search(body) or "discount" in low:
+            raise ValueError("Drai's email must not promise line-jumping or discounts")
     subject = drais_guest_subject(request["start_date"], request["end_date"])
     return {"to": request["email"], "subject": subject, "text": text, "html": html,
             "dedupe_query": f'to:{request["email"]} subject:"{subject}"'}
@@ -621,8 +685,8 @@ def hold_email(ref, raw, request, held, update=False, booked=False):
     subject = subject.replace(",", "").replace(";", "")
     for body in (text, html):
         low = body.lower()
-        if "skip the line" in low or "jarvis" in low:
-            raise ValueError("Hold email must not promise skip-the-line or mention Jarvis")
+        if LINE_PRIORITY_RE.search(body) or "jarvis" in low:
+            raise ValueError("Hold email must not promise line-jumping or mention Jarvis")
         if brand == "guestlistgo" and "playmaker" in low:
             raise ValueError("GuestlistGo hold email must not mention Playmaker")
     payload = {"to": request["email"], "subject": subject, "text": text, "html": html,
