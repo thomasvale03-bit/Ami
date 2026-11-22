@@ -5,6 +5,8 @@ import html as _h
 import os
 from datetime import date
 
+from templates.emails import CAPACITY_LINE
+
 DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email")
 VIP_MIN_PARTY = 1  # VIP block on every confirmation (approved 2026-10-11)
 
@@ -21,6 +23,15 @@ def _fill(tpl, **kw):
     for k, v in kw.items():
         tpl = tpl.replace("{{%s}}" % k, v)
     return tpl
+
+
+def capacity_note_html():
+    """Short capacity line for confirmation HTML (automatic and hand-sent wraps)."""
+    return (
+        '<p style="margin:12px 0 0 0;font-family:\'Inter\',Helvetica,Arial,sans-serif;'
+        'font-size:14px;line-height:22px;color:#BDBDBD;">'
+        f"{_h.escape(CAPACITY_LINE)}</p>"
+    )
 
 
 def _short_date(iso):
@@ -164,6 +175,8 @@ Doors open: 10:15 PM
 Ladies:     FREE before 12:00 AM
 Gentlemen:  FREE before 12:00 AM
 
+All guest list spots are subject to capacity.
+
 HOW TO GET IN
 1) Let them know you're on THOMAS VALE'S GUEST LIST with PLAYMAKER ENTERTAINMENT.
 2) Check in, head inside, and enjoy your night.
@@ -260,7 +273,7 @@ def render_riot_house_text(first_name, nights):
     fn = first_name or "there"
     lines = [f"{d} - {v}: {hl}" for d, v, hl in _riot_nights(nights)]
     return (f"Hi {fn},\n\nYou're on the Playmaker Entertainment guest list for:\n" + "\n".join(lines) +
-            "\n\n" + RIOT_DETAILS_TEXT + "\n\nHow to get in: no app or pass needed. Just check in at the door under your name.\n\n"
+            "\n\n" + CAPACITY_LINE + "\n\n" + RIOT_DETAILS_TEXT + "\n\nHow to get in: no app or pass needed. Just check in at the door under your name.\n\n"
             "Arrive early and bring a valid, government-issued 21+ photo ID. Guest-list admission is subject to "
             "the venue's rules, dress code, and capacity.\n\nQuestions? Email info@playmakerentertainment.com\n\nPlaymaker Entertainment")
 
@@ -305,6 +318,7 @@ def render_scottsdale_venue_text(first_name, venue_name, nights):
     addr = "4425 N Saddlebag Trail #101, Scottsdale, AZ 85251" if "el hefe" in venue_name.lower() else "Old Town Scottsdale, AZ"
     rows = [f"{n if isinstance(n, str) else n[0]} - {venue_name}: {venue_name} | Guest List \u00b7 Old Town Scottsdale" for n in nights]
     return (f"Hi {fn},\n\nYou're on the Playmaker Entertainment guest list for:\n" + "\n".join(rows) +
+            "\n\n" + CAPACITY_LINE +
             f"\n\nThomas Vale's GUESTLIST\nPlaymaker Entertainment\n\n{venue_name.upper()}\n{addr}\n\nLadies Free: before 12am\n\n"
             "Tag US on IG so We can repost your story\n@playmaker.entertainment: https://www.instagram.com/playmaker.entertainment/\n\n"
             "How to get in: no app or pass needed. Just check in at the door under your name.\n\n"

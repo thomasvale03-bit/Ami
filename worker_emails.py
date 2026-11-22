@@ -11,6 +11,7 @@ from config import rules
 import html as _html
 
 from templates import html_emails
+from templates.emails import CAPACITY_LINE
 
 TEAM_TO = rules.PLAYMAKER_EMAIL
 # Never route guest-list mail to these (Thomas, Nov 8 2026: no Jarvis).
@@ -400,6 +401,7 @@ def guest_email(request, bookings, update=False, pending=None):
         f"Hi {first},",
         ((UPDATE_NOTE + "\n\n") if update else "")
         + "You're on the Playmaker Entertainment guest list. Here's what you're set for:\n" + "\n".join(lines)
+        + "\n\n" + CAPACITY_LINE
         + (("\n\n" + waiting) if waiting else "")
         + (("\n\n" + wynn_note(bookings, request["email"], rules)) if wynn_note(bookings) else "")
         + (("\n\n" + liv_text) if liv_text else ""),
@@ -535,6 +537,7 @@ def drais_guest_email(request, bookings):
     nights = [(html_emails._short_date(b["date"]), DRAIS_VENUE, None)
               for b in sorted(bookings, key=lambda b: b["date"])]
     text = (f"Hi {first},\n\nYou're on the list for:\n" + "\n".join(f"{d} - {v}" for d, v, _ in nights)
+            + "\n\n" + CAPACITY_LINE
             + "\n\n" + DRAIS_TEXT + "\n\nTickets & VIP Tables: https://speakeasygo.com/ms/playmaker"
             "\n\nQuestions? Email info@playmakerentertainment.com\n\nPlaymaker Entertainment")
     html = _drais_html(first, nights, html_emails.party_size(request["female_count"], request["male_count"]))
@@ -663,6 +666,7 @@ def hold_email(ref, raw, request, held, update=False, booked=False):
                  "There's nothing else you need to do right now.")
     if booked:
         paras.append("Any nights that already went through stay active, and your confirmation email will list everything.")
+        paras.append(CAPACITY_LINE)
     nye = nye_note([n for _, n, _ in held])
     if nye:
         paras.append(nye)
