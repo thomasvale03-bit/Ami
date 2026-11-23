@@ -147,11 +147,14 @@ def venue_operates_that_night(venue, date_obj):
     return False
 
 
-def fallback_venues_for(date_obj, previous_night_venue=None, skip=None):
+def fallback_venues_for(date_obj, previous_night_venue=None, skip=None, today=None):
     """Ordered fallbacks when the requested nightclub cannot be booked:
     OMNIA first (top priority), then that weekday's DEFAULT_ROUTING, then
     JEWEL (through Nov 21, 2026), then the extra backup, then Hakkasan or
-    Marquee. Never the same club two nights running."""
+    Marquee, then ANY other TAO nightclub (last resort, so a closed night
+    never dead-ends while some club has an open list). Never the same club
+    two nights running (moved to the very end). With `today`, OMNIA is
+    skipped on a same-day Friday/Saturday (its list is closed)."""
     route = default_route_for_date(date_obj)
     fb = route["fallback"] if isinstance(route["fallback"], list) else [route["fallback"]]
     day = date_obj.strftime("%A")
@@ -161,7 +164,11 @@ def fallback_venues_for(date_obj, previous_night_venue=None, skip=None):
     if day not in rules.NO_EXTRA_BACKUP_DAYS:
         ordered += list(rules.EXTRA_BACKUP_NIGHTCLUBS)
     ordered += ["Hakkasan Nightclub", "Marquee Nightclub"]
+    # Last resort (Thomas, Nov 22 2026): any other TAO nightclub open that night.
+    ordered += [v for v in rules.NIGHTCLUBS if v not in ordered]
     skip = set(skip or ())
+    if today is not None and omnia_closed_for_same_day(date_obj, today):
+        skip.add("OMNIA Nightclub")
     seen, result = set(), []
     for v in ordered:
         if v == "best_available" or v in rules.PAUSED_VENUES or v in skip or v in seen:

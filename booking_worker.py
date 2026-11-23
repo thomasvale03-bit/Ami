@@ -29,6 +29,7 @@ import argparse
 import stall_watchdog
 import hashlib
 import json
+import re
 import logging
 import os
 import sys
@@ -50,6 +51,14 @@ DEFAULT_BASE_URL = "https://amy-production-1616.up.railway.app"
 # sat in page.goto for 74 minutes). About six minutes is enough for a
 # normal booking plus a couple of 60s page-load retries.
 JOB_TIME_CAP_SECONDS = 360
+
+
+# Pre-submit TAO stop reasons that mean the list has no inventory for this
+# party (closed / sold out), so the night falls back like a closed list.
+INVENTORY_GONE = re.compile(
+    r"(guest list quantity \d+ is not available|quantity \d+ is not offered|option is not shown as free"
+    r"|pass link is no longer on the playmaker promoter page)", re.I)
+UNPOSTED_CLOSED_DAYS = int(os.environ.get("AMY_UNPOSTED_CLOSED_DAYS", "7") or 7)
 
 
 class Stop(Exception):
@@ -864,10 +873,15 @@ class Worker:
                 # LIV / XS closed: DEFAULT_ROUTING fallback (OMNIA first).
                 return self._fallback_nightclub(ref, venue, night, night_date, request, rehearse, token,
                                                 booked, Stop("retry", raised.reason, kind="unavailable"))
+        from rules_engine import omnia_closed_for_same_day
         if rules.venue_open_on(venue, night_date) is False:
             if venue not in rules.NIGHTCLUBS:
                 return None
             stop = Stop("retry", f"{venue} {night}: does not operate that night; nothing submitted",
+                        kind="unavailable")
+        elif venue == "OMNIA Nightclub" and omnia_closed_for_same_day(night_date, self._today()):
+            # Owner rule: OMNIA's Fri/Sat list is closed for same-day sign-ups.
+            stop = Stop("retry", f"{venue} {night}: same-day Friday/Saturday list is closed; nothing submitted",
                         kind="unavailable")
         else:
             try:
@@ -884,7 +898,8 @@ class Worker:
                 raise Stop("retry", stop.reason, kind="access_code", venue=venue, night=night,
                            hold_kind="access_code")
             raise stop
-        if stop.extra.get("kind") == "unposted" and venue_operates_that_night(venue, night_date):
+        if (stop.extra.get("kind") == "unposted" and venue_operates_that_night(venue, night_date)
+                and not self._unposted_means_closed(venue, night_date)):
             raise Stop("retry", f"{venue} {night}: guest list not posted on TAO yet; nothing submitted",
                        kind="unposted")
         return self._fallback_nightclub(ref, venue, night, night_date, request, rehearse, token, booked, stop)
@@ -896,7 +911,16 @@ class Worker:
         from rules_engine import fallback_venues_for
         prev = self._previous_nightclub(night, booked)
         last_stop = stop
-        for alt in fallback_venues_for(night_date, prev, skip={venue}):
+        if not rehearse:
+            # Never book the same guest twice for one night: another job of
+            # theirs may already hold a nightclub booking (requested or
+            # fallback) for this date.
+            other = self._guest_night_elsewhere(ref, night)
+            if other:
+                raise Stop("manual", f"{venue} {night}: closed, but this guest already has {other[1]} booked "
+                           f"that night (job {other[0]}, order {other[2]}); no second fallback booking",
+                           kind="already_booked")
+        for alt in fallback_venues_for(night_date, prev, skip={venue}, today=self._today()):
             alt_key = night_key(ref, alt, night)
             alt_entry = self.ledger.get(alt_key) or {}
             saved = alt_entry.get("record") or {}
@@ -926,6 +950,65 @@ class Worker:
                    "DEFAULT_ROUTING fallbacks also not bookable yet; nothing submitted",
                    venue=venue, night=night,
                    hold_kind="access_code" if stop.extra.get("kind") == "access_code" else "closed")
+
+    def _today(self):
+        return datetime.fromtimestamp(self.now(), PHOENIX).date()
+
+    def _unposted_means_closed(self, venue, night_date):
+        """A requested TAO nightclub whose list is missing counts as CLOSED
+        (fall back) when the night is close: tonight, or within
+        UNPOSTED_CLOSED_DAYS while other TAO nightclubs already have that
+        night's list up (TAO posts nights weeks ahead; a gap that late means
+        the venue is dark, e.g. OMNIA Thanksgiving 2026). Far-future nights
+        stay a hold until their list is posted."""
+        from config import rules
+        days_out = (night_date - self._today()).days
+        if days_out < 0:
+            return False
+        if days_out == 0:
+            return True
+        if days_out > UNPOSTED_CLOSED_DAYS:
+            return False
+        for other in rules.NIGHTCLUBS:
+            if other == venue or other in rules.PAUSED_VENUES:
+                continue
+            try:
+                if self.tao.posted(other, night_date) is True:
+                    return True
+            except Exception:  # noqa: BLE001
+                log.warning("posted() lookup failed for %s %s", other, night_date)
+        return False
+
+    def _guest_night_elsewhere(self, ref, night):
+        """(job ref, venue, order id) when this guest (same email) already has a
+        verified nightclub booking on `night` in another queue job."""
+        from config import rules
+        email = ((getattr(self, "_job_raw", None) or {}).get("email") or "").strip().lower()
+        if not email:
+            return None
+        base = ref.split(":")[0]
+        for state in ("done", "retry", "manual", "submission_uncertain", "claimed", "queued"):
+            try:
+                code, body = self.api.jobs(state, 300)
+            except Exception:  # noqa: BLE001
+                continue
+            if code != 200:
+                continue
+            for other in (body or {}).get("jobs") or []:
+                if other.get("ref") in (ref, base):
+                    continue
+                oraw = other.get("raw") or {}
+                if (oraw.get("email") or "").strip().lower() != email:
+                    continue
+                meta = other.get("metadata") or {}
+                records = list((((meta.get("progress") or {}).get("bookings")) or {}).values())
+                records += list(((meta.get("evidence") or {}).get("bookings")) or [])
+                for rec in records:
+                    rec = rec or {}
+                    if (rec.get("verified") and rec.get("date") == night and rec.get("order_id")
+                            and rules.is_nightclub(rec.get("venue"))):
+                        return other.get("ref"), rec.get("venue"), rec.get("order_id")
+        return None
 
     def _shot_path(self, ref, venue, night, suffix):
         safe = "".join(c if c.isalnum() else "-" for c in venue)
@@ -989,7 +1072,12 @@ class Worker:
             raise Stop("manual", f"{venue} {night}: assisted mode is on; worker never hands off. Nothing submitted")
         if not result.get("verified") or not result.get("confirmation_id"):
             reason = result.get("reason", "could not be verified")
-            kind = "access_code" if "access code" in reason.lower() else None
+            low = reason.lower()
+            kind = "access_code" if "access code" in low else None
+            if kind is None and (INVENTORY_GONE.search(reason)):
+                # Pre-submit: the list has no room / no free option for this
+                # party (sold out). Same as a closed list -> fallback chain.
+                kind = "unavailable"
             raise Stop("manual", f"{venue} {night}: not submitted — {reason}", **({"kind": kind} if kind else {}))
         record = {"verified": True, "venue": venue, "date": night, "order_id": result["confirmation_id"], "party": party}
         meta = {"event": result.get("event") or listing.get("event"), "event_time": listing.get("event_time"),
