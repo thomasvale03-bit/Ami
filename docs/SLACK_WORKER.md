@@ -22,23 +22,27 @@ books, cancels or emails, and it does not change booking behaviour.
   re-post and transitions during a restart are still reported.
 
 
-## Daily report (11:00 PM MST, `#generalchat`)
-Once a day at 11:00 PM America/Phoenix, AMY Worker posts tonight's guest-list
+## Daily report (6:00 AM MST, `#generalchat`)
+Once a day at 6:00 AM America/Phoenix, AMY Worker posts last night's guest-list
 totals to `#generalchat` (`C0CJK07GMHV`, the workspace general channel;
 override with `SLACK_DAILY_REPORT_CHANNEL`). Booking updates stay in
 `#amy-bookings`. The report is built only from confirmed AMY bookings for
-tonight's Phoenix date (dayclubs included): each venue's signup (party)
-count and Girls/Guys (F/M), plus a unique-job Total. No names, holds, queue,
-last-24h, new sign-ups, check-ins, or pay figures.
+the previous Phoenix calendar date (the evening that just wrapped, dayclubs
+included): each venue's signup (party) count and Girls/Guys (F/M), plus a
+unique-job Total. At 6:00 AM on Monday it reports Sunday's lists, not
+Monday's upcoming night. No names, holds, queue, last-24h, new sign-ups,
+check-ins, or pay figures.
 
 It posts at most once per night. The last-posted night is saved on the
 volume (`SLACK_DAILY_REPORT_STATE`, default
 `/data/slack-worker/daily-report.json`). If that file is missing after a
 restart, a read of recent `#generalchat` history is a second guard (TEST —
-previews do not count). A missed 11:00 PM post may still go out until
-3:00 AM for that same evening's date; nothing posts before 11:00 PM.
-Older `last_posted_date` values from the retired 10 AM schedule are
-ignored. Jacob's persona does not run this report.
+previews do not count; official posts under the retired 11 PM title
+"Tonight's guest list" still count). A missed 6:00 AM post may still go
+out until 10:00 AM for that same evening's date; nothing posts before
+6:00 AM or at/after 10:00 AM. Older `last_posted_date` values from the
+retired 10 AM schedule are ignored. A night already posted at 11 PM is
+not posted again at 6 AM. Jacob's persona does not run this report.
 
 ## Answers (DM the bot or @mention it)
 Exact commands are answered directly: `status`, `state <name>`,

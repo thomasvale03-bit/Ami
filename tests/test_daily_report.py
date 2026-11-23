@@ -1,4 +1,4 @@
-"""Tonight guest-list report: confirmed bookings for tonight, no names or extras."""
+"""Last-night guest-list report: confirmed bookings for last night, no names or extras."""
 import json
 import os
 import tempfile
@@ -20,7 +20,13 @@ ELEVEN_PM_LATE = datetime(2026, 11, 20, 23, 30, tzinfo=PHX).timestamp()
 ONE_AM = datetime(2026, 11, 21, 1, 0, tzinfo=PHX).timestamp()
 TWO_AM = datetime(2026, 11, 21, 2, 59, tzinfo=PHX).timestamp()
 THREE_AM = datetime(2026, 11, 21, 3, 0, tzinfo=PHX).timestamp()
-SAT_ELEVEN_PM = datetime(2026, 11, 21, 23, 0, tzinfo=PHX).timestamp()
+FIVE_AM = datetime(2026, 11, 21, 5, 0, tzinfo=PHX).timestamp()
+SIX_AM = datetime(2026, 11, 21, 6, 0, tzinfo=PHX).timestamp()
+SIX_AM_LATE = datetime(2026, 11, 21, 6, 30, tzinfo=PHX).timestamp()
+NINE_AM_NEXT = datetime(2026, 11, 21, 9, 0, tzinfo=PHX).timestamp()
+NINE_59_AM = datetime(2026, 11, 21, 9, 59, tzinfo=PHX).timestamp()
+TEN_AM_NEXT = datetime(2026, 11, 21, 10, 0, tzinfo=PHX).timestamp()
+SAT_SIX_AM = datetime(2026, 11, 22, 6, 0, tzinfo=PHX).timestamp()
 
 
 def job(ref, state, name='Jessica Alba', venues=('Hakkasan Nightclub',), start='2026-11-20',
@@ -161,7 +167,7 @@ class RenderTest(unittest.TestCase):
     def test_render_matches_toms_numbers_style_with_no_names_holds_or_extras(self):
         text = dr.sanitize(dr.render(dr.build(self.jobs, {}, TEN_AM)))
         self.assertEqual(text, (
-            "*Tonight's guest list — Fri 11/20*\n"
+            "*Last night's guest list — Fri 11/20*\n"
             "\n"
             "Venue: Signups | Girls/Guys\n"
             "\n"
@@ -190,7 +196,7 @@ class RenderTest(unittest.TestCase):
     def test_empty_tonight_is_a_short_zero_total(self):
         text = dr.sanitize(dr.render(dr.build([], {}, TEN_AM)))
         self.assertEqual(text, (
-            "*Tonight's guest list — Fri 11/20*\n"
+            "*Last night's guest list — Fri 11/20*\n"
             "\n"
             "Venue: Signups | Girls/Guys\n"
             "\n"
@@ -201,11 +207,11 @@ class RenderTest(unittest.TestCase):
 
     def test_render_test_prefix_does_not_look_like_the_scheduled_post(self):
         text = dr.sanitize(dr.render(dr.build(self.jobs, {}, TEN_AM), test=True))
-        self.assertTrue(text.startswith("TEST — *Tonight's guest list — Fri 11/20*"))
-        self.assertNotEqual(text.split('\n', 1)[0], "*Tonight's guest list — Fri 11/20*")
+        self.assertTrue(text.startswith("TEST — *Last night's guest list — Fri 11/20*"))
+        self.assertNotEqual(text.split('\n', 1)[0], "*Last night's guest list — Fri 11/20*")
 
     def test_sanitize_strips_dollar_amounts_and_emails(self):
-        dirty = "*Tonight's guest list — Fri 11/20*\nEstefany B. $86 estimated\nemail me at a@b.com"
+        dirty = "*Last night's guest list — Fri 11/20*\nEstefany B. $86 estimated\nemail me at a@b.com"
         out = dr.sanitize(dirty)
         self.assertIn('[amount]', out)
         self.assertNotIn('$86', out)
@@ -218,7 +224,7 @@ class ScheduleAndDedupeTest(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.dir.name, 'daily-report.json')
         self.posted = []
-        self.now = [ELEVEN_PM]
+        self.now = [SIX_AM]
         self.jobs = [job('done-tao', 'done', name='Estefany Barraza',
                          venues=('TAO Nightclub',), start='2026-11-20', female=2, male=0,
                          updated=TEN_AM - 60, bookings=[booked('TAO Nightclub', '2026-11-20')])]
@@ -231,49 +237,59 @@ class ScheduleAndDedupeTest(unittest.TestCase):
                              state_path=self.path, clock=lambda: self.now[0],
                              channel=channel, history_client=history_client)
 
-    def test_due_only_from_11pm_through_3am_for_that_night(self):
-        self.assertIsNone(dr.report_night(NINE_AM))
-        self.assertIsNone(dr.report_night(TEN_AM))
+    def test_due_only_from_6am_through_10am_for_last_night(self):
+        # Retired 11 PM–3 AM window no longer posts.
+        self.assertIsNone(dr.report_night(ELEVEN_PM))
+        self.assertIsNone(dr.report_night(ELEVEN_PM_LATE))
+        self.assertIsNone(dr.report_night(ONE_AM))
+        self.assertIsNone(dr.report_night(TWO_AM))
+        self.assertIsNone(dr.report_night(THREE_AM))
+        self.assertIsNone(dr.report_night(FIVE_AM))
         self.assertIsNone(dr.report_night(THREE_PM))
         self.assertIsNone(dr.report_night(NINE_PM))
-        self.assertEqual(dr.report_night(ELEVEN_PM).isoformat(), '2026-11-20')
-        self.assertEqual(dr.report_night(ELEVEN_PM_LATE).isoformat(), '2026-11-20')
-        self.assertEqual(dr.report_night(ONE_AM).isoformat(), '2026-11-20')
-        self.assertEqual(dr.report_night(TWO_AM).isoformat(), '2026-11-20')
-        self.assertIsNone(dr.report_night(THREE_AM))
-        self.assertEqual(dr.report_night(SAT_ELEVEN_PM).isoformat(), '2026-11-21')
+        self.assertIsNone(dr.report_night(TEN_AM_NEXT))
+        # 6:00 AM–9:59 AM reports the previous calendar evening.
+        self.assertEqual(dr.report_night(SIX_AM).isoformat(), '2026-11-20')
+        self.assertEqual(dr.report_night(SIX_AM_LATE).isoformat(), '2026-11-20')
+        self.assertEqual(dr.report_night(NINE_AM_NEXT).isoformat(), '2026-11-20')
+        self.assertEqual(dr.report_night(NINE_59_AM).isoformat(), '2026-11-20')
+        # 9:00 AM on Nov 20 reports Nov 19; 10:00 AM is already closed.
+        self.assertEqual(dr.report_night(NINE_AM).isoformat(), '2026-11-19')
+        self.assertIsNone(dr.report_night(TEN_AM))
+        self.assertEqual(dr.report_night(SAT_SIX_AM).isoformat(), '2026-11-21')
 
-        self.assertFalse(dr.due(NINE_PM, None))
+        self.assertFalse(dr.due(FIVE_AM, None))
+        self.assertFalse(dr.due(ELEVEN_PM, None))
         self.assertFalse(dr.due(TEN_AM, None))
-        self.assertTrue(dr.due(ELEVEN_PM, None))
-        self.assertTrue(dr.due(ONE_AM, None))
-        self.assertFalse(dr.due(ELEVEN_PM, '2026-11-20'))
-        self.assertFalse(dr.due(ONE_AM, '2026-11-20'))
-        self.assertTrue(dr.due(ELEVEN_PM, '2026-11-19'))
-        self.assertFalse(dr.due(THREE_AM, None))
-        self.assertTrue(dr.due(SAT_ELEVEN_PM, '2026-11-20'))
+        self.assertTrue(dr.due(SIX_AM, None))
+        self.assertTrue(dr.due(NINE_AM_NEXT, None))
+        self.assertFalse(dr.due(SIX_AM, '2026-11-20'))
+        self.assertFalse(dr.due(NINE_AM_NEXT, '2026-11-20'))
+        self.assertTrue(dr.due(SIX_AM, '2026-11-19'))
+        self.assertFalse(dr.due(TEN_AM_NEXT, None))
+        self.assertTrue(dr.due(SAT_SIX_AM, '2026-11-20'))
 
-    def test_old_10am_last_posted_date_does_not_block_11pm(self):
+    def test_old_10am_last_posted_date_does_not_block_6am(self):
         Path = __import__('pathlib').Path
         Path(self.path).write_text(json.dumps({'last_posted_date': '2026-11-20'}))
         text = self._reporter().tick()
         self.assertIsNotNone(text)
-        self.assertIn("*Tonight's guest list — Fri 11/20*", text)
+        self.assertIn("*Last night's guest list — Fri 11/20*", text)
         saved = json.loads(open(self.path).read())
         self.assertEqual(saved['last_posted_night'], '2026-11-20')
 
-    def test_tick_does_not_post_before_11pm(self):
-        for ts in (NINE_AM, TEN_AM, THREE_PM, NINE_PM):
+    def test_tick_does_not_post_outside_6am_window(self):
+        for ts in (ELEVEN_PM, ONE_AM, THREE_AM, FIVE_AM, TEN_AM, THREE_PM, NINE_PM, TEN_AM_NEXT):
             self.now[0] = ts
             self.assertIsNone(self._reporter().tick())
         self.assertEqual(self.posted, [])
         self.assertFalse(os.path.exists(self.path))
 
-    def test_tick_posts_once_at_11pm_and_saves_night(self):
+    def test_tick_posts_once_at_6am_and_saves_night(self):
         text = self._reporter().tick()
         self.assertEqual(len(self.posted), 1)
         self.assertEqual(text, self.posted[0])
-        self.assertIn("*Tonight's guest list — Fri 11/20*", text)
+        self.assertIn("*Last night's guest list — Fri 11/20*", text)
         self.assertIn('TAO: 1 | 2F/0M', text)
         self.assertIn('Total: 1 | 2F/0M', text)
         self.assertNotIn('Estefany', text)
@@ -283,35 +299,53 @@ class ScheduleAndDedupeTest(unittest.TestCase):
     def test_restart_same_night_does_not_double_post(self):
         r1 = self._reporter()
         r1.tick()
-        self.now[0] = ELEVEN_PM_LATE
+        self.now[0] = SIX_AM_LATE
         r2 = self._reporter()
         self.assertIsNone(r2.tick())
-        self.now[0] = ONE_AM
+        self.now[0] = NINE_AM_NEXT
         r3 = self._reporter()
         self.assertIsNone(r3.tick())
         self.assertEqual(len(self.posted), 1)
 
-    def test_missed_11pm_still_posts_until_3am_for_that_evening(self):
-        self.now[0] = ONE_AM
+    def test_missed_6am_still_posts_until_10am_for_that_evening(self):
+        self.now[0] = NINE_AM_NEXT
         text = self._reporter().tick()
         self.assertIsNotNone(text)
-        self.assertIn("*Tonight's guest list — Fri 11/20*", text)
+        self.assertIn("*Last night's guest list — Fri 11/20*", text)
         self.assertIn('TAO: 1 | 2F/0M', text)
         self.assertEqual(len(self.posted), 1)
         self.assertIsNone(self._reporter().tick())
         self.assertEqual(len(self.posted), 1)
 
-    def test_after_3am_missed_night_is_skipped(self):
-        self.now[0] = THREE_AM
+    def test_after_10am_missed_night_is_skipped(self):
+        self.now[0] = TEN_AM_NEXT
         self.assertIsNone(self._reporter().tick())
         self.assertEqual(self.posted, [])
         self.assertFalse(os.path.exists(self.path))
+
+    def test_prior_11pm_state_or_heading_blocks_same_night_at_6am(self):
+        Path = __import__('pathlib').Path
+        Path(self.path).write_text(json.dumps({'last_posted_night': '2026-11-20'}))
+        self.assertIsNone(self._reporter().tick())
+        self.assertEqual(self.posted, [])
+
+        class Hist:
+            def conversations_history(self, **kw):
+                return {'messages': [{
+                    'text': "*Tonight's guest list — Fri 11/20*\n\nVenue: Signups | Girls/Guys\n",
+                    'ts': str(ELEVEN_PM),
+                }]}
+
+        Path(self.path).unlink()
+        self.assertIsNone(self._reporter(history_client=Hist()).tick())
+        self.assertEqual(self.posted, [])
+        self.assertEqual(json.loads(open(self.path).read())['last_posted_night'], '2026-11-20')
 
     def test_channel_history_guard_when_state_file_missing(self):
         class Hist:
             def conversations_history(self, **kw):
                 return {'messages': [{
-                    'text': "*Tonight's guest list — Fri 11/20*\n\nVenue: Signups | Girls/Guys\n",
+                    'text': "*Last night's guest list — Fri 11/20*\n\nVenue: Signups | Girls/Guys\n",
                     'ts': str(TEN_AM),
                 }]}
 
@@ -337,11 +371,11 @@ class ScheduleAndDedupeTest(unittest.TestCase):
 
     def test_next_night_posts_again(self):
         self._reporter().tick()
-        self.now[0] = SAT_ELEVEN_PM
-        # The fixture job is Nov 20 only; Saturday still posts (none confirmed).
+        self.now[0] = SAT_SIX_AM
+        # The fixture job is Nov 20 only; Sunday 6 AM still posts Saturday (none confirmed).
         text = self._reporter().tick()
         self.assertIsNotNone(text)
-        self.assertIn("*Tonight's guest list — Sat 11/21*", text)
+        self.assertIn("*Last night's guest list — Sat 11/21*", text)
         self.assertEqual(len(self.posted), 2)
         self.assertEqual(json.loads(open(self.path).read())['last_posted_night'], '2026-11-21')
 
@@ -364,9 +398,9 @@ class ScheduleAndDedupeTest(unittest.TestCase):
             def conversations_history(self, **kw):
                 return {'messages': self.messages}
 
-        test_only = Hist([{'text': "TEST — *Tonight's guest list — Fri 11/20*"}])
+        test_only = Hist([{'text': "TEST — *Last night's guest list — Fri 11/20*"}])
         self.assertFalse(dr.history_has_today(test_only, 'C0CJK07GMHV', today, TEN_AM))
-        official = Hist([{'text': "*Tonight's guest list — Fri 11/20*\n\nTotal: 7 | 12F/9M"}])
+        official = Hist([{'text': "*Last night's guest list — Fri 11/20*\n\nTotal: 7 | 12F/9M"}])
         self.assertTrue(dr.history_has_today(official, 'C0CJK07GMHV', today, TEN_AM))
         # The earlier long TEST post must not count as today's official report.
         old_test = Hist([{'text': 'TEST — *Playmaker daily report* — Fri Nov 20, 12:14 PM MST'}])
