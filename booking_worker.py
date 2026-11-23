@@ -711,7 +711,14 @@ class Worker:
                 + "; ".join(f"{v} {n}" for v, n, _ in waiting) + "); nothing submitted for them")
             raise Stop("retry", reason, kind="unposted")
         evidence = {"verified": True, "worker": "railway", "bookings": [b["record"] for b in bookings]}
-        evidence["email_receipts"] = self._send_emails(job, ref, token, raw, bookings, drais=drais)
+        covered = None if drais else self._already_confirmed_elsewhere(job, ref, bookings)
+        if covered:
+            # Every night is a booking the guest was already confirmed for (by
+            # another job, after this job's hold email): no repeat email.
+            evidence["email_receipts"] = covered
+            evidence["confirmed_by_other_job"] = True
+        else:
+            evidence["email_receipts"] = self._send_emails(job, ref, token, raw, bookings, drais=drais)
         code, body = self.api.update(ref, token, "complete", {"evidence": evidence}, "Booked by Railway worker")
         if code != 200:
             raise Stop("manual", f"Booked and emailed but completion refused (HTTP {code}: "
@@ -917,9 +924,17 @@ class Worker:
             # fallback) for this date.
             other = self._guest_night_elsewhere(ref, night)
             if other:
-                raise Stop("manual", f"{venue} {night}: closed, but this guest already has {other[1]} booked "
-                           f"that night (job {other[0]}, order {other[2]}); no second fallback booking",
-                           kind="already_booked")
+                other_ref, other_venue, other_order, other_rec, other_meta = other
+                if other_rec.get("party") == self._night_party(request, night):
+                    # Same guest, same party, already booked that night under
+                    # another job: that booking covers this night too.
+                    rec = {**other_rec, "fallback": True}
+                    meta = {**(other_meta or {}), "fallback": True, "fallback_from": venue,
+                            "reused_from_job": other_ref}
+                    return {"record": rec, "meta": meta}
+                raise Stop("manual", f"{venue} {night}: closed, but this guest already has {other_venue} booked "
+                           f"that night (job {other_ref}, order {other_order}) with a different party; "
+                           "no second fallback booking", kind="already_booked")
         for alt in fallback_venues_for(night_date, prev, skip={venue}, today=self._today()):
             alt_key = night_key(ref, alt, night)
             alt_entry = self.ledger.get(alt_key) or {}
@@ -951,6 +966,22 @@ class Worker:
                    venue=venue, night=night,
                    hold_kind="access_code" if stop.extra.get("kind") == "access_code" else "closed")
 
+    def _already_confirmed_elsewhere(self, job, ref, bookings):
+        """Receipts of the other job whose confirmation already covers every
+        booking here (all reused, one source job, sent after any hold email
+        this job sent). None when this job must send its own email."""
+        if not bookings or not all(_reused(b) for b in bookings):
+            return None
+        metas = [b.get("meta") or {} for b in bookings]
+        sources = {m.get("reused_from_job") for m in metas}
+        receipts = metas[0].get("reused_receipts")
+        if len(sources) != 1 or not receipts:
+            return None
+        hold_at = (self._hold_marker(job, ref) or {}).get("at") or 0
+        if min(m.get("reused_updated") or 0 for m in metas) <= hold_at:
+            return None
+        return [{"kind": "guest", "id": receipts["guest"]}, {"kind": "team", "id": receipts["team"]}]
+
     def _today(self):
         return datetime.fromtimestamp(self.now(), PHOENIX).date()
 
@@ -980,8 +1011,8 @@ class Worker:
         return False
 
     def _guest_night_elsewhere(self, ref, night):
-        """(job ref, venue, order id) when this guest (same email) already has a
-        verified nightclub booking on `night` in another queue job."""
+        """(job ref, venue, order id, record, meta) when this guest (same email)
+        already has a verified nightclub booking on `night` in another job."""
         from config import rules
         email = ((getattr(self, "_job_raw", None) or {}).get("email") or "").strip().lower()
         if not email:
@@ -1007,7 +1038,11 @@ class Worker:
                     rec = rec or {}
                     if (rec.get("verified") and rec.get("date") == night and rec.get("order_id")
                             and rules.is_nightclub(rec.get("venue"))):
-                        return other.get("ref"), rec.get("venue"), rec.get("order_id")
+                        sent = (meta.get("progress") or {}).get("emails") or {}
+                        return (other.get("ref"), rec.get("venue"), rec.get("order_id"), dict(rec),
+                                {"event": f"Guest List - {rec.get('venue')}",
+                                 "reused_receipts": dict(sent) if sent.get("guest") and sent.get("team") else None,
+                                 "reused_updated": other.get("updated") or 0})
         return None
 
     def _shot_path(self, ref, venue, night, suffix):
