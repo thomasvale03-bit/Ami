@@ -102,10 +102,11 @@ def source_policy(ref, raw, today):
         drais = [v for v in venues if rules.is_drais(v)]
         if drais and len(venues) != 1:
             return "Drai's is Speakeasy-only; mixed TAO/Drai's request requires review"
-        if 'JEWEL Nightclub' in venues and end >= date(2026, 11, 22):
-            return 'JEWEL after Nov 21 not allowed; no automatic fallback'
-        if ('OMNIA Nightclub' in venues and start == today and today.weekday() in (4, 5)):
-            return 'Same-day OMNIA Friday/Saturday closed; no automatic fallback'
+        # JEWEL after Nov 21 and same-day OMNIA Fri/Sat are CLOSED nights, not
+        # review cases: the worker books the fallback chain (OMNIA first, then
+        # any open club). Parking them here left guests unbooked (Thomas,
+        # Nov 22 2026: "When the venue is not open, find whatever venue that
+        # is open and book them on there").
     except (KeyError, TypeError, ValueError):
         return 'Exact source date/venue missing or malformed; reviewed routing required'
     return ''
