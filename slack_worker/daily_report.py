@@ -1,15 +1,18 @@
-"""Daily 11:00 PM MST tonight guest-list totals, posted to #generalchat.
+"""Daily 6:00 AM MST last-night guest-list totals, posted to #generalchat.
 
-Only confirmed bookings for tonight's America/Phoenix date, by venue:
-signup (party) counts and Girls/Guys (F/M). No names, holds, queue,
-last-24h, sign-up, or pay figures. No guest emails or phones.
+Only confirmed bookings for last night's America/Phoenix date, by venue:
+signup (party) counts and Girls/Guys (F/M). That date is yesterday at
+6:00 AM (the evening that just wrapped, including that date's dayclubs).
+No names, holds, queue, last-24h, sign-up, or pay figures. No guest
+emails or phones.
 
-Posts at most once per night at 11:00 PM America/Phoenix. The last-posted
+Posts at most once per night at 6:00 AM America/Phoenix. The last-posted
 night is saved to a dedicated state file so restarts do not double-post.
 An optional channel-history check is a second guard if that file is missing.
-A missed 11:00 PM slot may still post until 3:00 AM for that same evening's
-date; nothing posts before 11:00 PM. Older last_posted_date values from the
-retired 10 AM schedule are ignored, so tonight's 11 PM post is not skipped.
+A missed 6:00 AM slot may still post until 10:00 AM for that same evening's
+date; nothing posts before 6:00 AM or at/after 10:00 AM. Older
+last_posted_date values from the retired 10 AM schedule are ignored. A
+night already posted under the retired 11 PM schedule is not posted again.
 """
 from collections import OrderedDict
 from datetime import datetime, timedelta
@@ -26,9 +29,11 @@ from .views import (EMAIL_RE, SECRET_RE, SECRET_URL_RE, on_date, project,
 
 log = logging.getLogger('amy.slack.daily_report')
 PHOENIX = ZoneInfo('America/Phoenix')
-REPORT_HOUR = 23  # 11:00 PM Phoenix
-LATE_UNTIL_HOUR = 3  # missed 11 PM may post until 03:00, not including 3 AM
-REPORT_TITLE = "Tonight's guest list"
+REPORT_HOUR = 6  # 6:00 AM Phoenix
+LATE_UNTIL_HOUR = 10  # missed 6 AM may post until 10:00, not including 10 AM
+REPORT_TITLE = "Last night's guest list"
+# Retired 11 PM heading; still recognized so a night already posted is not repeated.
+LEGACY_REPORT_TITLES = ("Tonight's guest list",)
 DEFAULT_CHANNEL = 'C0CJK07GMHV'  # #generalchat (workspace general; no #general)
 CHANNEL_ENV = 'SLACK_DAILY_REPORT_CHANNEL'
 DOLLAR_AMOUNT_RE = re.compile(r'\$\s*\d+(?:,\d{3})*(?:\.\d+)?')
@@ -183,24 +188,23 @@ def sanitize(text):
 
 
 def report_night(now):
-    """Phoenix night this tick may post, or None if outside the 11 PM–3 AM window.
+    """Phoenix night this tick may post, or None if outside the 6 AM–10 AM window.
 
-    11:00 PM–11:59 PM: tonight's date. 12:00 AM–2:59 AM: the previous evening.
-    3:00 AM through 10:59 PM: do not post.
+    6:00 AM–9:59 AM: the previous calendar evening (the night that just wrapped,
+    including that date's dayclubs). 10:00 AM through 5:59 AM: do not post.
     """
     local = datetime.fromtimestamp(now, PHOENIX)
-    if local.hour >= REPORT_HOUR:
-        return local.date()
-    if local.hour < LATE_UNTIL_HOUR:
+    if REPORT_HOUR <= local.hour < LATE_UNTIL_HOUR:
         return local.date() - timedelta(days=1)
     return None
 
 
 def due(now, last_posted_night):
-    """True in the 11 PM–3 AM window when that night's report has not posted.
+    """True in the 6 AM–10 AM window when that night's report has not posted.
 
     last_posted_night is the evening's date (YYYY-MM-DD). The retired 10 AM
-    last_posted_date field is not consulted.
+    last_posted_date field is not consulted. A night already recorded from
+    the retired 11 PM post also counts as posted.
     """
     night = report_night(now)
     if night is None:
@@ -255,10 +259,11 @@ def make_channel_poster(client, channel=None):
 
 
 def history_has_today(client, channel, today, now=None):
-    """True if the report channel already has today's official report. Fail-open to False.
+    """True if the report channel already has this night's official report. Fail-open to False.
 
     Messages prefixed with TEST — are previews and do not count, so a test post
-    never blocks the scheduled 11:00 PM run.
+    never blocks the scheduled 6:00 AM run. Official posts under the retired
+    11 PM title also count, so a night already reported is not posted again.
     """
     if client is None or not channel:
         return False
@@ -273,7 +278,8 @@ def history_has_today(client, channel, today, now=None):
         text = str(msg.get('text') or '').lstrip()
         if text.startswith('TEST —') or text.startswith('TEST -'):
             continue
-        if REPORT_TITLE.strip('*') in text[:120]:
+        titles = (REPORT_TITLE.strip('*'),) + LEGACY_REPORT_TITLES
+        if any(title in text[:120] for title in titles):
             return True
     return False
 
@@ -304,7 +310,7 @@ class DailyReporter:
         return False
 
     def tick(self):
-        """Build and post tonight's report if due. Returns the text posted, or None."""
+        """Build and post last night's report if due. Returns the text posted, or None."""
         now = self.clock()
         night = report_night(now)
         if night is None or not due(now, load_state(self.path).get('last_posted_night')):
