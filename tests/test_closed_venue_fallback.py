@@ -140,11 +140,27 @@ def test_fallback_never_books_a_guest_twice_for_one_night(tmp_path):
     s, api, worker = make(tmp_path, tao=tao)
     s.enqueue("first", raw(venues=["TAO Nightclub"], start_date="2026-11-12", end_date="2026-11-12"), NOW)
     assert worker.run_once()["status"] == "done"
-    s.enqueue("second", raw(venues=["Hakkasan Nightclub"], start_date="2026-11-12", end_date="2026-11-12"), NOW)
+    # Different party for the same night: never a second booking -> manual.
+    s.enqueue("second", raw(venues=["Hakkasan Nightclub"], start_date="2026-11-12", end_date="2026-11-12",
+                            female_count="5"), NOW)
     result = worker.run_once()
     assert result["status"] == "manual", result
     assert "already has TAO Nightclub booked" in result["reason"]
     assert len(worker.tao.submits) == 1
+
+
+def test_same_party_other_job_booking_covers_the_closed_night(tmp_path):
+    # Multi-night trip split over jobs: the closed night is already booked in
+    # another job for the same party -> reused, the other nights still book.
+    tao = MapTao({("TAO Nightclub", "2026-11-12"), ("Hakkasan Nightclub", "2026-11-13")})
+    s, api, worker = make(tmp_path, tao=tao)
+    s.enqueue("first", raw(venues=["TAO Nightclub"], start_date="2026-11-12", end_date="2026-11-12"), NOW)
+    assert worker.run_once()["status"] == "done"
+    s.enqueue("trip", raw(venues=["Hakkasan Nightclub"], start_date="2026-11-12", end_date="2026-11-13"), NOW)
+    result = worker.run_once()
+    assert result["status"] == "done", result
+    assert booked(s, "trip") == [("TAO Nightclub", "2026-11-12", True), ("Hakkasan Nightclub", "2026-11-13", False)]
+    assert len(worker.tao.submits) == 2  # TAO once (first job) + Hakkasan
 
 
 def test_fallback_order_and_same_day_omnia_skip():
@@ -157,3 +173,35 @@ def test_fallback_order_and_same_day_omnia_skip():
     assert fallback_venues_for(friday, today=date(2026, 11, 19))[0] == "OMNIA Nightclub"
     # Never the same club two nights running: moved to the end.
     assert fallback_venues_for(friday, "OMNIA Nightclub")[-1] == "OMNIA Nightclub"
+
+
+def test_reused_night_confirmed_after_hold_sends_no_repeat_email(tmp_path):
+    # Two sign-ups for one closed night: the first job books the open club and
+    # emails; the second (no hold email sent) reuses it without a 2nd email.
+    tao = MapTao({("TAO Nightclub", "2026-11-12")})
+    s, api, worker = make(tmp_path, tao=tao)
+    s.enqueue("a", raw(venues=["OMNIA Nightclub"], start_date="2026-11-12", end_date="2026-11-12"), NOW)
+    assert worker.run_once()["status"] == "done"
+    sent = len(api.sent)
+    s.enqueue("b", raw(venues=["Hakkasan Nightclub"], start_date="2026-11-12", end_date="2026-11-12"), NOW)
+    result = worker.run_once()
+    assert result["status"] == "done", result
+    assert len(api.sent) == sent
+    assert len(worker.tao.submits) == 1
+
+
+def test_reused_night_after_hold_email_gets_updated_confirmation(tmp_path):
+    tao = MapTao({("TAO Nightclub", "2026-11-12")})
+    s, api, worker = make(tmp_path, tao=tao)
+    s.enqueue("a", raw(venues=["TAO Nightclub"], start_date="2026-11-12", end_date="2026-11-12"), NOW)
+    assert worker.run_once()["status"] == "done"
+    s.enqueue("b", raw(venues=["Hakkasan Nightclub"], start_date="2026-11-12", end_date="2026-11-12"), NOW)
+    # The guest was told job b is on hold after job a's confirmation went out.
+    worker.ledger.put("b|hold_notified", {"via": "hold_email", "signature": ["x"], "at": NOW + 10})
+    sent = len(api.sent)
+    result = worker.run_once()
+    assert result["status"] == "done", result
+    new = api.sent[sent:]
+    assert [p["to"] for p in new] == ["guest@example.invalid", "team@playmakerentertainment.com"]
+    assert new[0]["subject"].startswith("Updated")
+    assert len(worker.tao.submits) == 1
