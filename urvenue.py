@@ -4,11 +4,15 @@ LIV, LIV Beach, XS, Encore Beach Club and Encore Beach Club At Night
 
 Flow:
   API first (https://api.urvenue.me, UrGuestlist system id 4): sign in with
-  URVENUE_EMAIL / URVENUE_PASSWORD, GET guestlist/dayview to refuse a
-  duplicate, POST guestlist/mylist to add the party, then re-read dayview
-  to confirm. URVENUE_API_DISABLE=true skips this and uses the browser.
-  On an API error before a write, fall back to the browser. AlreadyListed
-  and SubmissionUncertain are never retried in the browser (no double book).
+  URVENUE_EMAIL / URVENUE_PASSWORD, GET guestlist/dayview, POST
+  guestlist/mylist to add the party, then re-read dayview to confirm.
+  Cross-list dedupe (AlreadyListed when a name / ref / AMY comment already
+  appears on the dayview or browser list) is off unless AMY_DEDUPE or
+  AMY_WORKER_DUPLICATE_CHECK is true (Thomas, Nov 22 2026: always add).
+  URVENUE_API_DISABLE=true skips the API and uses the browser. On an API
+  error before a write, fall back to the browser. SubmissionUncertain is
+  never retried in the browser (no blind resubmit). AlreadyListed, when
+  dedupe is on, is also not retried in the browser.
 
   Browser (same one the TAO worker uses, see tao_portal._browser_page):
   1. open the venue's month calendar on guestlist.urvenue.me; sign in on
@@ -17,7 +21,7 @@ Flow:
   2. check the venue switcher shows the requested venue (never another one);
   3. find the night on the calendar: no event tile = list not posted yet;
   4. open the event, require the "<event> - Open" status;
-  5. search the event's list for the guest; already there = never add twice;
+  5. search the event's list for the guest (AlreadyListed only when dedupe is on);
   6. "+ Add Guest" -> General List, owner Thomas Vale, one textarea line
      `Name email 2M 3F !internal comment` -> "Add Guests";
   7. re-read the list and require the guest's row.
@@ -913,6 +917,25 @@ def api_enabled():
     return has_password()
 
 
+def _flag_on(name):
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return None
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def dedupe_enabled():
+    """Cross-job / already-on-list checks. Off unless AMY_DEDUPE or
+    AMY_WORKER_DUPLICATE_CHECK is true (Thomas, Nov 22 2026). AMY_DEDUPE
+    wins when both are set. Per-job ledger idempotency and
+    SubmissionUncertain are separate and always stay on."""
+    for name in ("AMY_DEDUPE", "AMY_WORKER_DUPLICATE_CHECK"):
+        val = _flag_on(name)
+        if val is not None:
+            return val
+    return False
+
+
 def _secret_fragments():
     frags = [v for v in (
         os.environ.get("URVENUE_PASSWORD", ""),
@@ -1139,7 +1162,7 @@ def add_guest_api(venue, night, guest, *, ref, rehearse=False, screenshot_path=N
         raise UrvenueError(_redact(f"urvenue dayview failed ({message or status})"))
     chats = data.get("chats") if isinstance(data.get("chats"), list) else []
     existing = find_dayview_row(chats, name, email, ref)
-    if existing:
+    if existing and dedupe_enabled():
         raise AlreadyListed(dayview_row_text(existing))
     items_payload = client.get("guestlist/dayitem", {**common, "ownerid": client.userid, "status": "7"})
     istatus, _, imessage, idata = _uv_parts(items_payload)
@@ -1200,8 +1223,9 @@ def add_guest_api(venue, night, guest, *, ref, rehearse=False, screenshot_path=N
 def add_guest(venue, night, guest, *, ref, rehearse=False, screenshot_path=None, before_submit=None):
     """Sign `guest` up on `venue`'s urvenue list for `night` (a date).
     Tries the UrGuestlist API first, then the browser. rehearse=True stops
-    before saving. AlreadyListed and SubmissionUncertain are never retried
-    on the other path (no double-booking)."""
+    before saving. SubmissionUncertain is never retried on the other path
+    (no blind resubmit). AlreadyListed (only raised when dedupe is on) is
+    also not retried on the other path."""
     if venue not in VENUES:
         raise UrvenueError(f"{venue} is not a urvenue venue")
     booking_line(guest, ref)  # validate early, before either path
@@ -1233,7 +1257,7 @@ def add_guest_browser(venue, night, guest, *, ref, rehearse=False, screenshot_pa
             open_calendar(page, venue)
             info = open_event(page, venue, night)
             existing = find_row(list_text(page, name), name, email)
-            if existing:
+            if existing and dedupe_enabled():
                 raise AlreadyListed(existing)
             add = page.get_by_text(re.compile(r"^\s*\+?\s*Add Guest\s*$"))
             btn = None
