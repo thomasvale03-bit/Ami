@@ -89,7 +89,7 @@ not treated as a stall.
 | `AMY_BROWSER_PROFILE` | `/data/worker/profile` (keeps Cloudflare clearance cookies) |
 | `AMY_BROWSER_PROXY` | residential proxy URL if Cloudflare blocks Railway IPs |
 | `AMY_WORKER_DRAIS`, `SPEAKEASY_EMAIL`, `SPEAKEASY_PASSWORD` | unused for booking (Drai's is email-only; Speakeasy probe still uses these) |
-| `URVENUE_EMAIL` (default info@playmakerentertainment.com), `URVENUE_PASSWORD` | urvenue.me login for LIV, LIV Beach, XS, Encore Beach Club (+ At Night). Box worker: `/home/box/.config/amy-worker.env`. Missing password + expired session = pre-submit retry, no guest email. Optional `URVENUE_VENUE_IDS` JSON override (`{"LIV Nightclub": "2386/1121561"}`). Read-only check: `python3 booking_worker.py --probe-urvenue "XS Nightclub" 2026-12-04` |
+| `URVENUE_EMAIL` (default info@playmakerentertainment.com), `URVENUE_PASSWORD` | urvenue.me login for LIV, LIV Beach, XS, Encore Beach Club (+ At Night). The worker tries the UrGuestlist API first (`POST users/login`, `GET guestlist/dayview` to refuse a duplicate, `POST guestlist/mylist` to add), then falls back to the browser on a pre-write API error. Set `URVENUE_API_DISABLE=true` to skip the API. Box worker: `/home/box/.config/amy-worker.env`. Missing password + expired session = pre-submit retry, no guest email. Optional `URVENUE_VENUE_IDS` JSON override (`{"LIV Nightclub": "2386/1121561"}`). Read-only check: `python3 booking_worker.py --probe-urvenue "XS Nightclub" 2026-12-04` |
 | `AMY_BROWSER_LAUNCH` | `plain`: start a normal Chrome and attach over CDP (needed for Cloudflare) |
 | `AMY_WORKER_ALERTS` | `true` to email team@ (WATCHDOG_ALERT_TO) on each manual/uncertain stop |
 | `AMY_SIGNUP_MODE` | must be unset |
