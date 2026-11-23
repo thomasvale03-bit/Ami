@@ -943,31 +943,40 @@ def _uv_parts(payload):
     return suc, None, None, data
 
 
+def _norm_person_name(value):
+    """Lowercased name with collapsed whitespace, for case/space-insensitive match."""
+    return " ".join((value or "").split()).lower()
+
+
 def find_dayview_row(chats, name, email="", ref=""):
-    """The dayview chat for this guest (name, email, or job/UV ref), or None."""
-    name_l = (name or "").strip().lower()
-    email_l = (email or "").strip().lower()
+    """The dayview chat for this guest, or None.
+
+    A row is a duplicate only when the guest name matches (case- and
+    whitespace-insensitive, on partyname or in original/comment/message)
+    or when our job/UV ref or AMY booking comment is on the row. A shared
+    email is not enough: a different person can use the same address.
+    The email argument is accepted for callers but is not used as a key.
+    """
+    name_n = _norm_person_name(name)
     ref_l = (ref or "").strip().lower()
     rows = [c for c in (chats or []) if isinstance(c, dict)]
 
-    def blob(chat):
-        return " ".join(str(chat.get(k) or "") for k in (
-            "partyname", "original", "comment", "message", "email")).lower()
+    def text_blob(chat):
+        # Name/ref only — never the email field.
+        return " ".join(_norm_person_name(chat.get(k)) for k in (
+            "partyname", "original", "comment", "message"))
 
-    for chat in rows:
-        if name_l and str(chat.get("partyname") or "").strip().lower() == name_l:
-            return chat
-    for chat in rows:
-        if email_l and str(chat.get("email") or "").strip().lower() == email_l:
-            return chat
-    for chat in rows:
-        low = blob(chat)
-        if name_l and name_l in low:
-            return chat
-        if email_l and email_l in low:
-            return chat
-        if ref_l and ref_l in low:
-            return chat
+    if name_n:
+        for chat in rows:
+            if _norm_person_name(chat.get("partyname")) == name_n:
+                return chat
+        for chat in rows:
+            if name_n in text_blob(chat):
+                return chat
+    if ref_l:
+        for chat in rows:
+            if ref_l in text_blob(chat):
+                return chat
     return None
 
 

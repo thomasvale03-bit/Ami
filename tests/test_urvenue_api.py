@@ -160,17 +160,29 @@ def _script(login_ok=True, chats=None, items=None, saved=1, post=None, second_ch
     return handler
 
 
-def test_find_dayview_row_matches_name_email_and_ref():
+def test_find_dayview_row_matches_name_and_ref():
     chats = [
         _chat(partyname="Other Guest", original="Other Guest 1M  a@b.com", email="a@b.com", message="Other Guest with guests (1M)"),
         _chat(partyname="Ada Lovelace", original=_line() + " leftover", email=""),
     ]
     assert urvenue.find_dayview_row(chats, "Ada Lovelace", "ada@example.com", REF)["partyname"] == "Ada Lovelace"
+    assert urvenue.find_dayview_row(chats, "  ada   lovelace ", "", "")["partyname"] == "Ada Lovelace"
     assert urvenue.find_dayview_row(
         [_chat(partyname="X", original="X 1M", comment="Playmaker Entertainment AMY testref001", email="")],
         "Nobody", "", REF,
     )["comment"].endswith("testref001")
     assert urvenue.find_dayview_row(chats, "Missing Person", "nobody@example.com", "nope") is None
+
+
+def test_find_dayview_row_ignores_shared_email_when_name_differs():
+    """A different guest can reuse an email; that alone is not AlreadyListed."""
+    chats = [
+        _chat(partyname="Thomas Vale", original="Thomas Vale 3M 3F  thomas.vale03@gmail.com",
+              email="thomas.vale03@gmail.com", message="Thomas Vale with guests (3M 3F)"),
+    ]
+    assert urvenue.find_dayview_row(chats, "Obed Vale", "thomas.vale03@gmail.com", "1a206aa51e70667c") is None
+    # Same person, different spacing/case, still a duplicate even with another email.
+    assert urvenue.find_dayview_row(chats, "thomas  vale", "other@example.com", "")["partyname"] == "Thomas Vale"
 
 
 def test_pick_list_item_prefers_general_list():
@@ -206,6 +218,36 @@ def test_api_dedupes_before_create(api_env, monkeypatch):
     with pytest.raises(urvenue.AlreadyListed):
         urvenue.add_guest("XS Nightclub", NIGHT, GUEST, ref=REF)
     assert not any(c["path"].endswith("/guestlist/mylist/json/") for c in opener.calls)
+
+
+def test_shared_email_different_name_is_not_a_duplicate(api_env, monkeypatch):
+    existing = _chat(
+        partyname="Thomas Vale",
+        original="Thomas Vale 3M 3F  thomas.vale03@gmail.com",
+        email="thomas.vale03@gmail.com",
+        message="Thomas Vale with guests (3M 3F)",
+        expected={"males": 3, "females": 3, "unspecified": 0, "guests": 6},
+    )
+    guest = {
+        "first_name": "Obed",
+        "last_name": "Vale",
+        "email": "thomas.vale03@gmail.com",
+        "male_count": 3,
+        "female_count": 3,
+    }
+    opener = FakeOpener(_script(chats=[existing], second_chats=[existing, _chat(
+        partyname="Obed Vale",
+        original="Obed Vale thomas.vale03@gmail.com 3M 3F !Playmaker Entertainment AMY testref001",
+        email="thomas.vale03@gmail.com",
+        message="Obed Vale with guests (3M 3F)",
+        expected={"males": 3, "females": 3, "unspecified": 0, "guests": 6},
+    )]))
+    _install(monkeypatch, opener)
+    result = urvenue.add_guest("XS Nightclub", NIGHT, guest, ref=REF)
+    assert result["verified"] is True
+    assert result["via"] == "api"
+    assert "Obed Vale" in result["row"]
+    assert sum(1 for c in opener.calls if c["path"].endswith("/guestlist/mylist/json/")) == 1
 
 
 def test_already_listed_does_not_fall_back_to_browser(api_env, monkeypatch):
