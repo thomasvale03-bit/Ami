@@ -1,4 +1,4 @@
-"""UrGuestlist API booking path: list, dedupe, create, confirm, and fallback.
+"""UrGuestlist API booking path: list, create, confirm, and fallback.
 
 These tests never call the live API. HTTP is mocked. No real guest is created.
 """
@@ -160,6 +160,21 @@ def _script(login_ok=True, chats=None, items=None, saved=1, post=None, second_ch
     return handler
 
 
+def test_dedupe_enabled_defaults_off_and_honors_flags(monkeypatch):
+    monkeypatch.delenv("AMY_DEDUPE", raising=False)
+    monkeypatch.delenv("AMY_WORKER_DUPLICATE_CHECK", raising=False)
+    assert urvenue.dedupe_enabled() is False
+    monkeypatch.setenv("AMY_WORKER_DUPLICATE_CHECK", "true")
+    assert urvenue.dedupe_enabled() is True
+    monkeypatch.setenv("AMY_DEDUPE", "false")
+    assert urvenue.dedupe_enabled() is False  # AMY_DEDUPE wins
+    monkeypatch.setenv("AMY_DEDUPE", "true")
+    assert urvenue.dedupe_enabled() is True
+    monkeypatch.setenv("AMY_DEDUPE", "true")
+    monkeypatch.setenv("AMY_WORKER_DUPLICATE_CHECK", "false")
+    assert urvenue.dedupe_enabled() is True
+
+
 def test_find_dayview_row_matches_name_and_ref():
     chats = [
         _chat(partyname="Other Guest", original="Other Guest 1M  a@b.com", email="a@b.com", message="Other Guest with guests (1M)"),
@@ -206,13 +221,25 @@ def test_api_books_and_verifies_without_posting_twice(api_env, monkeypatch):
     assert methods_paths[0][0] == "POST" and methods_paths[0][1].endswith("/users/login/json/")
     posts = [c for c in opener.calls if c["method"] == "POST" and c["path"].endswith("/guestlist/mylist/json/")]
     assert len(posts) == 1
-    # Dedupe GET happened before the create
+    # Dayview GET happened before the create (list read, then confirm read)
     gets = [c for c in opener.calls if c["method"] == "GET" and c["path"].endswith("/guestlist/dayview/json/")]
     assert len(gets) == 2
     assert methods_paths.index(("GET", gets[0]["path"])) < methods_paths.index(("POST", posts[0]["path"]))
 
 
-def test_api_dedupes_before_create(api_env, monkeypatch):
+def test_api_posts_even_when_already_on_the_list(api_env, monkeypatch):
+    """Default (AMY_DEDUPE off): always POST guestlist/mylist, even if a
+    matching name / email / ref / AMY comment is already on dayview."""
+    opener = FakeOpener(_script(chats=[_chat()], second_chats=[_chat()]))
+    _install(monkeypatch, opener)
+    result = urvenue.add_guest("XS Nightclub", NIGHT, GUEST, ref=REF)
+    assert result["verified"] is True
+    assert result["via"] == "api"
+    assert sum(1 for c in opener.calls if c["path"].endswith("/guestlist/mylist/json/")) == 1
+
+
+def test_api_dedupes_before_create_when_enabled(api_env, monkeypatch):
+    monkeypatch.setenv("AMY_DEDUPE", "true")
     opener = FakeOpener(_script(chats=[_chat()]))
     _install(monkeypatch, opener)
     with pytest.raises(urvenue.AlreadyListed):
@@ -251,6 +278,7 @@ def test_shared_email_different_name_is_not_a_duplicate(api_env, monkeypatch):
 
 
 def test_already_listed_does_not_fall_back_to_browser(api_env, monkeypatch):
+    monkeypatch.setenv("AMY_DEDUPE", "true")
     opener = FakeOpener(_script(chats=[_chat()]))
     _install(monkeypatch, opener)
     called = []

@@ -506,12 +506,13 @@ class Worker:
                            if email_wait_seconds is None else email_wait_seconds)
         self.job_time_cap = (int(os.environ.get("AMY_WORKER_JOB_SECONDS", str(JOB_TIME_CAP_SECONDS)))
                              if job_time_cap is None else job_time_cap)
-        # Thomas, Nov 11 2026: off by default so additional sign-ups with the
-        # same email/venue/night are booked. The per-job ledger still skips a
-        # night already submitted for this job. Set AMY_WORKER_DUPLICATE_CHECK=true
-        # to restore the old same-email manual stop.
-        self.duplicate_check = (os.environ.get("AMY_WORKER_DUPLICATE_CHECK", "false").lower() == "true"
-                                if duplicate_check is None else duplicate_check)
+        # Thomas, Nov 22 2026: cross-job / already-on-list checks are off
+        # unless AMY_DEDUPE or AMY_WORKER_DUPLICATE_CHECK is true. Each sign-up
+        # is booked even if the guest is already on the list or another job
+        # already booked them. The per-job ledger still skips a night already
+        # submitted for this job, and SubmissionUncertain is never retried.
+        import urvenue
+        self.duplicate_check = (urvenue.dedupe_enabled() if duplicate_check is None else duplicate_check)
         self.alerts = (os.environ.get("AMY_WORKER_ALERTS", "").lower() == "true" if alerts is None else alerts)
         # Thomas, Nov 21 2026: email the guest (team@ on BCC) once when their
         # request goes on hold (list not open yet / access code / closed with
@@ -918,10 +919,9 @@ class Worker:
         from rules_engine import fallback_venues_for
         prev = self._previous_nightclub(night, booked)
         last_stop = stop
-        if not rehearse:
-            # Never book the same guest twice for one night: another job of
-            # theirs may already hold a nightclub booking (requested or
-            # fallback) for this date.
+        if not rehearse and self.duplicate_check:
+            # Off unless AMY_DEDUPE / AMY_WORKER_DUPLICATE_CHECK is true
+            # (Thomas, Nov 22 2026: each sign-up books its own order).
             other = self._guest_night_elsewhere(ref, night)
             if other:
                 other_ref, other_venue, other_order, other_rec, other_meta = other

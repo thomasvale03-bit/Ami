@@ -1,8 +1,7 @@
 """urvenue.me sign-ups for LIV, LIV Beach, XS and Encore (Thomas, Nov 21 2026):
 booked on the venue's urvenue guest list, verified, then ONE guest + ONE team
 confirmation like TAO. No event = not posted -> hold + hourly re-check.
-Closed LIV/XS -> OMNIA-first fallback; closed dayclub -> hold. Never added
-twice; never a guest email claiming booked when nothing was added."""
+Closed LIV/XS -> OMNIA-first fallback; closed dayclub -> hold. Never a guest email claiming booked when nothing was added."""
 import os
 import shutil
 from datetime import date
@@ -468,7 +467,22 @@ def test_browser_closed_event_and_wrong_venue(site_browser):
         site.__exit__()
 
 
-def test_browser_existing_row_blocks_second_add(site_browser):
+def test_browser_adds_even_when_a_row_already_exists(site_browser):
+    start, mock = site_browser
+    ev = {"name": "Diplo", "status": "Open", "hours": "10:30pm to 4:00am",
+          "rows": [{"name": "Mock Guest", "email": "x", "m": 1, "f": 2}]}
+    site = start({("79", "1115"): ("XS Nightclub", {"2026-12-05": ev})})
+    try:
+        out = urvenue.add_guest("XS Nightclub", date(2026, 12, 5), GUEST, ref="r4",
+                                before_submit=lambda: None)
+        assert out["verified"] is True
+        assert "Mock Guest" in (out.get("row") or "")
+    finally:
+        site.__exit__()
+
+
+def test_browser_existing_row_blocks_second_add_when_dedupe_on(site_browser, monkeypatch):
+    monkeypatch.setenv("AMY_DEDUPE", "true")
     start, mock = site_browser
     ev = {"name": "Diplo", "status": "Open", "hours": "10:30pm to 4:00am",
           "rows": [{"name": "Mock Guest", "email": "x", "m": 1, "f": 2}]}

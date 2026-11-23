@@ -240,6 +240,18 @@ def test_duplicate_check_off_by_default_books_second_signup(tmp_path):
     assert s.get('again')['state'] == 'done'
 
 
+def test_amy_dedupe_env_turns_duplicate_check_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("AMY_DEDUPE", "true")
+    s, api, worker = make(tmp_path)
+    assert worker.duplicate_check is True
+    s.enqueue('first', raw(), NOW - 5)
+    assert worker.run_once()['status'] == 'done'
+    s.enqueue('again', raw(source_message_id='again'), NOW)
+    result = worker.run_once()
+    assert result['status'] == 'manual' and 'Duplicate suspicion' in result['reason']
+    assert len(worker.tao.submits) == 1
+
+
 class FakeDrais:
     def __init__(self):
         self.calls = []
