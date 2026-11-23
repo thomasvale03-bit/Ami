@@ -2,7 +2,15 @@
 LIV, LIV Beach, XS, Encore Beach Club and Encore Beach Club At Night
 (Thomas, Nov 21 2026).
 
-Flow (same browser the TAO worker uses, see tao_portal._browser_page):
+Flow:
+  API first (https://api.urvenue.me, UrGuestlist system id 4): sign in with
+  URVENUE_EMAIL / URVENUE_PASSWORD, GET guestlist/dayview to refuse a
+  duplicate, POST guestlist/mylist to add the party, then re-read dayview
+  to confirm. URVENUE_API_DISABLE=true skips this and uses the browser.
+  On an API error before a write, fall back to the browser. AlreadyListed
+  and SubmissionUncertain are never retried in the browser (no double book).
+
+  Browser (same one the TAO worker uses, see tao_portal._browser_page):
   1. open the venue's month calendar on guestlist.urvenue.me; sign in on
      urvenue.me first when the saved session is gone (email step, then the
      password step) with URVENUE_EMAIL / URVENUE_PASSWORD from the worker env;
@@ -26,6 +34,10 @@ import os
 import re
 import statistics
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from http.cookiejar import CookieJar
 from datetime import date
 from pathlib import Path
 
@@ -38,6 +50,15 @@ CALENDAR_URL = "https://guestlist.urvenue.me/2/{acct}/{vid}/guestlist/dayview"
 DEFAULT_EMAIL = "info@playmakerentertainment.com"
 LIST_ITEM = os.environ.get("URVENUE_LIST_ITEM", "General List")
 OWNER = os.environ.get("URVENUE_OWNER", "Thomas Vale")
+
+# UrGuestlist operations API. The published SPA at guestlist.urvenue.me calls
+# https://api.urvenue.me/v1/{path}/json/ with systemid 4. Login uses the
+# public frontend appApiKey (overridable) plus URVENUE_EMAIL/URVENUE_PASSWORD.
+# URVENUE_API_KEY is the user key; it is not required once a session exists.
+API_BASE = os.environ.get("URVENUE_API_BASE", "https://api.urvenue.me").rstrip("/")
+API_SYSTEM_ID = os.environ.get("URVENUE_API_SYSTEM_ID", "4").strip() or "4"
+# Public client key from the UrGuestlist SPA bundle (not a user secret).
+DEFAULT_APP_API_KEY = "AZVOPVDPTLAKEWPDFKDMQAVV"
 
 # canonical venue -> urvenue account id, venue id and the venue-switcher label
 # that proves the right venue is open (ids read from urvenue Nov 21 2026; the
@@ -878,11 +899,320 @@ def _shot(page, path):
         return None
 
 
+
+def app_api_key():
+    return os.environ.get("URVENUE_APP_API_KEY", "").strip() or DEFAULT_APP_API_KEY
+
+
+def api_enabled():
+    """API-first unless the operator turned it off. Tests disable it so a dummy
+    password cannot hit the live API."""
+    flag = os.environ.get("URVENUE_API_DISABLE", "").strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return False
+    return has_password()
+
+
+def _secret_fragments():
+    frags = [v for v in (
+        os.environ.get("URVENUE_PASSWORD", ""),
+        os.environ.get("URVENUE_API_KEY", ""),
+        os.environ.get("URVENUE_APP_API_KEY", ""),
+        DEFAULT_APP_API_KEY,
+        (credentials()[0] or ""),
+    ) if v]
+    return frags
+
+
+def _redact(text):
+    out = "" if text is None else str(text)
+    for frag in _secret_fragments():
+        if frag:
+            out = out.replace(frag, "<redacted>")
+    return out
+
+
+def _uv_parts(payload):
+    """(status, reason, message, data) from an api.urvenue.me JSON body."""
+    if not isinstance(payload, dict):
+        return None, None, None, None
+    uv = payload.get("uv") if isinstance(payload.get("uv"), dict) else {}
+    suc, data = uv.get("success"), uv.get("data")
+    if isinstance(suc, dict):
+        return suc.get("status"), suc.get("reason"), suc.get("message"), data
+    return suc, None, None, data
+
+
+def find_dayview_row(chats, name, email="", ref=""):
+    """The dayview chat for this guest (name, email, or job/UV ref), or None."""
+    name_l = (name or "").strip().lower()
+    email_l = (email or "").strip().lower()
+    ref_l = (ref or "").strip().lower()
+    rows = [c for c in (chats or []) if isinstance(c, dict)]
+
+    def blob(chat):
+        return " ".join(str(chat.get(k) or "") for k in (
+            "partyname", "original", "comment", "message", "email")).lower()
+
+    for chat in rows:
+        if name_l and str(chat.get("partyname") or "").strip().lower() == name_l:
+            return chat
+    for chat in rows:
+        if email_l and str(chat.get("email") or "").strip().lower() == email_l:
+            return chat
+    for chat in rows:
+        low = blob(chat)
+        if name_l and name_l in low:
+            return chat
+        if email_l and email_l in low:
+            return chat
+        if ref_l and ref_l in low:
+            return chat
+    return None
+
+
+def dayview_row_text(chat):
+    if not isinstance(chat, dict):
+        return ""
+    expected = chat.get("expected") if isinstance(chat.get("expected"), dict) else {}
+    males = expected.get("males", "")
+    females = expected.get("females", "")
+    return " ".join(str(x) for x in (
+        chat.get("status"), chat.get("partyname"), chat.get("itemname"),
+        chat.get("ownername"), f"{males}M" if males not in ("", None) else "",
+        f"{females}F" if females not in ("", None) else "",
+        chat.get("original"),
+    ) if x not in ("", None)).strip()[:300]
+
+
+def pick_list_item(items, prefer=None):
+    """Choose the guest-list item to book. Prefer URVENUE_LIST_ITEM (General List)."""
+    prefer = (prefer or LIST_ITEM or "").strip().lower()
+    rows = [it for it in (items or []) if isinstance(it, dict) and it.get("id")]
+    if not rows:
+        return None
+    for it in rows:
+        internal = str(it.get("internalname") or "").strip().lower()
+        display = str(it.get("displayname") or "").strip().lower()
+        if prefer and (internal == prefer or display == prefer):
+            return it
+    for it in rows:
+        blob = f"{it.get('internalname') or ''} {it.get('displayname') or ''}".lower()
+        if "guest" in blob and "list" in blob:
+            return it
+    return rows[0]
+
+
+class _ApiClient:
+    """Logged-in session against api.urvenue.me. Never logs secrets."""
+
+    def __init__(self):
+        self.cookies = CookieJar()
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookies))
+        self.xsrf = None
+        self.userid = None
+
+    def login(self):
+        email, password = credentials()
+        if not password:
+            raise LoginUnavailable("URVENUE_PASSWORD is not set")
+        payload = self.post("users/login", {
+            "apikey": app_api_key(),
+            "email": email,
+            "password": password,
+        }, base_params=False)
+        status, reason, message, data = _uv_parts(payload)
+        if status != "success":
+            raise LoginUnavailable(_redact(f"urvenue API login failed ({reason or message or status})"))
+        if isinstance(data, dict) and data.get("userid"):
+            self.userid = str(data["userid"])
+        if not self.userid:
+            raise LoginUnavailable("urvenue API login did not return a user id")
+        return self
+
+    def _common(self, venue, extra=None):
+        acct, vid = venue_ids(venue)
+        params = {
+            "systemid": API_SYSTEM_ID,
+            "sourcecode": "internal",
+            "sourceloc": acct or "-",
+            "appaccountid": acct or "",
+            "appuserid": self.userid or "",
+            "appvenueid": vid or "",
+            "appecozoneid": "0",
+            "appprotocol": "https",
+            "apphost": GUESTLIST_HOST,
+            "appport": "",
+            "apppath": "",
+            "appsearch": "",
+        }
+        if extra:
+            params.update({k: v for k, v in extra.items() if v is not None})
+        return params
+
+    def request(self, method, path, *, params=None, form=None):
+        url = f"{API_BASE}/v1/{path}/json/"
+        if params:
+            url = url + "?" + urllib.parse.urlencode(params)
+        headers = {
+            "User-Agent": "AMY-booking-worker/urvenue-api",
+            "Accept": "application/json",
+            "Origin": f"https://{GUESTLIST_HOST}",
+            "Referer": f"https://{GUESTLIST_HOST}/",
+        }
+        data = None
+        if form is not None:
+            data = urllib.parse.urlencode(form).encode()
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        if self.xsrf:
+            headers["X-Uvapp-Xsrf"] = self.xsrf
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with self.opener.open(req, timeout=40) as resp:
+                raw = resp.read()
+                if resp.headers.get("X-Uv-Xsrf"):
+                    self.xsrf = resp.headers.get("X-Uv-Xsrf")
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            raw = exc.read() if exc.fp else b""
+            if exc.headers and exc.headers.get("X-Uv-Xsrf"):
+                self.xsrf = exc.headers.get("X-Uv-Xsrf")
+            try:
+                payload = json.loads(raw.decode("utf-8", "replace") or "null")
+            except ValueError:
+                payload = None
+            _, _, message, data = _uv_parts(payload) if payload else (None, None, None, None)
+            msg = message or (data.get("message") if isinstance(data, dict) else None) or exc.reason
+            raise UrvenueError(_redact(f"urvenue API {method} {path} HTTP {exc.code}: {msg}"))
+        except urllib.error.URLError as exc:
+            raise UrvenueError(_redact(f"urvenue API {method} {path} failed: {type(exc.reason).__name__ if not isinstance(exc.reason, str) else 'network error'}"))
+        try:
+            payload = json.loads(raw.decode("utf-8", "replace") or "null")
+        except ValueError as exc:
+            raise UrvenueError(f"urvenue API {method} {path} returned non-JSON") from exc
+        return payload
+
+    def get(self, path, params):
+        return self.request("GET", path, params=params)
+
+    def post(self, path, form, base_params=True, venue=None):
+        body = dict(form)
+        if base_params:
+            if venue is None:
+                raise UrvenueError("urvenue API POST requires a venue")
+            merged = self._common(venue)
+            merged.update(body)
+            body = merged
+        else:
+            body.setdefault("sourcecode", "internal")
+            body.setdefault("sourceloc", "-")
+            body.setdefault("systemid", API_SYSTEM_ID)
+            body.setdefault("appprotocol", "https")
+            body.setdefault("apphost", GUESTLIST_HOST)
+        return self.request("POST", path, form=body)
+
+
+def add_guest_api(venue, night, guest, *, ref, rehearse=False, screenshot_path=None, before_submit=None):
+    """Add the party through the UrGuestlist API. Raises the same errors as the
+    browser path. Never logs the password or API keys."""
+    line, name = booking_line(guest, ref)
+    email = (guest.get("email") or "").strip()
+    acct, vid = venue_ids(venue)
+    if not vid:
+        raise UrvenueError(f"no urvenue venue id for {venue}")
+    caldate = yymmdd(night)
+    client = _ApiClient()
+    client.login()
+    common = client._common(venue, {"venueid": vid, "caldate": caldate, "accountid": acct})
+    view = client.get("guestlist/dayview", common)
+    status, _, message, data = _uv_parts(view)
+    if status != "success" or not isinstance(data, dict):
+        raise UrvenueError(_redact(f"urvenue dayview failed ({message or status})"))
+    chats = data.get("chats") if isinstance(data.get("chats"), list) else []
+    existing = find_dayview_row(chats, name, email, ref)
+    if existing:
+        raise AlreadyListed(dayview_row_text(existing))
+    items_payload = client.get("guestlist/dayitem", {**common, "ownerid": client.userid, "status": "7"})
+    istatus, _, imessage, idata = _uv_parts(items_payload)
+    if istatus != "success":
+        raise UrvenueError(_redact(f"urvenue dayitem failed ({imessage or istatus})"))
+    items = idata.get("list") if isinstance(idata, dict) else None
+    item = pick_list_item(items)
+    if not item:
+        raise NotOpen("no guest list items", "")
+    if rehearse:
+        return {"rehearsal": True, "screenshot": None, "event": None, "page_url": calendar_url(acct, vid) + f"/{caldate}/0",
+                "line_fields": ["name", "email", "male", "female", "comment"], "via": "api",
+                "list_item": item.get("internalname") or item.get("displayname")}
+    if before_submit:
+        before_submit()
+    try:
+        result = client.post("guestlist/mylist", {
+            "ownerid": client.userid,
+            "venueid": vid,
+            "itemid": str(item["id"]),
+            "caldate": caldate,
+            "guests": line,
+            "inviteid": "",
+        }, venue=venue)
+    except UrvenueError as exc:
+        # The POST may or may not have reached urvenue. Do not also try the
+        # browser: a second write could double-book.
+        raise SubmissionUncertain(_redact(str(exc))) from exc
+    rstatus, _, rmessage, rdata = _uv_parts(result)
+    saved = None
+    if isinstance(rdata, dict):
+        saved = rdata.get("saved")
+    if rstatus != "success":
+        raise SubmissionUncertain(_redact(f"urvenue API add failed ({rmessage or rstatus})"))
+    try:
+        saved_n = int(saved) if saved is not None and str(saved) != "" else None
+    except (TypeError, ValueError):
+        saved_n = None
+    if saved_n == 0:
+        errors = rdata.get("errors") if isinstance(rdata, dict) else None
+        raise SubmissionUncertain(_redact(f"urvenue API reported no saved guests ({errors or rmessage or 'saved=0'})"))
+    try:
+        again = client.get("guestlist/dayview", common)
+        _, _, _, adata = _uv_parts(again)
+        chats = adata.get("chats") if isinstance(adata, dict) and isinstance(adata.get("chats"), list) else []
+        row_chat = find_dayview_row(chats, name, email, ref)
+        row = dayview_row_text(row_chat) if row_chat else None
+    except Exception as exc:  # noqa: BLE001 - after the write: never resubmit
+        raise SubmissionUncertain(f"could not re-read the list after API add ({type(exc).__name__})")
+    if not row:
+        raise SubmissionUncertain("posted the guest via API once but the row is not on dayview")
+    return {"verified": True, "confirmation_id": confirmation_ref(ref, venue, night.isoformat()),
+            "row": row, "screenshot": None, "event": None, "event_time": None,
+            "page_url": calendar_url(acct, vid) + f"/{caldate}/0",
+            "list_item": item.get("internalname") or LIST_ITEM, "owner": OWNER, "via": "api"}
+
+
 def add_guest(venue, night, guest, *, ref, rehearse=False, screenshot_path=None, before_submit=None):
     """Sign `guest` up on `venue`'s urvenue list for `night` (a date).
-    rehearse=True stops with the form filled and closes it (nothing saved)."""
+    Tries the UrGuestlist API first, then the browser. rehearse=True stops
+    before saving. AlreadyListed and SubmissionUncertain are never retried
+    on the other path (no double-booking)."""
     if venue not in VENUES:
         raise UrvenueError(f"{venue} is not a urvenue venue")
+    booking_line(guest, ref)  # validate early, before either path
+    if api_enabled():
+        try:
+            return add_guest_api(venue, night, guest, ref=ref, rehearse=rehearse,
+                                 screenshot_path=screenshot_path, before_submit=before_submit)
+        except (AlreadyListed, SubmissionUncertain, NotPosted, NotOpen, LoginUnavailable):
+            raise
+        except UrvenueError as exc:
+            log.warning("urvenue API path failed (%s); falling back to browser", _redact(str(exc)))
+        except Exception as exc:  # noqa: BLE001 - unexpected pre-write failure
+            log.warning("urvenue API path failed (%s); falling back to browser", type(exc).__name__)
+    return add_guest_browser(venue, night, guest, ref=ref, rehearse=rehearse,
+                             screenshot_path=screenshot_path, before_submit=before_submit)
+
+
+def add_guest_browser(venue, night, guest, *, ref, rehearse=False, screenshot_path=None, before_submit=None):
+    """Sign `guest` up on `venue`'s urvenue list for `night` (a date).
+    rehearse=True stops with the form filled and closes it (nothing saved)."""
     line, name = booking_line(guest, ref)
     email = (guest.get("email") or "").strip()
     from playwright.sync_api import sync_playwright

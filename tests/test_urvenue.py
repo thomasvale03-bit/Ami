@@ -20,6 +20,7 @@ TEAM = "team@playmakerentertainment.com"
 @pytest.fixture(autouse=True)
 def urvenue_env(monkeypatch, tmp_path):
     monkeypatch.setenv("URVENUE_PASSWORD", "x")  # dummy; tests never log in for real
+    monkeypatch.setenv("URVENUE_API_DISABLE", "true")  # browser-path tests; never hit the live API
     monkeypatch.setenv("AMY_WORKER_DIR", str(tmp_path / "wd"))
     monkeypatch.delenv("URVENUE_VENUE_IDS", raising=False)
     monkeypatch.setenv("LIV_NIGHT_RULES", str(tmp_path / "no-liv-rules.json"))  # never the real file
