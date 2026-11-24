@@ -600,6 +600,7 @@ ZOUK_DOORS = "Doors open 10:30 PM (arrive 10 to 11 PM)"
 ZOUK_DEFAULT_TERMS = "Everyone free entry until 1:25 AM or earlier"
 ZOUK_DEFAULT_CUTOFF = "1:30 AM"
 ZOUK_LINE_NOTE = "Guest list line is indoors by Redtail and can extend to the giant Sphere."
+ZOUK_SHOW_EMAIL = "Show this email at the door with your ID."
 ZOUK_ADMISSION = ("Bring a valid, government-issued 21+ photo ID. Guest-list admission is subject to "
                   "the venue's rules, dress code, and capacity.")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)")
@@ -657,46 +658,27 @@ def zouk_night(iso, rule=None):
             "has_terms": bool(women or men or rule.get("cutoff"))}
 
 
-def _zouk_name(request, raw, iso):
-    import request_plan
-    name = f"{request.get('first_name', '')} {request.get('last_name', '')}".strip() or (raw or {}).get("name", "")
-    f, m = request_plan.party_for_night(raw or {}, iso, request["female_count"], request["male_count"])
-    extra = int(f or 0) + int(m or 0) - 1
-    return f"{name} +{extra}" if extra > 0 else name
-
-
 def zouk_door_lines(request, raw, iso, brand="playmaker", rule=None):
-    """Tom's door text for one night (plain text lines)."""
+    """Tom's door text for one night (plain text lines). Tom (Nov 24 2026):
+    no confirmation block; the email itself is shown at the door."""
     night = zouk_night(iso, rule)
-    gg = brand == "guestlistgo"
     head = ["MUST SHOW THIS AT THE DOOR!", ""]
-    head += ["GUESTLISTGO GUEST LIST"] if gg else ["THOMAS VALE'S LIST", "ACADEMY"]
-    confirm = (f"Confirmed VIP guest list for ZOUK Nightclub at Resorts World, 10:30 PM to {night['cutoff']}. "
-               + ("Go to the guest list area to check in with your name and ID. " if gg else
-                  "Go to the guest list area to check in. Tell them you're on PROMOTER Thomas Vale's guest list. ")
-               + "Arrive early with your entire group; dress code will be enforced. Show this email.")
+    head += ["GUESTLISTGO GUEST LIST"] if brand == "guestlistgo" else ["THOMAS VALE'S LIST", "ACADEMY"]
     return head + [
         "", ZOUK_VENUE, ZOUK_PLACE, night["event"],
         "", ZOUK_DOORS, *night["terms"],
         "", ZOUK_LINE_NOTE,
-        "", "YOUR CONFIRMATION",
-        *([] if gg else ["ACADEMY - Thomas Vale"]),
-        _zouk_name(request, raw, iso),
-        confirm,
-        "GuestlistGo" if gg else "Thomas Vale - Academy",
     ]
 
 
-def _zouk_conf_p(escaped, bold):
-    inner = f'<strong style="color:#FFFFFF;">{escaped}</strong>' if bold else escaped
-    return f'<p style="margin:0 0 4px 0;">{inner}</p>'
+ZOUK_LIST_STYLE = ("font-family:'Playfair Display',Georgia,serif;font-size:34px;line-height:40px;"
+                   "color:#D4AF37;font-weight:800;letter-spacing:2px;")
 
 
 def _zouk_door_html(lines):
     """Gold 'show this at the door' card (same look as the Drai's card)."""
     e = _html.escape
-    i = lines.index("YOUR CONFIRMATION")
-    top, conf = lines[2:i], lines[i + 1:]
+    top = lines[2:]
     blank = [n for n, x in enumerate(top) if x == ""]
     brand_lines, venue_lines = top[:blank[0]], top[blank[0] + 1:blank[1]]
     door_lines, line_note = top[blank[1] + 1:blank[2]], top[blank[2] + 1:]
@@ -712,10 +694,9 @@ def _zouk_door_html(lines):
            '<tr><td style="padding:22px 24px;font-family:Inter,Helvetica,Arial,sans-serif;color:#F5F5F5;'
            'font-size:15px;line-height:24px;">']
     if len(brand_lines) == 2:
-        out.append('<p style="margin:0 0 2px 0;font-size:15px;letter-spacing:3px;color:#D4AF37;font-weight:800;">'
-                   f'{e(brand_lines[0])}</p>')
-        out.append('<p style="margin:0 0 14px 0;font-family:\'Playfair Display\',Georgia,serif;font-size:34px;'
-                   f'line-height:40px;color:#D4AF37;font-weight:800;letter-spacing:2px;">{e(brand_lines[1])}</p>')
+        # Tom (Nov 24 2026, t1220u): THOMAS VALE'S LIST styled exactly like ACADEMY.
+        out.append(f'<p style="margin:0;{ZOUK_LIST_STYLE}">{e(brand_lines[0])}</p>')
+        out.append(f'<p style="margin:0 0 14px 0;{ZOUK_LIST_STYLE}">{e(brand_lines[1])}</p>')
     else:
         out.append('<p style="margin:0 0 14px 0;font-family:\'Playfair Display\',Georgia,serif;font-size:28px;'
                    f'line-height:34px;color:#D4AF37;font-weight:800;letter-spacing:2px;">{e(brand_lines[0])}</p>')
@@ -725,15 +706,6 @@ def _zouk_door_html(lines):
     out += [p.format(e(x)) for x in door_lines]
     out.append(f'<p style="margin:12px 0 0 0;">{e(" ".join(line_note))}</p>')
     out.append('</td></tr></table>\n</td></tr>')
-    out.append('<tr><td style="padding:12px 32px 8px 32px;background-color:#0d0d0d;" bgcolor="#0d0d0d">'
-               '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
-               'style="background-color:#141414;border-left:3px solid #D4AF37;border-radius:6px;"><tr>'
-               '<td style="padding:18px 22px;font-family:Inter,Helvetica,Arial,sans-serif;font-size:15px;'
-               'line-height:23px;color:#E6E6E6;">'
-               '<p style="margin:0 0 8px 0;font-size:11px;letter-spacing:3px;color:#C9A84C;font-weight:700;">'
-               'YOUR CONFIRMATION</p>'
-               + "".join(_zouk_conf_p(e(x), n < len(conf) - 2) for n, x in enumerate(conf))
-               + '</td></tr></table></td></tr>')
     return "\n".join(out) + "\n"
 
 
@@ -800,6 +772,7 @@ def zouk_guest_email(request, bookings, raw=None, pending=None):
         CAPACITY_LINE,
         waiting,
         "\n\n".join(door_text),
+        ZOUK_SHOW_EMAIL if zouk_rows else "",
         tao_note,
         ZOUK_ADMISSION,
         "Questions? Just reply to this email." if gg else "Questions? Email info@playmakerentertainment.com",
@@ -816,18 +789,24 @@ def zouk_guest_email(request, bookings, raw=None, pending=None):
     door = "".join(cards)
     a = page.index("    <!-- How to get passes -->")
     if other:
-        page = page[:a] + door + "\n" + page[a:]
+        show = ('<tr><td class="px" style="padding:8px 40px 4px 40px;"><p style="margin:0;font-family:\'Inter\','
+                'Helvetica,Arial,sans-serif;font-size:15px;line-height:22px;color:#F5F5F5;font-weight:700;">'
+                f'{_html.escape(ZOUK_SHOW_EMAIL)}</p></td></tr>\n')
+        page = page[:a] + door + show + "\n" + page[a:]
     else:
         z = page.index("    <!-- Before you go -->")
         page = page[:a] + door + "\n" + page[z:]
-        page = page.replace("Follow the steps to grab your passes before you head out.",
-                            "Show this email at the door with your ID.")
+        page = page.replace("Follow the steps to grab your passes before you head out.", ZOUK_SHOW_EMAIL)
     html = _zouk_brand_html(page, brand)
     subject = zouk_guest_subject(request["start_date"], request["end_date"], brand)
     for body in (text, html):
         low = body.lower()
         if LINE_PRIORITY_RE.search(body) or "jarvis" in low:
             raise ValueError("ZOUK email must not promise line-jumping or mention Jarvis")
+        if "show this text" in low or "your confirmation" in low:
+            raise ValueError("ZOUK email: no confirmation block and no 'Show this text' (Tom, Nov 24 2026)")
+        if zouk_rows and low.count("show this email at the door") != 1:
+            raise ValueError("ZOUK email must say 'Show this email at the door' exactly once")
         if "subject to capacity" not in low:
             raise ValueError("ZOUK email must say subject to capacity")
         if gg and ("playmaker" in low or "thomas vale" in low or "pme" in re.findall(r"[a-z]+", low)):

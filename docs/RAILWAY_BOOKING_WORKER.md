@@ -161,7 +161,8 @@ guestlistgo.me sign-ups) and team@ gets "Add to ZOUK list: ..." asking the team
 to add the guest to the ZOUK list with the venue. Event and terms come from
 `zouk-night-rules.json` (`ZOUK|YYYY-MM-DD`: event, women, men, cutoff, drinks;
 `notes` is internal and never shown to guests). With no entry for the night the
-email uses Tom's default ("Everyone free entry until 1:25 AM or earlier", list
-10:30 PM to 1:30 AM). A `closed` / `no_list` night falls back through
+email uses Tom's default ("Everyone free entry until 1:25 AM or earlier"). Per
+Tom's review (Nov 24 2026) there is no "confirmation text" block; the email says
+"Show this email at the door with your ID." once. A `closed` / `no_list` night falls back through
 DEFAULT_ROUTING (OMNIA first) like Drai's. Mixed ZOUK + other-venue requests go
 to review. Ghostbar stays notify-only.

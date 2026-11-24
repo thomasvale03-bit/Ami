@@ -60,6 +60,15 @@ def zraw(**kw):
     return r
 
 
+def _no_confirmation_block(guest):
+    for body in (guest["text"], guest["html"]):
+        low = body.lower()
+        for bad in ("your confirmation", "academy - thomas vale", "thomas vale - academy", "confirmed vip guest list",
+                    "dress code will be enforced", "promoter thomas vale", "show this text", "tom v +"):
+            assert bad not in low, bad
+        assert low.count("show this email at the door") == 1, low.count("show this email at the door")
+
+
 def _all_text(p):
     return p["subject"] + "\n" + p["text"] + "\n" + p["html"]
 
@@ -144,10 +153,9 @@ def test_open_zouk_night_sends_pme_door_confirmation_and_team_add_email(tmp_path
                  "Resorts World Las Vegas", "Friday 11/27 James Hype", "Doors open 10:30 PM (arrive 10 to 11 PM)",
                  "Everyone: Complimentary entry until 1:30 AM", "Ladies: 1 free drink ticket before 1 AM",
                  "Guest list line is indoors by Redtail and can extend to the giant Sphere.",
-                 "ACADEMY - Thomas Vale", "tom V +1", "10:30 PM to 1:30 AM",
-                 "Tell them you're on PROMOTER Thomas Vale's guest list.",
-                 "dress code will be enforced", "Thomas Vale - Academy", "subject to capacity"):
+                 "Show this email at the door with your ID.", "subject to capacity"):
         assert want in guest["text"], want
+    _no_confirmation_block(guest)
     assert "James Hype" in guest["html"] and "MUST SHOW THIS AT THE DOOR" in guest["html"]
     assert "subject to capacity" in guest["html"]
     assert "Ticket Wallet" not in guest["html"] and "TAO Group" not in guest["html"]  # no TAO pass steps
@@ -186,16 +194,36 @@ def test_no_rules_for_the_night_uses_toms_default_terms(tmp_path):
     assert worker.run_once()["status"] == "done"
     guest, team = api.sent
     assert "Everyone free entry until 1:25 AM or earlier" in guest["text"]
+    assert "Everyone free entry until 1:25 AM or earlier" in guest["html"]
     assert "Thursday 11/26\n" in guest["text"]
-    assert "tom V +5" in guest["text"] and "10:30 PM to 1:30 AM" in guest["text"]
+    _no_confirmation_block(guest)
     assert "no ZOUK rules on file for this night" in team["text"]
 
 
-def test_party_of_one_has_no_plus(tmp_path):
+def test_tom_review_no_confirmation_block_and_show_this_email_once(tmp_path):
+    """Tom (Nov 24 2026, t1219u): remove the confirmation text; 'Show this email', never 'Show this text'."""
     s, api, worker = make(tmp_path)
-    s.enqueue("z", zraw(female_count="1", male_count="0"), NOW)
+    s.enqueue("z", zraw(female_count="2", male_count="4"), NOW)
     assert worker.run_once()["status"] == "done"
-    assert "\ntom V\n" in api.sent[0]["text"] and "tom V +" not in api.sent[0]["text"]
+    guest = api.sent[0]
+    _no_confirmation_block(guest)
+    assert "MUST SHOW THIS AT THE DOOR!" in guest["text"]
+    assert "MUST SHOW THIS AT THE DOOR" in guest["html"]
+
+
+def test_thomas_vales_list_styled_exactly_like_academy(tmp_path):
+    """Tom (Nov 24 2026, t1220u): 'Make Thomas Vale's list look like the academy text.'"""
+    s, api, worker = make(tmp_path)
+    s.enqueue("z", zraw(), NOW)
+    assert worker.run_once()["status"] == "done"
+    html = api.sent[0]["html"]
+    styles = {}
+    for label in ("THOMAS VALE&#x27;S LIST", "ACADEMY"):
+        m = re.search(r'<p style="([^"]*)">' + re.escape(label) + "</p>", html)
+        assert m, label
+        styles[label] = re.sub(r"margin:[^;]*;", "", m.group(1))
+    assert styles["THOMAS VALE&#x27;S LIST"] == styles["ACADEMY"]
+    assert "font-size:34px" in styles["ACADEMY"] and "letter-spacing:2px" in styles["ACADEMY"]
 
 
 def test_guestlistgo_zouk_signup_is_guestlistgo_branded(tmp_path):
@@ -210,8 +238,10 @@ def test_guestlistgo_zouk_signup_is_guestlistgo_branded(tmp_path):
         assert bad not in body, bad
     assert not re.search(r"\bpme\b", body)
     for want in ("MUST SHOW THIS AT THE DOOR!", "GUESTLISTGO GUEST LIST", "Friday 11/27 James Hype",
-                 "tom V +1", "subject to capacity", "Questions? Just reply to this email."):
+                 "Show this email at the door with your ID.", "subject to capacity",
+                 "Questions? Just reply to this email."):
         assert want in guest["text"], want
+    _no_confirmation_block(guest)
     assert "guestlistgo.me" in guest["html"]
     assert team["to"] == "team@playmakerentertainment.com"
     assert "GuestlistGo branding" in team["text"] and "Source: guestlistgo" in team["text"]
@@ -245,6 +275,7 @@ def test_two_night_zouk_open_then_closed_one_email_with_fallback(tmp_path):
     guest, team = api.sent
     assert "Friday 11/27 James Hype" in guest["text"] and "OMNIA Nightclub (Guest List - OMNIA Nightclub" in guest["text"]
     assert NOTICE in guest["text"] and "Ticket Wallet" in guest["text"]
+    _no_confirmation_block(guest)
     assert "Sat 2026-11-28 - OMNIA Nightclub (ZOUK closed that night: fallback) - Order ID ORDER-1" in team["text"]
 
 
