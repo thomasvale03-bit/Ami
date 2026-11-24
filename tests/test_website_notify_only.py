@@ -1,21 +1,24 @@
-"""Notify-only website venues (Thomas, Nov 14 2026): Ghostbar (LIV, LIV Beach,
-XS and Encore became bookable on urvenue, Nov 21 2026; ZOUK moved to the worker's
-confirmation-email path, Nov 24 2026). Accepted by intake; one branded team@ email
-from info@; no Gmail intake insert, no queue receipt, no guest email, no phone."""
+"""Notify-only website venues (Thomas, Nov 14 2026). LIV, LIV Beach, XS and
+Encore became bookable on urvenue (Nov 21 2026); ZOUK and then Ghostbar moved to
+the worker's confirmation-email path (Nov 24 2026), so no real venue is
+notify-only today. The path stays (accepted by intake; one branded team@ email
+from info@; no Gmail intake insert, no queue receipt, no guest email, no phone)
+and is exercised here with a stand-in venue, "Test Lounge"."""
 import threading, unittest
 from datetime import datetime, timedelta
 from unittest import mock
 import gmail_client, posh_webhook as pw
 import queue_service
 
-NOTIFY = ("Ghostbar",)
+NOTIFY = ("Test Lounge",)  # stand-in: no real venue is notify-only since Nov 24 2026
+DOOR = ("ZOUK", "Ghostbar")  # confirmation-email venues (worker), never notify-only
 URVENUE = ("XS", "Encore Beach Club", "Encore Beach Club At Night", "LIV", "LIV Beach")
 
 
 def payload(**kw):
     night = (datetime.now(pw.VEGAS).date() + timedelta(days=5)).isoformat()
     p = {"source": "playmaker", "first_name": "TEST", "last_name": "Guest", "email": "test@example.com",
-         "phone": "(602) 555-0100", "city": "Las Vegas", "venue": "Ghostbar", "date": night,
+         "phone": "(602) 555-0100", "city": "Las Vegas", "venue": "Test Lounge", "date": night,
          "women": 3, "men": 2, "age_21_confirmed": True, "ref": "pm-test1"}
     p.update(kw)
     return p
@@ -29,6 +32,11 @@ def intake(dry=False):
 
 
 class NotifyOnly(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(pw.WEBSITE_NOTIFY_ONLY, {"Las Vegas": set(NOTIFY)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_notify_only_validate(self):
         for v in NOTIFY:
             clean, err = pw.validate_website(payload(venue=v, ref="pm-" + v[:3]))
@@ -37,10 +45,12 @@ class NotifyOnly(unittest.TestCase):
             self.assertTrue(pw.is_notify_only("Las Vegas", v))
 
     def test_site_form_names_and_aliases_map(self):
-        for raw, want in (("Ghost Bar", "Ghostbar"), ("Ghostbar", "Ghostbar")):
+        for raw, want in (("Ghost Bar", "Ghostbar"), ("Ghostbar", "Ghostbar"),
+                          ("Ghostbar Rooftop Lounge", "Ghostbar")):
             clean, err = pw.validate_website(payload(venue=raw, city=""))
             self.assertIsNone(err, raw)
             self.assertEqual(clean["venue"], want, raw)
+            self.assertFalse(pw.is_notify_only("Las Vegas", want), raw)
         for raw in ("ZOUK Nightclub", "ZOUK", "Zouk"):
             clean, err = pw.validate_website(payload(venue=raw, city=""))
             self.assertIsNone(err, raw)
@@ -64,7 +74,7 @@ class NotifyOnly(unittest.TestCase):
         self.assertEqual(p["to"], rules.PLAYMAKER_EMAIL)
         self.assertEqual(p["to"], "team@playmakerentertainment.com")
         self.assertNotIn("from", p)  # default branded sender (info@)
-        for line in ("Guest: TEST Guest", "Email: test@example.com", "Venue: Ghostbar", "Female guests: 3", "Male guests: 2"):
+        for line in ("Guest: TEST Guest", "Email: test@example.com", "Venue: Test Lounge", "Female guests: 3", "Male guests: 2"):
             self.assertIn(line, p["text"])
         night = (datetime.now(pw.VEGAS).date() + timedelta(days=5)).isoformat()
         self.assertIn(f"Date: {night}", p["text"])
@@ -99,6 +109,13 @@ class NotifyOnly(unittest.TestCase):
         sb.assert_not_called()
 
 
+class NoRealVenueIsNotifyOnly(unittest.TestCase):
+    def test_zouk_and_ghostbar_left_notify_only(self):
+        self.assertEqual(pw.WEBSITE_NOTIFY_ONLY.get("Las Vegas"), set())
+        for v in DOOR:
+            self.assertFalse(pw.is_notify_only("Las Vegas", v), v)
+
+
 class UrvenueVenuesBookable(unittest.TestCase):
     """Nov 21 2026: LIV, LIV Beach, XS and Encore go through normal intake
     (queue job -> worker books on urvenue -> guest + team confirmation)."""
@@ -116,7 +133,7 @@ class UrvenueVenuesBookable(unittest.TestCase):
             self.assertFalse(pw.is_notify_only("Las Vegas", want), raw)
 
     def test_inserted_for_booking_not_notify_only(self):
-        for v in URVENUE:
+        for v in URVENUE + DOOR:
             i = intake()
             with mock.patch.object(gmail_client, "send_once", return_value=True), \
                  mock.patch.object(pw, "send_branded") as sb, \

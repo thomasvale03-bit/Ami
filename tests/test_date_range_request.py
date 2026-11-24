@@ -63,8 +63,11 @@ def test_plan_payload_validates_as_one_request():
 def test_plan_validation_errors():
     assert pw.validate_website(trip_payload(nights="tomorrow Hakkasan"))[1].startswith("bad nightly plan")
     assert pw.validate_website(trip_payload(nights=[{"date": _days(10), "venue": "Nowhere"}]))[1] == "bad nightly plan venue"
-    assert pw.validate_website(trip_payload(nights=[{"date": _days(10), "venue": "Ghostbar"}]))[1] == \
-        "notify-only venues must be their own request"
+    # Ghostbar is confirmation-email only like ZOUK (Nov 24 2026): fine alone, never mixed.
+    assert pw.validate_website(trip_payload(nights=[{"date": _days(10), "venue": "Ghostbar"}]))[1] is None
+    assert pw.validate_website(trip_payload(nights=[{"date": _days(10), "venue": "Ghostbar"},
+                                                    {"date": _days(11), "venue": "Hakkasan"}]))[1] == \
+        "Ghostbar must be its own request"
     assert pw.validate_website(trip_payload(nights=[{"date": _days(10), "venue": "ZOUK"},
                                                     {"date": _days(11), "venue": "Hakkasan"}]))[1] == \
         "ZOUK must be its own request"

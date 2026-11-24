@@ -13,6 +13,8 @@ False, nothing is submitted at that venue, and XS/LIV/Drai's fall back
 through DEFAULT_ROUTING (OMNIA first). ZOUK is never booked anywhere: an open
 ZOUK night gets the door confirmation email (event + terms from the ZOUK file)
 and a team@ "add to the ZOUK list" email; a closed ZOUK night falls back too.
+Ghostbar works the same way (ghostbar-night-rules.json, keys "Ghostbar|YYYY-MM-DD",
+optional "hours" field, e.g. "9pm-1am"; Thomas, Nov 24 2026).
 
 The files are read at send time, so editing them needs no restart or deploy.
 
@@ -46,11 +48,12 @@ log = logging.getLogger("amy.liv_rules")
 
 DEFAULT_PATH = "/home/box/agent-data/shared/liv-night-rules.json"
 XS_DEFAULT_PATH = "/home/box/agent-data/shared/xs-night-rules.json"
-FIELDS = ("event", "men", "women", "cutoff", "drinks", "notes")
+FIELDS = ("event", "men", "women", "cutoff", "drinks", "hours", "notes")
 VENUE_KEYS = {"LIV Nightclub": ("LIV Nightclub", "LIV"), "LIV Beach": ("LIV Beach", "LIV Dayclub"),
               "XS Nightclub": ("XS Nightclub", "XS"),
               "Drai's After Hours": ("Drai's After Hours", "Drai's", "Drais After Hours", "Drais"),
-              "ZOUK": ("ZOUK", "ZOUK Nightclub", "Zouk", "Zouk Nightclub")}
+              "ZOUK": ("ZOUK", "ZOUK Nightclub", "Zouk", "Zouk Nightclub"),
+              "Ghostbar": ("Ghostbar", "GHOSTBAR", "Ghost Bar", "Ghostbar Rooftop Lounge")}
 NO_LIST_RE = re.compile(r"^\s*no\s+(?:guest\s*)?list\b", re.I)
 
 TEMPLATE = {

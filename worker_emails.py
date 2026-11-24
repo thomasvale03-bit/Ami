@@ -584,13 +584,13 @@ def drais_team_email(ref, raw, request, bookings):
 
 
 
-# --- ZOUK Nightclub (Thomas, Nov 24 2026) ------------------------------------
-# No booking platform: Thomas puts guests on the ZOUK list with the venue.
+# --- Door-confirmation venues: ZOUK and Ghostbar (Thomas, Nov 24 2026) --------
+# No booking platform: Thomas puts guests on the list with the venue himself.
 # Website sign-ups get Tom's "Must show this at the door" confirmation (PME
 # branding; GuestlistGo branding for guestlistgo.me sign-ups, from
 # confirmations@guestlistgo.me with no PME / Playmaker / Thomas Vale mention)
-# and team@ gets an "add them to the ZOUK list" email. The night's event and
-# terms come from zouk-night-rules.json (read at send time, never guessed);
+# and team@ gets an "add them to the <venue> list" email. The night's event and
+# terms come from <venue>-night-rules.json (read at send time, never guessed);
 # with no terms on file the email uses Tom's default line. Closed / no_list
 # nights never get here: the worker falls back through DEFAULT_ROUTING.
 
@@ -601,20 +601,81 @@ ZOUK_DEFAULT_TERMS = "Everyone free entry until 1:25 AM or earlier"
 ZOUK_DEFAULT_CUTOFF = "1:30 AM"
 ZOUK_LINE_NOTE = "Guest list line is indoors by Redtail and can extend to the giant Sphere."
 ZOUK_SHOW_EMAIL = "Show this email at the door with your ID."
+SHOW_EMAIL = ZOUK_SHOW_EMAIL
 ZOUK_ADMISSION = ("Bring a valid, government-issued 21+ photo ID. Guest-list admission is subject to "
                   "the venue's rules, dress code, and capacity.")
+DOOR_ADMISSION = ZOUK_ADMISSION
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)")
+
+# Ghostbar (Thomas, Nov 24 2026, t1223u): "Academy- Thomas Vale. Ghostbar
+# Rooftop Lounge @ Palms: CONFIRMED on Thomas Vale's Guestlist 9pm-1am. All
+# free. Arrive early with your entire group, dress code will be enforced."
+GHOSTBAR_VENUE = rules.GHOSTBAR_VENUE
+GHOSTBAR_NAME = "Ghostbar Rooftop Lounge"
+GHOSTBAR_PLACE = "Palms Casino Resort"
+GHOSTBAR_DEFAULT_HOURS = "9 PM to 1 AM"
+GHOSTBAR_DEFAULT_TERMS = "All free"
+GHOSTBAR_ARRIVE = "Arrive early with your entire group; dress code will be enforced."
+
+
+def _ghostbar_lead(night, brand):
+    who = "the GuestlistGo guest list" if brand == "guestlistgo" else "Thomas Vale's guest list"
+    return [f"CONFIRMED on {who}", night["hours"]]
+
+
+DOOR_VENUES = {
+    "zouk": {"venue": ZOUK_VENUE, "name": ZOUK_VENUE, "short": "ZOUK", "place": ZOUK_PLACE,
+             "default_terms": ZOUK_DEFAULT_TERMS, "default_cutoff": ZOUK_DEFAULT_CUTOFF,
+             "default_hours": "", "lead": lambda night, brand: [ZOUK_DOORS], "note": ZOUK_LINE_NOTE},
+    "ghostbar": {"venue": GHOSTBAR_VENUE, "name": GHOSTBAR_NAME, "short": "Ghostbar", "place": GHOSTBAR_PLACE,
+                 "default_terms": GHOSTBAR_DEFAULT_TERMS, "default_cutoff": "1 AM",
+                 "default_hours": GHOSTBAR_DEFAULT_HOURS, "lead": _ghostbar_lead, "note": GHOSTBAR_ARRIVE},
+}
+
+
+def door_venue_key(venue):
+    """'zouk' / 'ghostbar' for a confirmation-email-only venue, else None."""
+    if rules.is_zouk(venue):
+        return "zouk"
+    if rules.is_ghostbar(venue):
+        return "ghostbar"
+    return None
+
+
+def door_guest_subject(key, start, end, brand="playmaker"):
+    name = "GuestlistGo" if brand == "guestlistgo" else "Playmaker Entertainment"
+    return f"You're on the list: {DOOR_VENUES[key]['name']} — {name} ({date_label(start, end)})"
 
 
 def zouk_guest_subject(start, end, brand="playmaker"):
-    name = "GuestlistGo" if brand == "guestlistgo" else "Playmaker Entertainment"
-    return f"You're on the list: ZOUK Nightclub — {name} ({date_label(start, end)})"
+    return door_guest_subject("zouk", start, end, brand)
+
+
+def ghostbar_guest_subject(start, end, brand="playmaker"):
+    return door_guest_subject("ghostbar", start, end, brand)
+
+
+def is_door_row(b, key=None):
+    """A ZOUK / Ghostbar night confirmed by email only (never a fallback club's order)."""
+    b = b or {}
+    k = door_venue_key(b.get("venue"))
+    return bool(k) and (key is None or k == key) and b.get("system") == "email_only"
 
 
 def is_zouk_row(b):
-    """A ZOUK night confirmed by email only (never a fallback club's order)."""
-    b = b or {}
-    return rules.is_zouk(b.get("venue")) and b.get("system") == "email_only"
+    return is_door_row(b, "zouk")
+
+
+def is_ghostbar_row(b):
+    return is_door_row(b, "ghostbar")
+
+
+def door_rows_key(rows):
+    """The door venue a job's email-only rows belong to (one per job), or None."""
+    for r in rows or []:
+        if is_door_row(r):
+            return door_venue_key(r.get("venue"))
+    return None
 
 
 def _ampm(text):
@@ -629,11 +690,18 @@ def _zouk_term(text):
     return re.sub(r"^comp(?=\s+until\b|\s*$)", "Complimentary entry", t, flags=re.I)
 
 
-def zouk_night(iso, rule=None):
-    """Door details for one ZOUK night from Tom's rules entry (or {}):
-    {'event': 'Friday 11/27 James Hype', 'terms': [...], 'cutoff': '1:30 AM'}."""
+def _hours(text):
+    """'9pm-1am' -> '9 PM to 1 AM'."""
+    t = _ampm(text)
+    return re.sub(r"\s*(?:-|–|—|\bto\b)\s*", " to ", t, count=1) if t else ""
+
+
+def door_night(key, iso, rule=None):
+    """Door details for one night from Tom's rules entry (or {}):
+    {'event': 'Friday 11/27 James Hype', 'terms': [...], 'cutoff': '1:30 AM', 'hours': ...}."""
     import liv_rules
-    rule = liv_rules.for_night(ZOUK_VENUE, iso) if rule is None else rule
+    spec = DOOR_VENUES[key]
+    rule = liv_rules.for_night(spec["venue"], iso) if rule is None else rule
     d = date.fromisoformat(iso)
     event = (rule.get("event") or "").strip()
     if event.upper() == "CLOSED":
@@ -650,29 +718,44 @@ def zouk_night(iso, rule=None):
     if rule.get("cutoff") and not terms:
         terms.append(f"Guest list until {_ampm(rule['cutoff'])}")
     if not terms:
-        terms.append(ZOUK_DEFAULT_TERMS)
+        terms.append(spec["default_terms"])
     if rule.get("drinks"):
         terms.append(_ampm(rule["drinks"]))
     return {"event": f"{d.strftime('%A')} {d.month:02d}/{d.day:02d}" + (f" {event}" if event else ""),
-            "terms": terms, "cutoff": _ampm(rule.get("cutoff")) or ZOUK_DEFAULT_CUTOFF,
-            "has_terms": bool(women or men or rule.get("cutoff"))}
+            "terms": terms, "cutoff": _ampm(rule.get("cutoff")) or spec["default_cutoff"],
+            "hours": _hours(rule.get("hours")) or spec["default_hours"],
+            "has_terms": bool(women or men or rule.get("cutoff") or rule.get("hours"))}
 
 
-def zouk_door_lines(request, raw, iso, brand="playmaker", rule=None):
+def zouk_night(iso, rule=None):
+    return door_night("zouk", iso, rule)
+
+
+def ghostbar_night(iso, rule=None):
+    return door_night("ghostbar", iso, rule)
+
+
+def door_lines(key, request, raw, iso, brand="playmaker", rule=None):
     """Tom's door text for one night (plain text lines). Tom (Nov 24 2026):
     no confirmation block; the email itself is shown at the door."""
-    night = zouk_night(iso, rule)
+    spec = DOOR_VENUES[key]
+    night = door_night(key, iso, rule)
     head = ["MUST SHOW THIS AT THE DOOR!", ""]
     head += ["GUESTLISTGO GUEST LIST"] if brand == "guestlistgo" else ["THOMAS VALE'S LIST", "ACADEMY"]
     return head + [
-        "", ZOUK_VENUE, ZOUK_PLACE, night["event"],
-        "", ZOUK_DOORS, *night["terms"],
-        "", ZOUK_LINE_NOTE,
+        "", spec["name"], spec["place"], night["event"],
+        "", *spec["lead"](night, brand), *night["terms"],
+        "", spec["note"],
     ]
+
+
+def zouk_door_lines(request, raw, iso, brand="playmaker", rule=None):
+    return door_lines("zouk", request, raw, iso, brand, rule)
 
 
 ZOUK_LIST_STYLE = ("font-family:'Playfair Display',Georgia,serif;font-size:34px;line-height:40px;"
                    "color:#D4AF37;font-weight:800;letter-spacing:2px;")
+DOOR_LIST_STYLE = ZOUK_LIST_STYLE
 
 
 def _zouk_door_html(lines):
@@ -681,7 +764,7 @@ def _zouk_door_html(lines):
     top = lines[2:]
     blank = [n for n, x in enumerate(top) if x == ""]
     brand_lines, venue_lines = top[:blank[0]], top[blank[0] + 1:blank[1]]
-    door_lines, line_note = top[blank[1] + 1:blank[2]], top[blank[2] + 1:]
+    door, line_note = top[blank[1] + 1:blank[2]], top[blank[2] + 1:]
     p = '<p style="margin:0;">{}</p>'
     out = ['<tr><td align="center" style="padding:26px 32px 8px 32px;font-family:Inter,Helvetica,Arial,sans-serif;'
            'font-size:13px;letter-spacing:3px;color:#D4AF37;font-weight:800;background-color:#0d0d0d;" '
@@ -703,13 +786,17 @@ def _zouk_door_html(lines):
     out.append(f'<p style="margin:0;"><strong style="color:#D4AF37;">{e(venue_lines[0])}</strong> &middot; '
                f'{e(venue_lines[1])}</p>')
     out.append(f'<p style="margin:0 0 12px 0;"><strong>{e(venue_lines[2])}</strong></p>')
-    out += [p.format(e(x)) for x in door_lines]
+    for x in door:
+        if x.startswith("CONFIRMED on "):
+            out.append(f'<p style="margin:0;"><strong style="color:#D4AF37;">{e(x)}</strong></p>')
+        else:
+            out.append(p.format(e(x)))
     out.append(f'<p style="margin:12px 0 0 0;">{e(" ".join(line_note))}</p>')
     out.append('</td></tr></table>\n</td></tr>')
     return "\n".join(out) + "\n"
 
 
-def _zouk_brand_html(page, brand):
+def _zouk_brand_html(page, brand, venue_name=ZOUK_VENUE):
     """Swap the PME template's brand pieces for GuestlistGo (logo, title,
     preheader, sign-off, footer) and drop the PME VIP block."""
     if brand != "guestlistgo":
@@ -723,7 +810,7 @@ def _zouk_brand_html(page, brand):
     page = page[:a] + page[z:]
     page = page.replace("You're on the list | Playmaker Entertainment", "You're on the list | GuestlistGo")
     page = page.replace("You're on the Playmaker guest list. Here's how to get your passes for the night.",
-                        "You're on the GuestlistGo guest list for ZOUK Nightclub.")
+                        f"You're on the GuestlistGo guest list for {venue_name}.")
     page = page.replace(">Playmaker Entertainment</p>", ">GuestlistGo</p>")
     a = page.index("    <!-- Footer -->")
     fa = page.index(">", page.index("<td", a)) + 1
@@ -732,10 +819,12 @@ def _zouk_brand_html(page, brand):
     return page
 
 
-def zouk_guest_email(request, bookings, raw=None, pending=None):
-    """bookings: the job's rows. ZOUK nights (email_only) get Tom's door
-    card; any other night (a closed ZOUK night's fallback club) is listed
+def door_guest_email(key, request, bookings, raw=None, pending=None):
+    """bookings: the job's rows. The door venue's nights (email_only) get Tom's
+    door card; any other night (a closed night's fallback club) is listed
     with its order like the normal confirmation."""
+    spec = DOOR_VENUES[key]
+    vname, short = spec["name"], spec["short"]
     raw = raw or {}
     brand = hold_brand(raw)
     gg = brand == "guestlistgo"
@@ -743,12 +832,12 @@ def zouk_guest_email(request, bookings, raw=None, pending=None):
     nights_rules = liv_rules.load()  # read at send time: Tom edits it weekly
     first = request.get("first_name") or "there"
     rows = sorted(bookings, key=lambda b: (b["date"], b["venue"]))
-    zouk_rows = [b for b in rows if is_zouk_row(b)]
-    other = [b for b in rows if not is_zouk_row(b)]
+    door_rows = [b for b in rows if is_door_row(b, key)]
+    other = [b for b in rows if not is_door_row(b, key)]
     list_lines, cards, door_text = [], [], []
     for b in rows:
-        if is_zouk_row(b):
-            list_lines.append(f"{html_emails._short_date(b['date'])} - {ZOUK_VENUE}")
+        if is_door_row(b, key):
+            list_lines.append(f"{html_emails._short_date(b['date'])} - {vname}")
         else:
             event = (b.get("event") or "").strip()
             oid = f"Order ID {b['order_id']}" if b.get("order_id") and not is_tao_no_order(b) else "on the guest list"
@@ -756,9 +845,9 @@ def zouk_guest_email(request, bookings, raw=None, pending=None):
                               + (f"{event} — {oid}" if event else oid) + ")")
             if b.get("fallback"):
                 list_lines.append(html_emails.FALLBACK_NOTICE)
-    for b in zouk_rows:
-        rule = liv_rules.for_night(ZOUK_VENUE, b["date"], nights_rules)
-        lines = zouk_door_lines(request, raw, b["date"], brand, rule)
+    for b in door_rows:
+        rule = liv_rules.for_night(spec["venue"], b["date"], nights_rules)
+        lines = door_lines(key, request, raw, b["date"], brand, rule)
         door_text.append("\n".join(lines))
         cards.append(_zouk_door_html(lines))
     waiting = pending_note(pending)
@@ -772,15 +861,15 @@ def zouk_guest_email(request, bookings, raw=None, pending=None):
         CAPACITY_LINE,
         waiting,
         "\n\n".join(door_text),
-        ZOUK_SHOW_EMAIL if zouk_rows else "",
+        SHOW_EMAIL if door_rows else "",
         tao_note,
-        ZOUK_ADMISSION,
+        DOOR_ADMISSION,
         "Questions? Just reply to this email." if gg else "Questions? Email info@playmakerentertainment.com",
         "GuestlistGo" if gg else "Playmaker Entertainment",
     ] if x)
-    night_rows = [(html_emails._short_date(b["date"]), b["venue"] if not is_zouk_row(b) else ZOUK_VENUE,
-                   (zouk_night(b["date"], liv_rules.for_night(ZOUK_VENUE, b["date"], nights_rules))["event"]
-                    if is_zouk_row(b) else _card_event(b)))
+    night_rows = [(html_emails._short_date(b["date"]), b["venue"] if not is_door_row(b, key) else vname,
+                   (door_night(key, b["date"], liv_rules.for_night(spec["venue"], b["date"], nights_rules))["event"]
+                    if is_door_row(b, key) else _card_event(b)))
                   for b in rows]
     fallback_nights = [html_emails._short_date(b["date"]) for b in other if b.get("fallback")]
     page = html_emails.render_confirmation(
@@ -791,28 +880,28 @@ def zouk_guest_email(request, bookings, raw=None, pending=None):
     if other:
         show = ('<tr><td class="px" style="padding:8px 40px 4px 40px;"><p style="margin:0;font-family:\'Inter\','
                 'Helvetica,Arial,sans-serif;font-size:15px;line-height:22px;color:#F5F5F5;font-weight:700;">'
-                f'{_html.escape(ZOUK_SHOW_EMAIL)}</p></td></tr>\n')
+                f'{_html.escape(SHOW_EMAIL)}</p></td></tr>\n')
         page = page[:a] + door + show + "\n" + page[a:]
     else:
         z = page.index("    <!-- Before you go -->")
         page = page[:a] + door + "\n" + page[z:]
-        page = page.replace("Follow the steps to grab your passes before you head out.", ZOUK_SHOW_EMAIL)
-    html = _zouk_brand_html(page, brand)
-    subject = zouk_guest_subject(request["start_date"], request["end_date"], brand)
+        page = page.replace("Follow the steps to grab your passes before you head out.", SHOW_EMAIL)
+    html = _zouk_brand_html(page, brand, vname)
+    subject = door_guest_subject(key, request["start_date"], request["end_date"], brand)
     for body in (text, html):
         low = body.lower()
         if LINE_PRIORITY_RE.search(body) or "jarvis" in low:
-            raise ValueError("ZOUK email must not promise line-jumping or mention Jarvis")
+            raise ValueError(f"{short} email must not promise line-jumping or mention Jarvis")
         if "show this text" in low or "your confirmation" in low:
-            raise ValueError("ZOUK email: no confirmation block and no 'Show this text' (Tom, Nov 24 2026)")
-        if zouk_rows and low.count("show this email at the door") != 1:
-            raise ValueError("ZOUK email must say 'Show this email at the door' exactly once")
+            raise ValueError(f"{short} email: no confirmation block and no 'Show this text' (Tom, Nov 24 2026)")
+        if door_rows and low.count("show this email at the door") != 1:
+            raise ValueError(f"{short} email must say 'Show this email at the door' exactly once")
         if "subject to capacity" not in low:
-            raise ValueError("ZOUK email must say subject to capacity")
+            raise ValueError(f"{short} email must say subject to capacity")
         if gg and ("playmaker" in low or "thomas vale" in low or "pme" in re.findall(r"[a-z]+", low)):
-            raise ValueError("GuestlistGo ZOUK email must not mention PME, Playmaker or Thomas Vale")
+            raise ValueError(f"GuestlistGo {short} email must not mention PME, Playmaker or Thomas Vale")
     if PHONE_RE.search(text) or any(PHONE_RE.search(c) for c in cards):
-        raise ValueError("ZOUK email must not include phone numbers")
+        raise ValueError(f"{short} email must not include phone numbers")
     payload = {"to": request["email"], "subject": subject, "text": text, "html": html,
                "dedupe_query": f'to:{request["email"]} subject:"{subject}"'}
     if gg:
@@ -820,11 +909,21 @@ def zouk_guest_email(request, bookings, raw=None, pending=None):
     return payload
 
 
-def zouk_team_email(ref, raw, request, bookings):
-    """team@: the guest got their ZOUK confirmation; add them to the ZOUK list
-    with the venue. Every guest detail, never a phone number."""
+def zouk_guest_email(request, bookings, raw=None, pending=None):
+    return door_guest_email("zouk", request, bookings, raw=raw, pending=pending)
+
+
+def ghostbar_guest_email(request, bookings, raw=None, pending=None):
+    return door_guest_email("ghostbar", request, bookings, raw=raw, pending=pending)
+
+
+def door_team_email(key, ref, raw, request, bookings):
+    """team@: the guest got their door confirmation; add them to the venue's
+    list with the venue. Every guest detail, never a phone number."""
     import liv_rules
     import request_plan
+    spec = DOOR_VENUES[key]
+    short = spec["short"]
     raw = raw or {}
     nights_rules = liv_rules.load()
     name = f"{request.get('first_name', '')} {request.get('last_name', '')}".strip() or raw.get("name", "")
@@ -841,25 +940,25 @@ def zouk_team_email(ref, raw, request, bookings):
         d = date.fromisoformat(b["date"])
         nf, nm = request_plan.party_for_night(raw, b["date"], request["female_count"], request["male_count"])
         party_bit = f" ({nf}F {nm}M)" if per_night else ""
-        if is_zouk_row(b):
-            night = zouk_night(b["date"], liv_rules.for_night(ZOUK_VENUE, b["date"], nights_rules))
+        if is_door_row(b, key):
+            night = door_night(key, b["date"], liv_rules.for_night(spec["venue"], b["date"], nights_rules))
             event = night["event"].split(" ", 2)[2] if night["event"].count(" ") >= 2 else ""
-            terms = "" if night["has_terms"] else " [no ZOUK rules on file for this night: default terms used]"
+            terms = "" if night["has_terms"] else f" [no {short} rules on file for this night: default terms used]"
             dates.append(f"{d.strftime('%a')} {b['date']}" + (f" ({event})" if event else "") + party_bit + terms)
         else:
             oid = b.get("order_id") or "signed up"
             others.append(f"{d.strftime('%a')} {b['date']} - {b['venue']}"
-                          + (" (ZOUK closed that night: fallback)" if b.get("fallback") else "")
+                          + (f" ({short} closed that night: fallback)" if b.get("fallback") else "")
                           + f" - Order ID {oid}" + party_bit)
     lines = [
-        "ACTION NEEDED: add this guest to the ZOUK list with the venue.",
-        f"AMY sent the guest their ZOUK confirmation email ({'GuestlistGo' if brand == 'guestlistgo' else 'PME'} "
-        "branding). ZOUK has no booking platform, so nothing was booked; the guest is not on the venue's list "
+        f"ACTION NEEDED: add this guest to the {short} list with the venue.",
+        f"AMY sent the guest their {short} confirmation email ({'GuestlistGo' if brand == 'guestlistgo' else 'PME'} "
+        f"branding). {short} has no booking platform, so nothing was booked; the guest is not on the venue's list "
         "until the team adds them.",
         "",
         f"Guest: {name}",
         f"Email: {request['email']}",
-        f"Venue: {ZOUK_VENUE}",
+        f"Venue: {spec['name']}",
         ("Date: " + dates[0]) if len(dates) == 1 else "Dates: " + "; ".join(dates),
         f"Female guests: {f}",
         f"Male guests: {m}",
@@ -873,11 +972,19 @@ def zouk_team_email(ref, raw, request, bookings):
     lines += ["", f"AMY ref: {ref}"]
     text = "\n".join(lines)
     label = date_label(request["start_date"], request["end_date"])
-    subject = f"Add to ZOUK list: {name} - ZOUK {label} ({f}F {m}M)".replace(",", "").replace(";", "")
+    subject = f"Add to {short} list: {name} - {short} {label} ({f}F {m}M)".replace(",", "").replace(";", "")
     html = "<pre style=\"font-family:Helvetica,Arial,sans-serif;white-space:pre-wrap\">" + \
         _html.escape(text, quote=False) + "</pre>"
     return {"to": TEAM_TO, "subject": subject, "text": text, "html": html,
             "dedupe_query": f'to:{TEAM_TO} subject:"{subject}" "AMY ref: {ref}"'}
+
+
+def zouk_team_email(ref, raw, request, bookings):
+    return door_team_email("zouk", ref, raw, request, bookings)
+
+
+def ghostbar_team_email(ref, raw, request, bookings):
+    return door_team_email("ghostbar", ref, raw, request, bookings)
 
 
 # --- Guest "on hold" status email (Thomas, Nov 21 2026) ----------------------

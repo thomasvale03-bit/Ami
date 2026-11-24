@@ -4,7 +4,7 @@ the worker records the night as email-only, emails the guest Tom's "Must show
 this at the door" confirmation (PME branding, or GuestlistGo branding for
 guestlistgo.me sign-ups) and emails team@ to add them to the ZOUK list. A
 closed / no_list night in zouk-night-rules.json falls back through
-DEFAULT_ROUTING (OMNIA first). Ghostbar stays notify-only."""
+DEFAULT_ROUTING (OMNIA first). Ghostbar followed the same day (test_ghostbar_confirmations.py)."""
 import json
 import re
 import threading
@@ -94,7 +94,7 @@ def _intake():
 def test_zouk_website_signup_goes_to_the_normal_intake_not_notify_only(monkeypatch):
     monkeypatch.setenv("AMY_QUEUE_ENABLED", "false")
     assert not pw.is_notify_only("Las Vegas", "ZOUK")
-    assert pw.is_notify_only("Las Vegas", "Ghostbar")
+    assert not pw.is_notify_only("Las Vegas", "Ghostbar")  # Ghostbar followed (Nov 24 2026)
     i = _intake()
     with mock.patch.object(pw, "send_branded") as sb, \
          mock.patch.object(pw, "_delivered", return_value=False), \
@@ -316,8 +316,8 @@ def test_lookup_prior_send_uses_the_zouk_subject():
     assert 'subject:"You\'re on the list: ZOUK Nightclub — Playmaker Entertainment (November 27)"' in ps.call_args[0][1]
 
 
-def test_ghostbar_unchanged_notify_only():
-    assert pw.is_notify_only("Las Vegas", "Ghostbar")
+def test_ghostbar_now_follows_zouk_not_notify_only():
+    assert not pw.is_notify_only("Las Vegas", "Ghostbar")
     clean, err = pw.validate_website(_payload(venue="Ghost Bar", city=""))
     assert err is None and clean["venue"] == "Ghostbar"
 

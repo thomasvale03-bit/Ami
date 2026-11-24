@@ -12,7 +12,7 @@ import gmail_client
 import posh_webhook as pw
 import worker_emails
 
-NOTIFY = ("Ghostbar",)  # ZOUK left notify-only Nov 24 2026 (worker confirmation)
+NOTIFY = ("Test Lounge",)  # stand-in: ZOUK and Ghostbar left notify-only Nov 24 2026
 GUEST_PHONE = "6025550100"
 
 
@@ -39,7 +39,8 @@ def pending(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("venue", NOTIFY)
 def test_notify_only_team_email_names_the_promoter(venue):
-    with mock.patch.object(pw, "send_branded", return_value=(200, {"sent": True})) as sb:
+    with mock.patch.dict(pw.WEBSITE_NOTIFY_ONLY, {"Las Vegas": set(NOTIFY)}), \
+         mock.patch.object(pw, "send_branded", return_value=(200, {"sent": True})) as sb:
         assert pw.accept_website(_intake(), payload(venue=venue, ref="pm-" + venue[:3])) == (200, "team notified")
     sent = sb.call_args[0][1]
     assert sent["to"] == "team@playmakerentertainment.com"
