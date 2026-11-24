@@ -22,27 +22,33 @@ books, cancels or emails, and it does not change booking behaviour.
   re-post and transitions during a restart are still reported.
 
 
-## Daily report (6:00 AM MST, `#generalchat`)
-Once a day at 6:00 AM America/Phoenix, AMY Worker posts last night's guest-list
-totals to `#generalchat` (`C0CJK07GMHV`, the workspace general channel;
-override with `SLACK_DAILY_REPORT_CHANNEL`). Booking updates stay in
-`#amy-bookings`. The report is built only from confirmed AMY bookings for
-the previous Phoenix calendar date (the evening that just wrapped, dayclubs
-included): each venue's signup (party) count and Girls/Guys (F/M), plus a
-unique-job Total. At 6:00 AM on Monday it reports Sunday's lists, not
-Monday's upcoming night. No names, holds, queue, last-24h, new sign-ups,
-check-ins, or pay figures.
+## Daily report (`#generalchat`)
+Morning guest-list numbers go out as **one** `#generalchat` post
+(`C0CJK07GMHV`, override with `SLACK_DAILY_REPORT_CHANNEL`). AMYI appends a
+`By venue (parties | girls/guys)` section for the previous Phoenix night to
+the Daily Guestlist Report text Jarvis hands over, then posts once:
 
-It posts at most once per night. The last-posted night is saved on the
-volume (`SLACK_DAILY_REPORT_STATE`, default
-`/data/slack-worker/daily-report.json`). If that file is missing after a
-restart, a read of recent `#generalchat` history is a second guard (TEST —
-previews do not count; official posts under the retired 11 PM title
-"Tonight's guest list" still count). A missed 6:00 AM post may still go
-out until 10:00 AM for that same evening's date; nothing posts before
-6:00 AM or at/after 10:00 AM. Older `last_posted_date` values from the
-retired 10 AM schedule are ignored. A night already posted at 11 PM is
-not posted again at 6 AM. Jacob's persona does not run this report.
+`python3 tools/post_daily_report.py --report-file /path/to/jarvis-report.txt`
+
+The venue section counts only verified saved bookings (a booking/order
+record) for that exact date and venue. It does not use the requested date
+range or fall back to the requested venue. Party counts are deduped by
+guest (email, or name if there is no email) + venue + date for this report
+only — booking behavior is unchanged. Girls/Guys (F/M) sum every qualifying
+job. Guests are first name plus last initial. No pay figures, emails, or
+phones. Booking updates stay in `#amy-bookings`.
+
+The Slack worker's separate 6:00 AM scheduled post is **off by default**.
+Set `SLACK_DAILY_REPORT_ENABLED=1` (or `true`/`yes`/`on`) to turn that
+poster back on. When enabled, it still posts at most once per night at
+6:00 AM America/Phoenix (missed slots until 10:00 AM), using the same
+verified-booking counts. The last-posted night is saved on the volume
+(`SLACK_DAILY_REPORT_STATE`, default `/data/slack-worker/daily-report.json`).
+If that file is missing after a restart, a read of recent `#generalchat`
+history is a second guard (TEST — previews do not count; official posts
+under the retired 11 PM title "Tonight's guest list" still count). Older
+`last_posted_date` values from the retired 10 AM schedule are ignored.
+Jacob's persona does not run this report.
 
 ## Answers (DM the bot or @mention it)
 Exact commands are answered directly: `status`, `state <name>`,
@@ -137,6 +143,9 @@ backup path). No reinstall is required unless a new scope is added —
 | `SLACK_OWNER_USER_ID` | Tom (DM fallback), default `U0CK42KJT7E` |
 | `SLACK_ALLOWED_USERS` | optional comma list of user IDs allowed to ask |
 | `SLACK_WORKER_STATE` | `/data/slack-worker/state.json` (volume at `/data`) |
+| `SLACK_DAILY_REPORT_CHANNEL` | default `C0CJK07GMHV` (`#generalchat`) |
+| `SLACK_DAILY_REPORT_ENABLED` | default off. Set `1`/`true`/`yes`/`on` to restore the separate 6:00 AM post |
+| `SLACK_DAILY_REPORT_STATE` | `/data/slack-worker/daily-report.json` |
 | `RAILWAY_DOCKERFILE_PATH` | `slack_worker/Dockerfile` |
 | `SLACK_USER_TOKEN` | optional: AMYI's user token (xoxp) from the AMY Worker app; turns on AMYI user-account replies |
 | `SLACK_FLYER_CHANNEL` | optional, default `C0CK42NLM9A` (#weeklyevents) |
