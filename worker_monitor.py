@@ -57,9 +57,10 @@ EXCEPTION_STATES = ("manual", "submission_uncertain", "needs_review")
 CLAIMED_STATES = ("assigned", "claimed", "running", "awaiting_human_verification")
 DEFAULT_ALERT_ENV = "/workspace/amy-worker/alert.env"
 
-# ZOUK left notify-only on Nov 24 2026 (worker sends its confirmation), so a
-# held ZOUK job is a real exception again; Ghostbar stays notify-only.
-NOTIFY_ONLY_RE = re.compile(r"\b(ghostbar|ghost bar)\b", re.I)
+# ZOUK and Ghostbar left notify-only on Nov 24 2026 (the worker sends their
+# confirmations), so a held ZOUK / Ghostbar job is a real exception. No venue
+# is notify-only today: this pattern never matches.
+NOTIFY_ONLY_RE = re.compile(r"(?!)")
 SCOTTSDALE_RE = re.compile(r"\b(riot house|almost famous|el hefe|cake)\b", re.I)
 NOT_POSTED_RE = re.compile(r"guest list not posted|no guest list posted", re.I)
 WORKER_ERROR_RE = re.compile(r"^\s*worker error\b", re.I)

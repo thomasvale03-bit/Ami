@@ -727,8 +727,8 @@ WEBSITE_VENUES = {
                   # urvenue.me venues, booked by the worker (Thomas, Nov 21 2026)
                   "LIV", "LIV Beach", "XS", "Encore Beach Club", "Encore Beach Club At Night",
                   # no booking platform: PME/GuestlistGo door confirmation email +
-                  # team@ "add to the ZOUK list" email from the worker (Thomas, Nov 24 2026)
-                  "ZOUK"},
+                  # team@ "add to the <venue> list" email from the worker (Thomas, Nov 24 2026)
+                  "ZOUK", "Ghostbar"},
     "Scottsdale": {"Almost Famous", "Riot House", "Cake", "El Hefe", "Maya Day Club", "Maya Night Club"},
 }
 # Notify-only website venues (Thomas, Nov 14 2026): accepted by intake, but the
@@ -737,14 +737,14 @@ WEBSITE_VENUES = {
 # Nov 21 2026: LIV, LIV Beach, XS and Encore moved to WEBSITE_VENUES (booked on
 # urvenue.me by the worker). Nov 24 2026: ZOUK moved to WEBSITE_VENUES (guest
 # confirmation email + team email from the worker, closed nights fall back);
-# Ghostbar stays notify-only.
+# later the same day Ghostbar moved too ("Now next is GhostBar - Very
+# similar!"). No venue is notify-only today; the path stays for future use.
 WEBSITE_NOTIFY_ONLY = {
-    "Las Vegas": {"Ghostbar"},
+    "Las Vegas": set(),
 }
-WEBSITE_NOTIFY_ONLY_ALIASES = (
-    ("ghostbar", "Las Vegas", "Ghostbar"),
-    ("ghost bar", "Las Vegas", "Ghostbar"),
-)
+WEBSITE_NOTIFY_ONLY_ALIASES = ()
+# Confirmation-email-only website venues: each must be its own request.
+WEBSITE_DOOR_VENUES = {"ZOUK", "Ghostbar"}
 
 
 def is_notify_only(city, venue):
@@ -829,6 +829,10 @@ WEBSITE_VENUE_ALIASES = (
     ("liv", "Las Vegas", "LIV"),
     ("zouk nightclub", "Las Vegas", "ZOUK"),
     ("zouk", "Las Vegas", "ZOUK"),
+    ("ghostbar rooftop lounge", "Las Vegas", "Ghostbar"),
+    ("ghost bar rooftop lounge", "Las Vegas", "Ghostbar"),
+    ("ghostbar", "Las Vegas", "Ghostbar"),
+    ("ghost bar", "Las Vegas", "Ghostbar"),
     ("xs nightclub", "Las Vegas", "XS"),
     ("xs", "Las Vegas", "XS"),
     ("almost famous", "Scottsdale", "Almost Famous"),
@@ -1186,9 +1190,10 @@ def _website_plan(p):
     if len(out) > WEBSITE_MAX_NIGHTS:
         return {}, "nightly plan too long"
     names = {v for vs in out.values() for v in vs}
-    if "ZOUK" in names and len(names) > 1:
-        # ZOUK is confirmation-email only (no booking platform): its own request.
-        return {}, "ZOUK must be its own request"
+    door = sorted(names & WEBSITE_DOOR_VENUES)
+    if door and len(names) > 1:
+        # ZOUK / Ghostbar are confirmation-email only (no booking platform): own request.
+        return {}, f"{door[0]} must be its own request"
     return out, None
 
 

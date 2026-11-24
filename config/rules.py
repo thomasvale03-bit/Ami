@@ -30,8 +30,8 @@ PAUSED_VENUES = {"Drai's"}  # never submit unless explicitly reactivated
 MANUAL_VENUES = set()
 
 # Wynn / Fontainebleau clubs booked on Playmaker's urvenue.me (UrGuestlist)
-# account (Thomas, Nov 21 2026). Ghostbar stays notify-only; ZOUK is
-# confirmation-email only (see ZOUK_VENUE below).
+# account (Thomas, Nov 21 2026). ZOUK and Ghostbar are confirmation-email
+# only (see ZOUK_VENUE / GHOSTBAR_VENUE below).
 URVENUE_VENUES = {
     "LIV Nightclub",
     "LIV Beach",
@@ -59,6 +59,25 @@ ZOUK_VENUE = "ZOUK Nightclub"
 def is_zouk(name):
     key = (name or "").strip().lower()
     return key in ("zouk", "zouk nightclub", "zouk las vegas", "zouk nightclub las vegas")
+
+
+# Ghostbar Rooftop Lounge (Palms) works exactly like ZOUK (Thomas, Nov 24
+# 2026: "Now next is GhostBar - Very similar!"): no booking platform, a door
+# confirmation email to the guest and a team@ "add to the Ghostbar list"
+# email; a closed / no_list night in ghostbar-night-rules.json falls back
+# through DEFAULT_ROUTING (OMNIA first).
+GHOSTBAR_VENUE = "Ghostbar"
+GHOSTBAR_NAMES = ("ghostbar", "ghost bar", "ghostbar rooftop lounge", "ghost bar rooftop lounge",
+                  "ghostbar las vegas", "ghostbar palms", "ghostbar rooftop lounge palms")
+
+
+def is_ghostbar(name):
+    return (name or "").strip().lower() in GHOSTBAR_NAMES
+
+
+def is_door_venue(name):
+    """Confirmation-email-only venues (no booking platform): ZOUK, Ghostbar."""
+    return is_zouk(name) or is_ghostbar(name)
 
 
 def is_drais(name):
@@ -137,6 +156,7 @@ VENUE_ALIASES = {
     "zouk nightclub": "ZOUK Nightclub",
     "zouk las vegas": "ZOUK Nightclub",
     "zouk nightclub las vegas": "ZOUK Nightclub",
+    **{n: GHOSTBAR_VENUE for n in GHOSTBAR_NAMES},
     "drai's": "Drai's",
     "drais": "Drai's",
     "drai’s": "Drai's",
@@ -188,7 +208,7 @@ def is_scottsdale(name):
 
 
 def is_known_vegas_venue(name):
-    return (name in ALL_AUTHORIZED_VENUES or is_drais(name) or is_zouk(name) or is_manual_venue(name)
+    return (name in ALL_AUTHORIZED_VENUES or is_drais(name) or is_door_venue(name) or is_manual_venue(name)
             or is_urvenue(name))
 
 
@@ -411,8 +431,8 @@ def keep_requested_night(venue, date_obj):
     no_list/closed night (also so fallback can run); off-schedule Drai's
     dates (Mon-Wed) are still dropped. Verified-dark daylife is dropped.
     """
-    if venue in NIGHTCLUBS or venue in URVENUE_NIGHTCLUBS or is_zouk(venue):
-        return True  # ZOUK: open nights are email-only; closed nights fall back
+    if venue in NIGHTCLUBS or venue in URVENUE_NIGHTCLUBS or is_door_venue(venue):
+        return True  # ZOUK / Ghostbar: open nights are email-only; closed nights fall back
     if is_drais(venue):
         return night_rules_closed(venue, date_obj) or _scheduled_open(venue, date_obj) is not False
     return venue_open_on(venue, date_obj) is not False

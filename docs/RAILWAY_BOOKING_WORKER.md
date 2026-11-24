@@ -165,4 +165,21 @@ email uses Tom's default ("Everyone free entry until 1:25 AM or earlier"). Per
 Tom's review (Nov 24 2026) there is no "confirmation text" block; the email says
 "Show this email at the door with your ID." once. A `closed` / `no_list` night falls back through
 DEFAULT_ROUTING (OMNIA first) like Drai's. Mixed ZOUK + other-venue requests go
-to review. Ghostbar stays notify-only.
+to review.
+
+### Ghostbar confirmations (Nov 24 2026)
+
+Ghostbar Rooftop Lounge (Palms) works exactly like ZOUK ("Now next is GhostBar -
+Very similar!"): website sign-ups go through normal intake into a queue job, the
+worker records the night `system: email_only` (venue `Ghostbar`), the guest gets
+the same gold "Must show this at the door" card (`worker_emails.ghostbar_guest_email`:
+THOMAS VALE'S LIST / ACADEMY, "CONFIRMED on Thomas Vale's guest list", 9 PM to
+1 AM, All free, "Arrive early with your entire group; dress code will be
+enforced.") and team@ gets "Add to Ghostbar list: ...". GuestlistGo sign-ups get
+the GuestlistGo version (no PME / Playmaker / Thomas Vale). Event and terms come
+from `ghostbar-night-rules.json` if present (`Ghostbar|YYYY-MM-DD`: event, women,
+men, cutoff, drinks, hours e.g. "9pm-1am"; `notes` internal); without an entry
+the defaults above are used. A `closed` / `no_list` night falls back through
+DEFAULT_ROUTING (OMNIA first). Mixed Ghostbar + other-venue requests go to
+review. Shared code: `worker_emails.DOOR_VENUES` / `door_guest_email` /
+`door_team_email`. No venue is notify-only any more.

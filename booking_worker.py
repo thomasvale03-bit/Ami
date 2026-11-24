@@ -761,15 +761,16 @@ class Worker:
                     continue
             if any(rules.is_manual_venue(v) for v in (raw.get("venues") or [])):
                 raise Stop("manual", "Requested venue stays manual")
-            if rules.is_zouk(venue):
+            if rules.is_door_venue(venue):
                 night_date = date.fromisoformat(night)
+                short = "ZOUK" if rules.is_zouk(venue) else "Ghostbar"
                 if rules.venue_open_on(venue, night_date) is False:
-                    # Closed / no-list ZOUK night (zouk-night-rules.json): the
-                    # same DEFAULT_ROUTING fallback (OMNIA first) as Drai's.
+                    # Closed / no-list ZOUK or Ghostbar night (<venue>-night-rules.json):
+                    # the same DEFAULT_ROUTING fallback (OMNIA first) as Drai's.
                     try:
                         item = self._fallback_nightclub(
                             job["ref"], venue, night, night_date, request, rehearse, token, out,
-                            Stop("retry", f"{venue} {night}: closed that night per Tom's ZOUK rules; nothing submitted",
+                            Stop("retry", f"{venue} {night}: closed that night per Tom's {short} rules; nothing submitted",
                                  kind="unavailable"))
                     except Stop as stop:
                         if (waiting is None or stop.action != "retry"
@@ -778,7 +779,7 @@ class Worker:
                         waiting.append((venue, night, stop))
                         continue
                 else:
-                    item = self._book_zouk(job["ref"], venue, night, request, rehearse, token)
+                    item = self._book_door_venue(job["ref"], venue, night, request, rehearse, token)
             elif rules.is_drais(venue):
                 night_date = date.fromisoformat(night)
                 if rules.venue_open_on(venue, night_date) is False:
@@ -815,7 +816,7 @@ class Worker:
     def _add_marquee_dayclub(self, ref, nights, request, rehearse, token, out):
         """Add Marquee Dayclub on each itinerary date it is open, through 2027-03-31."""
         from config import rules
-        if nights and all(rules.is_drais(v) or rules.is_zouk(v) for v, _ in nights):
+        if nights and all(rules.is_drais(v) or rules.is_door_venue(v) for v, _ in nights):
             return
         dates = []
         for _, night in nights:
@@ -1162,11 +1163,14 @@ class Worker:
         return {"record": record, "meta": {}}
 
     def _book_zouk(self, ref, venue, night, request, rehearse, token):
-        """ZOUK (Thomas, Nov 24 2026): no booking platform. Record the night as
-        email-only; _send_emails sends the guest's ZOUK door confirmation and
-        the team@ "add to the ZOUK list" email. Nothing is submitted."""
+        return self._book_door_venue(ref, venue, night, request, rehearse, token)
+
+    def _book_door_venue(self, ref, venue, night, request, rehearse, token):
+        """ZOUK / Ghostbar (Thomas, Nov 24 2026): no booking platform. Record the
+        night as email-only; _send_emails sends the guest's door confirmation
+        and the team@ "add to the <venue> list" email. Nothing is submitted."""
         from config import rules
-        venue = rules.ZOUK_VENUE
+        venue = rules.ZOUK_VENUE if rules.is_zouk(venue) else rules.GHOSTBAR_VENUE
         key = night_key(ref, venue, night)
         party = self._night_party(request, night)
         male, female = party["male_count"], party["female_count"]
@@ -1183,13 +1187,13 @@ class Worker:
         request = normalize_guest_request(raw)
         rows = [{**b["record"], **(b.get("meta") or {})} for b in bookings]
         pending = list(pending or [])
-        zouk = not drais and any(worker_emails.is_zouk_row(r) for r in rows)
-        email_only = drais or zouk
+        door = None if drais else worker_emails.door_rows_key(rows)  # 'zouk' / 'ghostbar'
+        email_only = drais or bool(door)
 
         def build(update=False):
-            if zouk:
-                return (("guest", worker_emails.zouk_guest_email(request, rows, raw=raw, pending=pending)),
-                        ("team", worker_emails.zouk_team_email(ref, raw, request, rows)))
+            if door:
+                return (("guest", worker_emails.door_guest_email(door, request, rows, raw=raw, pending=pending)),
+                        ("team", worker_emails.door_team_email(door, ref, raw, request, rows)))
             if drais:
                 return (("guest", worker_emails.drais_guest_email(request, rows)),
                         ("team", worker_emails.drais_team_email(ref, raw, request, rows)))

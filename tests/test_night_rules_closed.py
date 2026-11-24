@@ -111,7 +111,7 @@ def test_zouk_is_confirmation_only_never_a_booking_platform():
     # Nov 24 2026: ZOUK left notify-only (guest confirmation + team email);
     # it is still never booked on urvenue/TAO and is not a TAO nightclub.
     assert not is_notify_only("Las Vegas", "ZOUK")
-    assert is_notify_only("Las Vegas", "Ghostbar")
+    assert not is_notify_only("Las Vegas", "Ghostbar")  # Ghostbar followed ZOUK (Nov 24 2026)
     assert "ZOUK" not in rules.URVENUE_VENUES
     assert "ZOUK Nightclub" not in rules.URVENUE_VENUES
     assert "ZOUK Nightclub" not in rules.NIGHTCLUBS
