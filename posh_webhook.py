@@ -73,30 +73,39 @@ def signature_header_names(headers):
 
 # --- date logic -------------------------------------------------------------
 
+def _time_text(value):
+    """String form of a payload time, which may already be a datetime."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value or ""
+
+
 def _wall_clock(value):
     """Posh event times: by default read the clock time as Las Vegas wall
     time, ignoring the 'Z' (what real Zapier orders showed: a 10:30 PM show
     arrives as T22:30Z). Set POSH_EVENT_START_IS_UTC=true if the webhook
     turns out to send true UTC."""
-    if not value:
+    text = _time_text(value)
+    if not text:
         return None
     try:
         if os.environ.get("POSH_EVENT_START_IS_UTC", "").strip().lower() in ("1", "true", "yes"):
-            dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt.astimezone(VEGAS).replace(tzinfo=None)
-        return datetime.fromisoformat(value.strip()[:19])
+        return datetime.fromisoformat(text.strip()[:19])
     except ValueError:
         return None
 
 
 def _instant_in_vegas(value):
     """date_purchased is a real timestamp (UTC 'Z') -> naive Vegas time."""
-    if not value:
+    text = _time_text(value)
+    if not text:
         return None
     try:
-        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
     if dt.tzinfo is None:
@@ -220,7 +229,7 @@ def resolve_night(payload, lookup=None):
     bought = None
     if payload.get("date_purchased"):
         try:
-            bought = datetime.fromisoformat(payload["date_purchased"].strip().replace("Z", "+00:00"))
+            bought = datetime.fromisoformat(_time_text(payload["date_purchased"]).strip().replace("Z", "+00:00"))
             bought = bought if bought.tzinfo else bought.replace(tzinfo=timezone.utc)
         except ValueError:
             bought = None

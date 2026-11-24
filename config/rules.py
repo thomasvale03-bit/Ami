@@ -496,6 +496,8 @@ POSH_SERIES_SEEDS = {
     "6a682ff9374ee034d5": ("guest-list-hakkasan", ("11-30", "12-30")),
     "6a80e79648e2b4a133": ("guestlist-tao-nc", ("8-30", "9-30")),
     "6acab072b53cd5b9c2": ("guestlist-omnia", ("8-0", "9-0")),
+    # Same OMNIA series: ObjectId timestamp ticked 1s while minting later children.
+    "6acab073b53cd5b9c2": ("guestlist-omnia", ("8-0", "9-0")),
     # DESEO (Sundays 10:30 PM-4 AM): slug ends Monday 12-0 UTC (PST) / 11-0 (PDT).
     "6aae53d9c6a734a4ef": ("deseo-omnia", ("12-0", "11-0", "8-30", "9-30", "11-30", "12-30"), (0,)),
     "6a68319ec56e69cb61": ("guest-list-marquee-night-club", ("8-30", "9-30")),

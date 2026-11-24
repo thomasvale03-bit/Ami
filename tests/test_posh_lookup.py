@@ -404,3 +404,107 @@ class OmniaAndCarouselExtrapolationTests(unittest.TestCase):
             main.run_once(svc, "live", {})
             notify_mock.assert_called_once()
             self.assertEqual(notify_mock.call_args[0][0], "exception")
+
+
+def _omnia_page(event_id, slug, start_iso, siblings):
+    links = "".join(f'"{eid}",{{"href":"/e/{s}"}}' for eid, s in siblings.items())
+    return (
+        f'<html><meta property="og:url" content="https://posh.vip/e/{slug}"/>'
+        f'<script>{{"eventId":"{event_id}","startDate":"{start_iso}"}}</script>'
+        f"<script>{links}</script></html>"
+    )
+
+
+# Real Nov 25 2026 OMNIA carousel (checked live Nov 23 2026): stops at
+# Friday Dec 18 (slug 2026-12-19-9-0) and does not list Saturday Dec 19
+# (id 6acab073b53cd5b9c2c7888c, slug 2026-12-20-9-0). Mid-series ids
+# crossed a 1-second ObjectId timestamp boundary (6acab072 -> 6acab073).
+OMNIA_NOV25_SIBS = {
+    "6acab072b53cd5b9c2c7885f": "guestlist-omnia-2026-11-25-9-0",
+    "6acab072b53cd5b9c2c78862": "guestlist-omnia-2026-11-27-9-0",
+    "6acab072b53cd5b9c2c78865": "guestlist-omnia-2026-11-28-9-0",
+    "6acab072b53cd5b9c2c78868": "guestlist-omnia-2026-11-29-9-0",
+    "6acab072b53cd5b9c2c7886b": "guestlist-omnia-2026-12-2-9-0",
+    "6acab072b53cd5b9c2c7886e": "guestlist-omnia-2026-12-4-9-0",
+    "6acab072b53cd5b9c2c78871": "guestlist-omnia-2026-12-5-9-0",
+    "6acab072b53cd5b9c2c78874": "guestlist-omnia-2026-12-6-9-0",
+    "6acab072b53cd5b9c2c78877": "guestlist-omnia-2026-12-9-9-0",
+    "6acab072b53cd5b9c2c7887a": "guestlist-omnia-2026-12-11-9-0",
+    "6acab072b53cd5b9c2c7887d": "guestlist-omnia-2026-12-12-9-0",
+    "6acab072b53cd5b9c2c78880": "guestlist-omnia-2026-12-13-9-0",
+    "6acab072b53cd5b9c2c78883": "guestlist-omnia-2026-12-16-9-0",
+    "6acab073b53cd5b9c2c78886": "guestlist-omnia-2026-12-18-9-0",
+    "6acab073b53cd5b9c2c78889": "guestlist-omnia-2026-12-19-9-0",
+}
+OMNIA_DEC19_ID = "6acab073b53cd5b9c2c7888c"
+OMNIA_DEC19_SLUG = "guestlist-omnia-2026-12-20-9-0"
+OMNIA_DEC19_START = "2026-12-19T19:30:00-08:00"
+
+
+class OmniaTimestampBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        pl.reset_cache()
+
+    def test_later_omnia_id_still_matches_series_seed(self):
+        early = "6acab072b53cd5b9c2c7885f"
+        late = OMNIA_DEC19_ID
+        self.assertEqual(pl.series_key(early), "6acab072b53cd5b9c2")
+        self.assertEqual(pl.series_key(late), "6acab073b53cd5b9c2")
+        self.assertTrue(pl.same_series(early, late))
+        self.assertEqual(pl.series_bases(late), ["guestlist-omnia"])
+        self.assertEqual(pl.seed_for(late)[0], "guestlist-omnia")
+
+    def test_extrapolates_across_objectid_timestamp_tick(self):
+        ext = pl._extrapolate_beyond_carousel(
+            OMNIA_NOV25_SIBS, OMNIA_DEC19_ID, "6acab073b53cd5b9c2")
+        self.assertIn(OMNIA_DEC19_SLUG, ext)
+        # A page whose last sibling is still on the old prefix must also work.
+        only_early = {k: v for k, v in OMNIA_NOV25_SIBS.items() if k.startswith("6acab072")}
+        ext_early = pl._extrapolate_beyond_carousel(
+            only_early, OMNIA_DEC19_ID, "6acab073b53cd5b9c2")
+        self.assertIn(OMNIA_DEC19_SLUG, ext_early)
+
+    def test_real_start_finds_dec19_from_nearby_carousel_page(self):
+        nov25 = "guestlist-omnia-2026-11-25-9-0"
+        pages = {
+            nov25: _omnia_page(
+                "6acab072b53cd5b9c2c7885f", nov25,
+                "2026-11-24T19:30:00-08:00", OMNIA_NOV25_SIBS),
+            OMNIA_DEC19_SLUG: _omnia_page(
+                OMNIA_DEC19_ID, OMNIA_DEC19_SLUG, OMNIA_DEC19_START,
+                {**OMNIA_NOV25_SIBS, OMNIA_DEC19_ID: OMNIA_DEC19_SLUG}),
+        }
+        fetch, calls = fake_site(pages)
+        bought = datetime(2026, 11, 23, 20, tzinfo=timezone.utc)
+        start = pl.real_start(
+            OMNIA_DEC19_ID, "Guestlist | OMNIA", bought, fetch=fetch,
+            sleep=lambda s: None, event_start="2026-10-10T19:30:00.000Z",
+            event_end="2026-10-11T04:00:00.000Z")
+        self.assertEqual(start, datetime.fromisoformat(OMNIA_DEC19_START))
+        self.assertEqual(pl.night_from_start(start), date(2026, 12, 19))
+        self.assertIn(OMNIA_DEC19_SLUG, "".join(calls))
+
+    def test_derived_end_times_accepts_datetime(self):
+        as_str = pl.derived_end_times("2026-10-10T19:30:00.000Z", "2026-10-11T04:00:00.000Z")
+        as_dt = pl.derived_end_times(
+            datetime(2026, 10, 10, 19, 30), datetime(2026, 10, 11, 4, 0))
+        self.assertEqual(as_str, as_dt)
+        self.assertTrue(as_dt)
+
+    def test_resolve_night_survives_datetime_event_start(self):
+        real = datetime.fromisoformat(OMNIA_DEC19_START)
+        payload = series_payload(
+            event_id=OMNIA_DEC19_ID, event_name="Guestlist | OMNIA",
+            event_start=datetime(2026, 10, 10, 19, 30, tzinfo=timezone.utc),
+            event_end=datetime(2026, 10, 11, 4, 0, tzinfo=timezone.utc),
+            date_purchased="2026-11-23T20:00:00.000Z")
+        night, how, start = pw.resolve_night(payload, lookup=lambda *a, **k: real)
+        self.assertEqual((night, how, start), (date(2026, 12, 19), "posh_page",
+                                               real.astimezone(pw.VEGAS).replace(tzinfo=None)))
+
+        # The real lookup path must not raise if event_start is a datetime.
+        def boom_if_crash(*a, **k):
+            return pl.real_start(*a, sleep=lambda s: None, max_fetches=1, fetch=lambda url: "<html></html>", **k)
+
+        night, how, _ = pw.resolve_night(payload, lookup=boom_if_crash)
+        self.assertNotEqual(how, None)

@@ -401,7 +401,8 @@ def handle(method, url, headers, payload, *, s=None, now=None):
         if method == 'POST' and path.startswith('/queue/requeue/'):
             if not isinstance(payload, dict):
                 raise Conflict('JSON object required')
-            return 200, s.owner_requeue(unquote(path[len('/queue/requeue/'):]), payload.get('owner_approval'), now)
+            return 200, s.owner_requeue(unquote(path[len('/queue/requeue/'):]), payload.get('owner_approval'), now,
+                                        start_date=payload.get('start_date'), end_date=payload.get('end_date'))
         if method == 'POST' and path.startswith('/queue/owner-complete/'):
             if not isinstance(payload, dict):
                 raise Conflict('JSON object required')

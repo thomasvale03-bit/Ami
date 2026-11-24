@@ -93,6 +93,50 @@ def series_key(event_id):
     return (event_id or "")[:PREFIX_LEN] if len(event_id or "") == 24 else ""
 
 
+# Posh child ids are MongoDB ObjectIds: 4-byte timestamp + 5-byte random +
+# 3-byte counter. A long series minted in one burst can cross a 1-second
+# timestamp boundary, so the first 8 hex chars change while the random
+# (chars 8-17) stays the same. The 18-char seed prefix then misses later
+# children (OMNIA 6acab072... -> 6acab073... on 2026-10-10 21:38:59Z).
+_OID_TS_SLOP = 2  # seconds
+
+
+def series_keys(event_id):
+    """18-char prefixes for this id, including timestamp +/- slop with the
+    same 5-byte random, so a series that crossed a 1-second ObjectId
+    boundary still matches its seed and siblings."""
+    key = series_key(event_id)
+    if not key:
+        return []
+    keys = [key]
+    try:
+        ts = int(event_id[0:8], 16)
+        rand = event_id[8:18]
+        for delta in range(-_OID_TS_SLOP, _OID_TS_SLOP + 1):
+            if delta == 0:
+                continue
+            keys.append(f"{(ts + delta) & 0xFFFFFFFF:08x}{rand}")
+    except ValueError:
+        pass
+    return list(dict.fromkeys(keys))
+
+
+def same_series(a, b):
+    """True when two child event ids belong to one series, including
+    across a 1-second ObjectId timestamp tick."""
+    ka, kb = series_key(a), series_key(b)
+    return bool(ka and kb) and (ka == kb or ka in series_keys(b) or kb in series_keys(a))
+
+
+def seed_for(event_id):
+    """Seed tuple for this child id, trying every adjacent ObjectId prefix."""
+    known = seeds()
+    for key in series_keys(event_id):
+        if key in known:
+            return known[key]
+    return None
+
+
 def seeds():
     """{prefix: (base, end_times)} from config plus POSH_SERIES_SEEDS env."""
     from config import rules
@@ -126,11 +170,13 @@ def _learn(found):
 
 def series_bases(event_id):
     """Slug bases known for this event's series: learned first, then seeds."""
-    key = series_key(event_id)
-    if not key:
+    keys = series_keys(event_id)
+    if not keys:
         return []
-    out = sorted(_series.get(key, ()))
-    seed = seeds().get(key)
+    out = []
+    for key in keys:
+        out.extend(sorted(_series.get(key, ())))
+    seed = seed_for(event_id)
     if seed:
         out.append(seed[0])
         for t in seed[1]:
@@ -163,6 +209,23 @@ def _forms(dt):
     return out
 
 
+def _series_clock(value):
+    """Naive wall clock from a payload time, which may be a str or datetime.
+
+    String values keep the historic first-19-characters parse. Datetimes
+    (seen when a stored payload is re-ingested) use their wall clock so
+    derived_end_times never calls .strip() on a non-string.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    try:
+        return datetime.fromisoformat(str(value).strip()[:19])
+    except ValueError:
+        return None
+
+
 def derived_end_times(event_start=None, event_end=None, wide=False):
     """UTC end-time slug parts suggested by the payload's series times.
 
@@ -171,16 +234,14 @@ def derived_end_times(event_start=None, event_end=None, wide=False):
     (event_end, else start + 6 h) is turned into UTC for PDT (+7) and PST
     (+8). wide=True adds start + 5/7 h and the raw clock read as real UTC."""
     ends = []
-    try:
-        if event_end:
-            ends.append(datetime.fromisoformat(event_end.strip()[:19]))
-        if event_start:
-            st = datetime.fromisoformat(event_start.strip()[:19])
-            ends.append(st + timedelta(hours=6))
-            if wide:
-                ends += [st + timedelta(hours=5), st + timedelta(hours=7)]
-    except ValueError:
-        pass
+    end_dt = _series_clock(event_end)
+    start_dt = _series_clock(event_start)
+    if end_dt:
+        ends.append(end_dt)
+    if start_dt:
+        ends.append(start_dt + timedelta(hours=6))
+        if wide:
+            ends += [start_dt + timedelta(hours=5), start_dt + timedelta(hours=7)]
     out = []
     for e in ends:
         for x in (e + timedelta(hours=7), e + timedelta(hours=8)) + ((e,) if wide else ()):
@@ -295,12 +356,28 @@ def _all_candidates(event_id, event_name, purchased_utc, event_start, event_end)
     return list(dict.fromkeys(out))
 
 
+
+def _series_id_step(earlier_id, later_id):
+    """Counter stride between two same-series ObjectIds.
+
+    A 1-second timestamp tick adds ~2^56 to the integer id, so a raw
+    subtraction cannot be used as the event stride. When the 5-byte
+    random matches, use the 3-byte counters instead.
+    """
+    raw = int(later_id, 16) - int(earlier_id, 16)
+    if 0 < raw < 0x1000000:
+        return raw
+    if later_id[8:18] == earlier_id[8:18]:
+        return int(later_id[18:24], 16) - int(earlier_id[18:24], 16)
+    return raw
+
+
 def _extrapolate_beyond_carousel(found, target_id, key):
     """When target_id is beyond a series page's sibling carousel, project its
     slug from the series' hex-ID stride and active weekdays."""
-    if not key or series_key(target_id) != key:
+    if not series_key(target_id):
         return []
-    series_items = sorted((i, s) for i, s in found.items() if series_key(i) == key and i < target_id)
+    series_items = sorted((i, s) for i, s in found.items() if same_series(i, target_id) and i < target_id)
     if len(series_items) < 2:
         return []
     max_id, max_slug = series_items[-1]
@@ -310,10 +387,10 @@ def _extrapolate_beyond_carousel(found, target_id, key):
     base = max_slug[:m.start()]
     try:
         d_max = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        target_diff = int(target_id, 16) - int(max_id, 16)
+        target_diff = _series_id_step(max_id, target_id)
     except ValueError:
         return []
-    if target_diff <= 0:
+    if not target_diff or target_diff <= 0:
         return []
     t_max = f"{int(m.group(4))}-{m.group(5)}"
     times = list(dict.fromkeys([t_max] + sorted(_end_times.get(base, ()))))
@@ -327,7 +404,10 @@ def _extrapolate_beyond_carousel(found, target_id, key):
             weekdays.append(dt.weekday())
             if idx > 0:
                 diff = int(eid, 16) - int(series_items[idx - 1][0], 16)
-                if diff > 0:
+                # Ignore the 4-byte ObjectId timestamp jump (~2^56) when a
+                # series crosses a 1-second boundary; the 3-byte counter is
+                # under 0x1000000 and the usual stride is 3.
+                if 0 < diff < 0x1000000:
                     id_steps.append(diff)
         except ValueError:
             continue
@@ -375,7 +455,7 @@ def _weekly_probe(event_id, purchased_utc, get, tried, event_start=None, event_e
     need_weekdays=True (first pass) only runs for seeds with known weekdays;
     the second pass (after the sibling search) learns them from nearby pages."""
     key = series_key(event_id)
-    seed = seeds().get(key) if key else None
+    seed = seed_for(event_id)
     if not seed or purchased_utc is None:
         return None
     base = seed[0]
@@ -389,7 +469,7 @@ def _weekly_probe(event_id, purchased_utc, get, tried, event_start=None, event_e
         seen = set()
         for eid, slug in list(_slugs.items()):
             m = SLUG_TAIL_RE.search(slug)
-            if m and series_key(eid) == key and slug.startswith(base + "-"):
+            if m and same_series(eid, event_id) and slug.startswith(base + "-"):
                 try:
                     seen.add(date(int(m.group(1)), int(m.group(2)), int(m.group(3))).weekday())
                 except ValueError:
@@ -436,7 +516,7 @@ def _weekly_probe(event_id, purchased_utc, get, tried, event_start=None, event_e
             _, confirmed = _base_and_time(slug)
             if pid == event_id:
                 return page_start(html)
-            if pid and series_key(pid) == key and pid > event_id and len(weekdays) == 1:
+            if pid and same_series(pid, event_id) and pid > event_id and len(weekdays) == 1:
                 return None  # walked past the target: it is earlier than expected
     return None
 
@@ -487,7 +567,7 @@ def _resolve(event_id, event_name, purchased_utc, get, event_start=None, event_e
                     if ext_found[event_id] == page_slug(ext_html):
                         return page_start(ext_html)
                     return open_target(ext_found[event_id])
-            series_ids = [i for i in found if series_key(i) == key] if key else []
+            series_ids = [i for i in found if same_series(i, event_id)] if key else []
             can_hop = bool(series_ids) and max(series_ids) < event_id
             later = [found[i] for i in series_ids if found[i] not in tried] if can_hop else []
             if not later:
