@@ -1,10 +1,11 @@
-"""Last-night guest-list report: confirmed bookings for last night, no names or extras."""
+"""Last-night guest-list report: verified bookings for that exact night, party counts."""
 import json
 import os
 import tempfile
 import unittest
 from datetime import datetime
 from unittest import mock
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from slack_worker import daily_report as dr
@@ -31,8 +32,10 @@ SAT_SIX_AM = datetime(2026, 11, 22, 6, 0, tzinfo=PHX).timestamp()
 
 def job(ref, state, name='Jessica Alba', venues=('Hakkasan Nightclub',), start='2026-11-20',
         end=None, reason='', updated=TEN_AM - 3600, created=TEN_AM - 200000,
-        bookings=None, female=2, male=1, source='website', posh=None, email='jess@example.com',
+        bookings=None, female=2, male=1, source='website', posh=None, email=None,
         phone='602-555-1234'):
+    if email is None:
+        email = f'{ref}@example.com'
     meta = {}
     if bookings:
         meta['evidence'] = {'verified': True, 'bookings': bookings}
@@ -100,9 +103,15 @@ class ShortVenueAndTotalsTest(unittest.TestCase):
         self.assertEqual(t['jobs'], 3)
         self.assertEqual(t['female'], 5)
         self.assertEqual(t['male'], 6)
-        self.assertEqual(t['venues']['OMNIA'], {'jobs': 1, 'female': 2, 'male': 1})
-        self.assertEqual(t['venues']['Hakkasan'], {'jobs': 1, 'female': 0, 'male': 5})
-        self.assertEqual(t['venues']['Marquee Dayclub'], {'jobs': 1, 'female': 3, 'male': 0})
+        self.assertEqual(t['venues']['OMNIA']['parties'], 1)
+        self.assertEqual(t['venues']['OMNIA']['female'], 2)
+        self.assertEqual(t['venues']['OMNIA']['male'], 1)
+        self.assertEqual(t['venues']['Hakkasan']['parties'], 1)
+        self.assertEqual(t['venues']['Hakkasan']['female'], 0)
+        self.assertEqual(t['venues']['Hakkasan']['male'], 5)
+        self.assertEqual(t['venues']['Marquee Dayclub']['parties'], 1)
+        self.assertEqual(t['venues']['Marquee Dayclub']['female'], 3)
+        self.assertEqual(t['venues']['Marquee Dayclub']['male'], 0)
         self.assertNotIn('TAO', t['venues'])
 
     def test_multi_venue_job_counts_at_each_venue_but_once_in_total(self):
@@ -134,7 +143,9 @@ class ShortVenueAndTotalsTest(unittest.TestCase):
                           booked('Marquee Nightclub', '2026-11-22')]),
         ]
         t = dr.tonight_totals(jobs, today)
-        self.assertEqual(t['venues']['Marquee'], {'jobs': 1, 'female': 2, 'male': 2})
+        self.assertEqual(t['venues']['Marquee']['parties'], 1)
+        self.assertEqual(t['venues']['Marquee']['female'], 2)
+        self.assertEqual(t['venues']['Marquee']['male'], 2)
         self.assertEqual(t['jobs'], 1)
 
 
@@ -164,23 +175,29 @@ class RenderTest(unittest.TestCase):
                 email='corey@example.com', phone='702-555-0100'),
         ]
 
-    def test_render_matches_toms_numbers_style_with_no_names_holds_or_extras(self):
+    def test_render_matches_toms_numbers_style_with_initials_and_no_holds_or_extras(self):
         text = dr.sanitize(dr.render(dr.build(self.jobs, {}, TEN_AM)))
         self.assertEqual(text, (
             "*Last night's guest list — Fri 11/20*\n"
             "\n"
-            "Venue: Signups | Girls/Guys\n"
+            "Venue: Parties | Girls/Guys\n"
             "\n"
             "OMNIA: 2 | 3F/1M\n"
+            "Parker L., Kirk B.\n"
             "Hakkasan: 1 | 0F/5M\n"
+            "Victor T.\n"
             "JEWEL: 1 | 2F/1M\n"
+            "Izabella D.\n"
             "Marquee: 1 | 1F/2M\n"
+            "Marcello J.\n"
             "Marquee Dayclub: 1 | 3F/0M\n"
+            "Cora A.\n"
             "TAO: 1 | 3F/0M\n"
+            "Cate C.\n"
             "\n"
             "Total: 7 | 12F/9M\n"
         ))
-        self.assertNotIn('Parker', text)
+        self.assertNotIn('Lane', text)
         self.assertNotIn('Corey', text)
         self.assertNotIn('Ouns', text)
         self.assertNotIn('Queue', text)
@@ -198,7 +215,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(text, (
             "*Last night's guest list — Fri 11/20*\n"
             "\n"
-            "Venue: Signups | Girls/Guys\n"
+            "Venue: Parties | Girls/Guys\n"
             "\n"
             "None confirmed.\n"
             "\n"
@@ -228,8 +245,11 @@ class ScheduleAndDedupeTest(unittest.TestCase):
         self.jobs = [job('done-tao', 'done', name='Estefany Barraza',
                          venues=('TAO Nightclub',), start='2026-11-20', female=2, male=0,
                          updated=TEN_AM - 60, bookings=[booked('TAO Nightclub', '2026-11-20')])]
+        self._enabled = mock.patch.dict(os.environ, {dr.ENABLED_ENV: '1'})
+        self._enabled.start()
 
     def tearDown(self):
+        self._enabled.stop()
         self.dir.cleanup()
 
     def _reporter(self, api=None, history_client=None, channel='C0CJK07GMHV'):
@@ -291,8 +311,9 @@ class ScheduleAndDedupeTest(unittest.TestCase):
         self.assertEqual(text, self.posted[0])
         self.assertIn("*Last night's guest list — Fri 11/20*", text)
         self.assertIn('TAO: 1 | 2F/0M', text)
+        self.assertIn('Estefany B.', text)
+        self.assertNotIn('Barraza', text)
         self.assertIn('Total: 1 | 2F/0M', text)
-        self.assertNotIn('Estefany', text)
         saved = json.loads(open(self.path).read())
         self.assertEqual(saved['last_posted_night'], '2026-11-20')
 
@@ -431,6 +452,223 @@ class ScheduleAndDedupeTest(unittest.TestCase):
             ('join', 'C0CJK07GMHV'),
             ('post', 'C0CJK07GMHV', 'TEST — hello'),
         ])
+
+
+
+class VerifiedBookingAndPartyDedupeTest(unittest.TestCase):
+    def test_done_without_saved_booking_is_excluded(self):
+        today = datetime.fromtimestamp(TEN_AM, PHX).date()
+        jobs = [job('done-only', 'done', name='No Record', venues=('Hakkasan Nightclub',),
+                    female=2, male=0)]
+        t = dr.tonight_totals(jobs, today)
+        self.assertEqual(t['parties'], 0)
+        self.assertEqual(t['venues'], {})
+
+    def test_requested_range_without_that_nights_booking_is_excluded(self):
+        today = datetime.fromtimestamp(TEN_AM, PHX).date()
+        jobs = [
+            job('range-other-nights', 'manual', name='Makayla Ben',
+                venues=('Hakkasan Nightclub',), start='2026-11-14', end='2026-11-27',
+                female=3, male=1,
+                bookings=[booked('JEWEL Nightclub', '2026-11-14'),
+                          booked('OMNIA Nightclub', '2026-11-15'),
+                          booked('Marquee Nightclub', '2026-11-16')]),
+            job('omnia-form', 'manual', name='Alpana Dhamelia',
+                venues=('OMNIA Nightclub',), start='2026-11-19', end='2026-11-21',
+                female=3, male=0,
+                bookings=[booked('OMNIA Nightclub', '2026-11-19')]),
+        ]
+        t = dr.tonight_totals(jobs, today)
+        self.assertEqual(t['parties'], 0)
+        self.assertNotIn('Hakkasan', t['venues'])
+        self.assertNotIn('OMNIA', t['venues'])
+
+    def test_counts_booked_venue_not_requested_venue(self):
+        today = datetime.fromtimestamp(TEN_AM, PHX).date()
+        jobs = [job('fallback', 'done', name='Kirk Brown', venues=('OMNIA Nightclub',),
+                    start='2026-11-19', end='2026-11-20', female=1, male=1,
+                    bookings=[booked('Marquee Nightclub', '2026-11-20')])]
+        t = dr.tonight_totals(jobs, today)
+        self.assertEqual(list(t['venues']), ['Marquee'])
+        self.assertEqual(t['venues']['Marquee'], {
+            'parties': 1, 'jobs': 1, 'female': 1, 'male': 1, 'guests': ['Kirk B.'],
+        })
+        self.assertNotIn('OMNIA', t['venues'])
+
+    def test_same_guest_two_jobs_count_as_one_party_and_sum_fm(self):
+        today = datetime.fromtimestamp(TEN_AM, PHX).date()
+        jobs = [
+            job('ouns-a', 'done', name='Ouns Lateef', email='ouns@example.com',
+                venues=('Marquee Nightclub',), female=1, male=0,
+                bookings=[booked('Marquee Nightclub', '2026-11-20', 'order-a')]),
+            job('ouns-b', 'done', name='Ouns Lateef', email='ouns@example.com',
+                venues=('Marquee Nightclub',), female=2, male=0,
+                bookings=[booked('Marquee Nightclub', '2026-11-20', 'order-b')]),
+        ]
+        t = dr.tonight_totals(jobs, today)
+        self.assertEqual(t['parties'], 1)
+        self.assertEqual(t['venues']['Marquee']['parties'], 1)
+        self.assertEqual(t['venues']['Marquee']['female'], 3)
+        self.assertEqual(t['venues']['Marquee']['male'], 0)
+        self.assertEqual(t['venues']['Marquee']['guests'], ['Ouns L.'])
+
+    def test_nov23_is_marquee_only_six_parties_12f_3m(self):
+        """Synthetic replay of Mon 11/23: the real-queue shape that broke the old report."""
+        day = datetime(2026, 11, 23, tzinfo=PHX).date()
+        jobs = [
+            job('jose', 'done', name='Jose Nolasco', venues=('Marquee Nightclub',),
+                start='2026-11-23', female=0, male=1,
+                bookings=[booked('Marquee Nightclub', '2026-11-23', 'order-jose')]),
+            job('will', 'done', name='Will Stone', venues=('Marquee Nightclub',),
+                start='2026-11-23', female=1, male=1,
+                bookings=[booked('Marquee Nightclub', '2026-11-23', 'order-will')]),
+            job('ouns-a', 'done', name='Ouns Lateef', email='ouns@example.com',
+                venues=('LAVO Party Brunch', 'Marquee Dayclub', 'TAO Nightclub',
+                        'Marquee Nightclub'),
+                start='2026-11-21', end='2026-11-23', female=1, male=0,
+                bookings=[booked('Marquee Nightclub', '2026-11-23', 'order-ouns-a')]),
+            job('ouns-b', 'done', name='Ouns Lateef', email='ouns@example.com',
+                venues=('LAVO Party Brunch', 'Marquee Dayclub', 'TAO Nightclub',
+                        'Marquee Nightclub'),
+                start='2026-11-21', end='2026-11-23', female=2, male=0,
+                bookings=[booked('Marquee Nightclub', '2026-11-23', 'order-ouns-b')]),
+            job('kirk', 'done', name='Kirk Brown', venues=('OMNIA Nightclub',),
+                start='2026-11-19', end='2026-11-23', female=1, male=1,
+                bookings=[booked('Marquee Nightclub', '2026-11-23', 'order-kirk')]),
+            job('miia-a', 'done', name='Miia Sara Elkabes', email='miia@example.com',
+                venues=('Marquee Nightclub',), start='2026-11-23', female=2, male=0,
+                bookings=[booked('Marquee Nightclub', '2026-11-23', 'order-miia-a')]),
+            job('miia-b', 'done', name='Miia Sara Elkabes', email='miia@example.com',
+                venues=('OMNIA Nightclub',), start='2026-11-23', female=2, male=0,
+                bookings=[booked('Marquee Nightclub', '2026-11-23', 'order-miia-b')]),
+            job('alpana-marquee', 'done', name='Alpana Dhamelia',
+                venues=('Hakkasan Nightclub',), start='2026-11-22', end='2026-11-25',
+                female=3, male=0,
+                bookings=[booked('Marquee Nightclub', '2026-11-23', 'order-alpana-m')]),
+            # Phantoms: requested range includes 11/23, but booked on other nights.
+            job('makayla-a', 'manual', name='Makayla Ben', venues=('Hakkasan Nightclub',),
+                start='2026-11-14', end='2026-11-27', female=3, male=1,
+                bookings=[booked('JEWEL Nightclub', '2026-11-14'),
+                          booked('OMNIA Nightclub', '2026-11-15'),
+                          booked('Marquee Nightclub', '2026-11-16')]),
+            job('makayla-b', 'manual', name='Makayla Ben', venues=('Hakkasan Nightclub',),
+                start='2026-11-14', end='2026-11-27', female=2, male=1,
+                bookings=[booked('Hakkasan Nightclub', '2026-11-21'),
+                          booked('OMNIA Nightclub', '2026-11-22')]),
+            job('alpana-omnia', 'manual', name='Alpana Dhamelia',
+                venues=('OMNIA Nightclub',), start='2026-11-21', end='2026-11-25',
+                female=3, male=0,
+                bookings=[booked('OMNIA Nightclub', '2026-11-21'),
+                          booked('OMNIA Nightclub', '2026-11-22')]),
+            job('alpana-hak', 'manual', name='Alpana Dhamelia',
+                venues=('Hakkasan Nightclub',), start='2026-11-21', end='2026-11-25',
+                female=3, male=0,
+                bookings=[booked('Hakkasan Nightclub', '2026-11-21')]),
+        ]
+        t = dr.tonight_totals(jobs, day)
+        self.assertEqual(list(t['venues']), ['Marquee'])
+        self.assertEqual(t['venues']['Marquee']['parties'], 6)
+        self.assertEqual(t['venues']['Marquee']['female'], 12)
+        self.assertEqual(t['venues']['Marquee']['male'], 3)
+        self.assertEqual(t['parties'], 6)
+        self.assertEqual(t['female'], 12)
+        self.assertEqual(t['male'], 3)
+        self.assertEqual(t['venues']['Marquee']['guests'], [
+            'Jose N.', 'Will S.', 'Ouns L.', 'Kirk B.', 'Miia E.', 'Alpana D.',
+        ])
+        section = dr.render_venue_section(t)
+        self.assertTrue(section.startswith('By venue (parties | girls/guys)\n'))
+        self.assertIn('Marquee: 6 | 12F/3M', section)
+        self.assertIn('Jose N., Will S., Ouns L., Kirk B., Miia E., Alpana D.', section)
+        self.assertNotIn('Hakkasan', section)
+        self.assertNotIn('OMNIA', section)
+        self.assertNotIn('example.com', section)
+
+
+class CombinedMorningPostTest(unittest.TestCase):
+    def test_merge_appends_venue_section_and_strips_pay(self):
+        day = datetime(2026, 11, 23, tzinfo=PHX).date()
+        jobs = [
+            job('will', 'done', name='Will Stone', email='will@example.com',
+                venues=('Marquee Nightclub',), start='2026-11-23', female=1, male=1,
+                bookings=[booked('Marquee Nightclub', '2026-11-23')]),
+        ]
+        jarvis = (
+            "These are TAO numbers for Mon 11/23.\n"
+            "\n"
+            "Promoter: Guestlist | Checked in\n"
+            "Tom: 15|7\n"
+            "\n"
+            "The House total is 15|7. Commission $120."
+        )
+        text = dr.merge_daily_report(jarvis, jobs, night=day)
+        self.assertIn('These are TAO numbers for Mon 11/23.', text)
+        self.assertIn('The House total is 15|7.', text)
+        self.assertIn('By venue (parties | girls/guys)', text)
+        self.assertIn('Marquee: 1 | 1F/1M', text)
+        self.assertIn('Will S.', text)
+        self.assertNotIn('Will Stone', text)
+        self.assertNotIn('will@example.com', text)
+        self.assertNotIn('$120', text)
+        self.assertIn('[amount]', text)
+        self.assertTrue(text.index('By venue') > text.index('The House total'))
+
+    def test_previous_night_is_yesterday_even_before_6am(self):
+        self.assertEqual(dr.previous_night(FIVE_AM).isoformat(), '2026-11-20')
+        self.assertEqual(dr.previous_night(SIX_AM).isoformat(), '2026-11-20')
+
+    def test_scheduled_poster_is_off_by_default(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(dr.ENABLED_ENV, None)
+            self.assertFalse(dr.scheduled_post_enabled())
+            posted = []
+            path = tempfile.mkdtemp()
+            try:
+                state = os.path.join(path, 'daily-report.json')
+                reporter = DailyReporter(
+                    FakeApi([job('done-tao', 'done', name='Estefany Barraza',
+                                 venues=('TAO Nightclub',), start='2026-11-20', female=2, male=0,
+                                 bookings=[booked('TAO Nightclub', '2026-11-20')])]),
+                    posted.append, state_path=state, clock=lambda: SIX_AM,
+                    channel='C0CJK07GMHV')
+                self.assertIsNone(reporter.tick())
+                self.assertEqual(posted, [])
+                self.assertFalse(os.path.exists(state))
+            finally:
+                import shutil
+                shutil.rmtree(path)
+
+    def test_scheduled_poster_can_be_reenabled(self):
+        with mock.patch.dict(os.environ, {dr.ENABLED_ENV: 'true'}):
+            self.assertTrue(dr.scheduled_post_enabled())
+
+    def test_post_script_dry_run_composes_without_posting(self):
+        import importlib.util
+        script = Path(__file__).resolve().parents[1] / 'tools' / 'post_daily_report.py'
+        spec = importlib.util.spec_from_file_location('post_daily_report', script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        jobs = [job('will', 'done', name='Will Stone', venues=('Marquee Nightclub',),
+                    start='2026-11-23', female=1, male=1,
+                    bookings=[booked('Marquee Nightclub', '2026-11-23')])]
+        with tempfile.TemporaryDirectory() as d:
+            report = os.path.join(d, 'jarvis.txt')
+            jobs_path = os.path.join(d, 'jobs.json')
+            Path(report).write_text('These are TAO numbers for Mon 11/23.\nThe House total is 15|7.\n')
+            Path(jobs_path).write_text(json.dumps({'jobs': jobs}))
+            posted = []
+
+            def boom(*a, **k):
+                posted.append(1)
+                raise AssertionError('dry-run must not post')
+
+            with mock.patch.object(mod, 'post_channel', boom), mock.patch('sys.stdout', new=open(os.path.join(d, 'out.txt'), 'w')) as out:
+                rc = mod.main(['--report-file', report, '--jobs-file', jobs_path,
+                               '--date', '2026-11-23', '--dry-run'])
+                out.close()
+            self.assertEqual(rc, 0)
+            self.assertEqual(posted, [])
+            self.assertIn('Marquee: 1 | 1F/1M', Path(os.path.join(d, 'out.txt')).read_text())
 
 
 class AppHookTest(unittest.TestCase):

@@ -1,18 +1,20 @@
-"""Daily 6:00 AM MST last-night guest-list totals, posted to #generalchat.
+"""Daily guest-list totals for the previous America/Phoenix night.
 
-Only confirmed bookings for last night's America/Phoenix date, by venue:
-signup (party) counts and Girls/Guys (F/M). That date is yesterday at
-6:00 AM (the evening that just wrapped, including that date's dayclubs).
-No names, holds, queue, last-24h, sign-up, or pay figures. No guest
-emails or phones.
+Counts come only from verified saved bookings (a booking/order record) for
+that exact date and venue. Requested date ranges and requested-venue
+fallbacks are not used, so a party booked on another night is never counted
+here. Party counts are deduped by guest (email, or name if there is no
+email) + venue + date for this report only — this does not change booking
+behavior. Girls/Guys (F/M) still sum every qualifying job, including two
+jobs for the same guest. Guest names, when shown, are first name plus last
+initial. No pay figures, emails, or phones.
 
-Posts at most once per night at 6:00 AM America/Phoenix. The last-posted
-night is saved to a dedicated state file so restarts do not double-post.
-An optional channel-history check is a second guard if that file is missing.
-A missed 6:00 AM slot may still post until 10:00 AM for that same evening's
-date; nothing posts before 6:00 AM or at/after 10:00 AM. Older
-last_posted_date values from the retired 10 AM schedule are ignored. A
-night already posted under the retired 11 PM schedule is not posted again.
+The Slack worker's scheduled 6:00 AM #generalchat post is off unless
+SLACK_DAILY_REPORT_ENABLED is 1/true/yes/on. Morning totals are appended to
+Jarvis's Daily Guestlist Report by tools/post_daily_report.py so there is
+one post per morning. The scheduled poster can be turned back on with that
+flag; it still posts at most once per night at 6:00 AM America/Phoenix
+(missed slots until 10:00 AM), using the same counting rules.
 """
 from collections import OrderedDict
 from datetime import datetime, timedelta
@@ -24,8 +26,8 @@ import re
 import time
 from zoneinfo import ZoneInfo
 
-from .views import (EMAIL_RE, SECRET_RE, SECRET_URL_RE, on_date, project,
-                    saved_bookings, venues as venue_names)
+from .views import (EMAIL_RE, SECRET_RE, SECRET_URL_RE, guest_name,
+                    saved_bookings)
 
 log = logging.getLogger('amy.slack.daily_report')
 PHOENIX = ZoneInfo('America/Phoenix')
@@ -36,6 +38,8 @@ REPORT_TITLE = "Last night's guest list"
 LEGACY_REPORT_TITLES = ("Tonight's guest list",)
 DEFAULT_CHANNEL = 'C0CJK07GMHV'  # #generalchat (workspace general; no #general)
 CHANNEL_ENV = 'SLACK_DAILY_REPORT_CHANNEL'
+ENABLED_ENV = 'SLACK_DAILY_REPORT_ENABLED'
+VENUE_SECTION_HEADING = 'By venue (parties | girls/guys)'
 DOLLAR_AMOUNT_RE = re.compile(r'\$\s*\d+(?:,\d{3})*(?:\.\d+)?')
 
 # Short labels in Tom's numbers-post style. Keep dayclub / after-hours /
@@ -83,17 +87,56 @@ def counts_of(job):
     return num('female_count'), num('male_count')
 
 
+def scheduled_post_enabled():
+    """The 6:00 AM scheduled post is off unless this flag is truthy."""
+    raw = (os.environ.get(ENABLED_ENV) or '').strip().lower()
+    return raw in ('1', 'true', 'yes', 'on')
+
+
+def previous_night(now=None):
+    """Yesterday's America/Phoenix date — the evening the morning report covers."""
+    local = datetime.fromtimestamp(time.time() if now is None else now, PHOENIX)
+    return local.date() - timedelta(days=1)
+
+
+def short_guest_name(job):
+    """First name plus last initial, or empty when the job has no name."""
+    raw = job.get('raw') if isinstance(job.get('raw'), dict) else {}
+    name = guest_name(raw)
+    parts = [p for p in str(name or '').split() if p]
+    if not parts or (len(parts) == 1 and parts[0].lower() == 'unknown'):
+        return ''
+    first = parts[0]
+    if first[:1].islower():
+        first = first[0].upper() + first[1:]
+    if len(parts) == 1:
+        return first
+    initial = parts[-1][0]
+    if not initial.isalpha():
+        return first
+    return f'{first} {initial.upper()}.'
+
+
+def _party_identity(job):
+    raw = job.get('raw') if isinstance(job.get('raw'), dict) else {}
+    email = str(raw.get('email') or '').strip().lower()
+    if email:
+        return ('email', email)
+    name = ' '.join(str(guest_name(raw) or '').split()).lower()
+    if name and name != 'unknown':
+        return ('name', name)
+    return ('ref', str(job.get('ref') or '').strip() or f'anon-{id(job)}')
+
+
 def _confirmed(job):
-    if (job.get('state') or '') == 'done':
-        return True
+    """True when the job has at least one verified saved booking/order record."""
     meta = job.get('metadata') if isinstance(job.get('metadata'), dict) else {}
     return bool(saved_bookings(meta))
 
 
 def _venues_for_night(job, day):
-    """Booked venue(s) for this date; fall back to requested venues if none."""
+    """Verified booked venue(s) for this exact date; no requested-venue fallback."""
     meta = job.get('metadata') if isinstance(job.get('metadata'), dict) else {}
-    raw = job.get('raw') if isinstance(job.get('raw'), dict) else {}
     names = []
     for rec in saved_bookings(meta):
         if str(rec.get('date') or '') != day.isoformat():
@@ -101,42 +144,58 @@ def _venues_for_night(job, day):
         v = str(rec.get('venue') or '').strip()
         if v and v not in names:
             names.append(v)
-    if names:
-        return names
-    return venue_names(raw) or ['venue n/a']
+    return names
 
 
 def tonight_totals(jobs, today):
-    """Confirmed bookings for the Phoenix date `today`, grouped by short venue.
+    """Verified bookings for the Phoenix date `today`, grouped by short venue.
 
-    Venue lines count every confirmed list entry at that venue. Total counts
-    each job once (a date-range or multi-venue party is not double-counted).
+    A job counts at a venue only when it has a verified saved booking for that
+    exact date and venue. Party lines are deduped by guest + venue + date.
+    F/M sums every qualifying job. Total parties count a multi-venue guest
+    once; total F/M counts each job once.
     """
     by_venue = {}
-    total_jobs = total_f = total_m = 0
-    seen = set()
+    total_parties = total_f = total_m = 0
+    seen_jobs = set()
+    seen_parties = set()
+    seen_party_venue = set()
     for i, j in enumerate(jobs or []):
         if not _confirmed(j):
             continue
-        p = project(j)
-        if not on_date(p, today):
+        booked = _venues_for_night(j, today)
+        if not booked:
             continue
         f, m = counts_of(j)
         ref = str(j.get('ref') or '') or f'#{i}'
-        if ref not in seen:
-            seen.add(ref)
-            total_jobs += 1
+        ident = _party_identity(j)
+        guest = short_guest_name(j)
+        if ref not in seen_jobs:
+            seen_jobs.add(ref)
             total_f += f
             total_m += m
-        for v in _venues_for_night(j, today):
+        if ident not in seen_parties:
+            seen_parties.add(ident)
+            total_parties += 1
+        for v in booked:
             short = short_venue(v)
-            slot = by_venue.setdefault(short, {'jobs': 0, 'female': 0, 'male': 0})
-            slot['jobs'] += 1
+            slot = by_venue.setdefault(short, {
+                'parties': 0, 'jobs': 0, 'female': 0, 'male': 0, 'guests': [],
+            })
             slot['female'] += f
             slot['male'] += m
-    ordered = OrderedDict(sorted(by_venue.items(), key=lambda kv: (-kv[1]['jobs'], kv[0].lower())))
+            key = (ident, short)
+            if key not in seen_party_venue:
+                seen_party_venue.add(key)
+                slot['parties'] += 1
+                slot['jobs'] += 1  # alias: report counts parties, not jobs
+                if guest and guest not in slot['guests']:
+                    slot['guests'].append(guest)
+    ordered = OrderedDict(sorted(by_venue.items(),
+                                 key=lambda kv: (-kv[1]['parties'], kv[0].lower())))
     return {'date': today.isoformat(), 'venues': ordered,
-            'jobs': total_jobs, 'female': total_f, 'male': total_m}
+            'parties': total_parties, 'jobs': total_parties,
+            'female': total_f, 'male': total_m}
 
 
 def build(jobs, status=None, now=None, night=None):
@@ -155,21 +214,48 @@ def _fmt_report_day(d):
     return d.strftime('%a %-m/%-d')
 
 
-def render(data, *, test=False):
+def _venue_lines(totals, *, include_names=True):
+    lines = []
+    if not totals['venues']:
+        lines.append('None confirmed.')
+        return lines
+    for venue, slot in totals['venues'].items():
+        lines.append(f"{venue}: {slot['parties']} | {_fmt_party(slot['female'], slot['male'])}")
+        if include_names and slot.get('guests'):
+            lines.append(', '.join(slot['guests']))
+    return lines
+
+
+def render(data, *, test=False, include_names=True):
     night = data.get('night') or data['when'].date()
     header = f"*{REPORT_TITLE} — {_fmt_report_day(night)}*"
     if test:
         header = 'TEST — ' + header
     t = data['tonight']
-    lines = [header, '', 'Venue: Signups | Girls/Guys', '']
-    if not t['venues']:
-        lines.append('None confirmed.')
-    else:
-        for venue, slot in t['venues'].items():
-            lines.append(f"{venue}: {slot['jobs']} | {_fmt_party(slot['female'], slot['male'])}")
+    lines = [header, '', 'Venue: Parties | Girls/Guys', '']
+    lines.extend(_venue_lines(t, include_names=include_names))
     lines.append('')
-    lines.append(f"Total: {t['jobs']} | {_fmt_party(t['female'], t['male'])}")
+    lines.append(f"Total: {t['parties']} | {_fmt_party(t['female'], t['male'])}")
     return '\n'.join(lines).rstrip() + '\n'
+
+
+def render_venue_section(totals, *, include_names=True):
+    """Section appended under Jarvis's Daily Guestlist Report."""
+    lines = [VENUE_SECTION_HEADING, '']
+    lines.extend(_venue_lines(totals, include_names=include_names))
+    lines.append('')
+    lines.append(f"Total: {totals['parties']} | {_fmt_party(totals['female'], totals['male'])}")
+    return '\n'.join(lines).rstrip() + '\n'
+
+
+def merge_daily_report(jarvis_text, jobs, night=None, now=None, *, include_names=True):
+    """Jarvis's morning text plus the previous night's venue section."""
+    now = time.time() if now is None else now
+    night = night or previous_night(now)
+    section = render_venue_section(tonight_totals(jobs, night), include_names=include_names)
+    body = str(jarvis_text or '').rstrip()
+    text = (body + '\n\n' + section) if body else section
+    return sanitize(text)
 
 
 def sanitize(text):
@@ -310,7 +396,13 @@ class DailyReporter:
         return False
 
     def tick(self):
-        """Build and post last night's report if due. Returns the text posted, or None."""
+        """Build and post last night's report if due. Returns the text posted, or None.
+
+        No-ops unless SLACK_DAILY_REPORT_ENABLED is on, so the default is one
+        combined morning post from tools/post_daily_report.py.
+        """
+        if not scheduled_post_enabled():
+            return None
         now = self.clock()
         night = report_night(now)
         if night is None or not due(now, load_state(self.path).get('last_posted_night')):
@@ -350,6 +442,9 @@ class DailyReporter:
             sleep(interval)
 
 
-__all__ = ['DailyReporter', 'build', 'render', 'sanitize', 'due', 'short_venue',
-           'tonight_totals', 'REPORT_TITLE', 'DEFAULT_CHANNEL', 'report_channel',
-           'make_channel_poster', 'report_night']
+__all__ = ['DailyReporter', 'build', 'render', 'render_venue_section',
+           'merge_daily_report', 'sanitize', 'due', 'short_venue',
+           'short_guest_name', 'tonight_totals', 'scheduled_post_enabled',
+           'previous_night', 'REPORT_TITLE', 'VENUE_SECTION_HEADING',
+           'DEFAULT_CHANNEL', 'ENABLED_ENV', 'make_channel_poster',
+           'report_channel', 'report_night']
