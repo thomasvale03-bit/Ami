@@ -66,8 +66,13 @@ def test_fallback_plus_requested_same_night_refused():
 
 
 def test_drais_never_falls_back():
+    """Open or off-schedule Drai's jobs still cannot complete on a TAO club.
+    Weekly no_list/closed Drai's nights may fall back (see test_night_rules_closed)."""
     with pytest.raises(Conflict):
         q.validate_completion(raw(venues=("Drai's",)), meta(rec('TAO Nightclub', fallback=True)))
+    with pytest.raises(Conflict):
+        q.validate_completion(raw(venues=("Drai's",), start='2026-11-26'),
+                              meta(rec('TAO Nightclub', '2026-11-26', fallback=True)))
 
 
 def test_fallback_needs_every_night_covered():
