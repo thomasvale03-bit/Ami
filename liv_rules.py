@@ -10,8 +10,9 @@ directory), so Drai's, ZOUK, and future weekly files are picked up the same
 way. A night whose terms say "no list" for every gender in the party (or
 "no_list" / "closed": true) is treated as a closed night: venue_open_on is
 False, nothing is submitted at that venue, and XS/LIV/Drai's fall back
-through DEFAULT_ROUTING (OMNIA first). ZOUK stays notify-only and is never
-auto-booked.
+through DEFAULT_ROUTING (OMNIA first). ZOUK is never booked anywhere: an open
+ZOUK night gets the door confirmation email (event + terms from the ZOUK file)
+and a team@ "add to the ZOUK list" email; a closed ZOUK night falls back too.
 
 The files are read at send time, so editing them needs no restart or deploy.
 

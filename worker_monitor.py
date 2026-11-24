@@ -57,7 +57,9 @@ EXCEPTION_STATES = ("manual", "submission_uncertain", "needs_review")
 CLAIMED_STATES = ("assigned", "claimed", "running", "awaiting_human_verification")
 DEFAULT_ALERT_ENV = "/workspace/amy-worker/alert.env"
 
-NOTIFY_ONLY_RE = re.compile(r"\b(zouk|ghostbar)\b", re.I)
+# ZOUK left notify-only on Nov 24 2026 (worker sends its confirmation), so a
+# held ZOUK job is a real exception again; Ghostbar stays notify-only.
+NOTIFY_ONLY_RE = re.compile(r"\b(ghostbar|ghost bar)\b", re.I)
 SCOTTSDALE_RE = re.compile(r"\b(riot house|almost famous|el hefe|cake)\b", re.I)
 NOT_POSTED_RE = re.compile(r"guest list not posted|no guest list posted", re.I)
 WORKER_ERROR_RE = re.compile(r"^\s*worker error\b", re.I)

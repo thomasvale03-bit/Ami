@@ -1,5 +1,6 @@
-"""Notify-only website venues (Thomas, Nov 14 2026): ZOUK and Ghostbar (LIV,
-LIV Beach, XS and Encore became bookable on urvenue, Nov 21 2026). Accepted by intake; one branded team@ email
+"""Notify-only website venues (Thomas, Nov 14 2026): Ghostbar (LIV, LIV Beach,
+XS and Encore became bookable on urvenue, Nov 21 2026; ZOUK moved to the worker's
+confirmation-email path, Nov 24 2026). Accepted by intake; one branded team@ email
 from info@; no Gmail intake insert, no queue receipt, no guest email, no phone."""
 import threading, unittest
 from datetime import datetime, timedelta
@@ -7,14 +8,14 @@ from unittest import mock
 import gmail_client, posh_webhook as pw
 import queue_service
 
-NOTIFY = ("ZOUK", "Ghostbar")
+NOTIFY = ("Ghostbar",)
 URVENUE = ("XS", "Encore Beach Club", "Encore Beach Club At Night", "LIV", "LIV Beach")
 
 
 def payload(**kw):
     night = (datetime.now(pw.VEGAS).date() + timedelta(days=5)).isoformat()
     p = {"source": "playmaker", "first_name": "TEST", "last_name": "Guest", "email": "test@example.com",
-         "phone": "(602) 555-0100", "city": "Las Vegas", "venue": "ZOUK", "date": night,
+         "phone": "(602) 555-0100", "city": "Las Vegas", "venue": "Ghostbar", "date": night,
          "women": 3, "men": 2, "age_21_confirmed": True, "ref": "pm-test1"}
     p.update(kw)
     return p
@@ -36,10 +37,15 @@ class NotifyOnly(unittest.TestCase):
             self.assertTrue(pw.is_notify_only("Las Vegas", v))
 
     def test_site_form_names_and_aliases_map(self):
-        for raw, want in (("ZOUK Nightclub", "ZOUK"), ("Ghost Bar", "Ghostbar")):
+        for raw, want in (("Ghost Bar", "Ghostbar"), ("Ghostbar", "Ghostbar")):
             clean, err = pw.validate_website(payload(venue=raw, city=""))
             self.assertIsNone(err, raw)
             self.assertEqual(clean["venue"], want, raw)
+        for raw in ("ZOUK Nightclub", "ZOUK", "Zouk"):
+            clean, err = pw.validate_website(payload(venue=raw, city=""))
+            self.assertIsNone(err, raw)
+            self.assertEqual(clean["venue"], "ZOUK", raw)
+            self.assertFalse(pw.is_notify_only("Las Vegas", "ZOUK"))
 
     def test_sends_one_team_email_only(self):
         from config import rules
@@ -58,7 +64,7 @@ class NotifyOnly(unittest.TestCase):
         self.assertEqual(p["to"], rules.PLAYMAKER_EMAIL)
         self.assertEqual(p["to"], "team@playmakerentertainment.com")
         self.assertNotIn("from", p)  # default branded sender (info@)
-        for line in ("Guest: TEST Guest", "Email: test@example.com", "Venue: ZOUK", "Female guests: 3", "Male guests: 2"):
+        for line in ("Guest: TEST Guest", "Email: test@example.com", "Venue: Ghostbar", "Female guests: 3", "Male guests: 2"):
             self.assertIn(line, p["text"])
         night = (datetime.now(pw.VEGAS).date() + timedelta(days=5)).isoformat()
         self.assertIn(f"Date: {night}", p["text"])

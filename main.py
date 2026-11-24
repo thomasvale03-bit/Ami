@@ -1269,6 +1269,20 @@ def _handle_message(service, message_id, dry_run, labels, allowlist=None):
         _notify_exception(message_id, raw, issue, dry_run)
         return gmail_client.EXCEPTION_LABEL
 
+    if any(rules.is_zouk(rules.normalize_venue_name(v)) for v in (raw.get("venues") or [])):
+        # ZOUK confirmations (door email + team "add to the ZOUK list") are sent
+        # by the queue worker only (Thomas, Nov 24 2026). Without the queue,
+        # never route a ZOUK request to a TAO club: hand it to the team.
+        issue = "ZOUK request outside queue mode; the ZOUK confirmation is sent by the queue worker only."
+        team_alert(service, message_id, raw, [internal_action_needed(
+            raw.get("name", "(unknown)"), raw.get("email", "(unknown)"),
+            venue=", ".join(raw.get("venues") or []), date=raw.get("start_date", "(unknown)"),
+            issue=issue,
+            required_action="Send the guest their ZOUK confirmation and add them to the ZOUK list with the venue.",
+        )], dry_run)
+        _notify_exception(message_id, raw, issue, dry_run)
+        return gmail_client.EXCEPTION_LABEL
+
     if concierge_on():
         return concierge_handoff(service, message_id, raw, dry_run)
 

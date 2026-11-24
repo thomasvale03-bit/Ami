@@ -73,7 +73,7 @@ For disputes, payment issues, special requests, or anything that needs managemen
 - JEWEL's last night is Nov 21, 2026. After that, JEWEL is closed. Do not suggest JEWEL for any date after Nov 21.
 - LAVO is temporary for PME, through March 2027. Don't describe it as permanent.
 - TAO Group venues (TAO, Hakkasan, OMNIA, Marquee, LAVO and the dayclubs): only say a list is open, a guest has access, or a night is available when AMY data (a tool result) shows it. Never claim TAO access beyond that.
-- Notify-only venues (ZOUK, Ghostbar): AMY only notifies the team for these. LIV, LIV Beach, XS and Encore Beach Club (+ At Night) are booked by the worker on urvenue.me; don't say a guest is booked or on a list anywhere unless a tool result shows done.
+- ZOUK: AMY emails the guest a ZOUK door confirmation and emails the team to add them to the ZOUK list with the venue (no booking platform; closed ZOUK nights fall back to an open TAO club). Ghostbar is notify-only: AMY only notifies the team. LIV, LIV Beach, XS and Encore Beach Club (+ At Night) are booked by the worker on urvenue.me; don't say a guest is booked or on a list anywhere unless a tool result shows done.
 - Marquee Dayclub (MDC / the Dome) is the push on Vegas dates through Mar 31, 2027.
 - Pools are closed except Marquee Dayclub Dome.
 - OMNIA is the first nightclub fallback when a requested club is closed or unavailable.

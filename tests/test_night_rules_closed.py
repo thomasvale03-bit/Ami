@@ -107,12 +107,16 @@ def test_load_globs_extra_night_rules_files(tmp_path, monkeypatch):
     assert "ZOUK|2026-11-28" in loaded
 
 
-def test_zouk_stays_notify_only_not_auto_booked():
-    assert is_notify_only("Las Vegas", "ZOUK")
+def test_zouk_is_confirmation_only_never_a_booking_platform():
+    # Nov 24 2026: ZOUK left notify-only (guest confirmation + team email);
+    # it is still never booked on urvenue/TAO and is not a TAO nightclub.
+    assert not is_notify_only("Las Vegas", "ZOUK")
+    assert is_notify_only("Las Vegas", "Ghostbar")
     assert "ZOUK" not in rules.URVENUE_VENUES
     assert "ZOUK Nightclub" not in rules.URVENUE_VENUES
-    assert "ZOUK" not in rules.NIGHTCLUBS
-    assert "ZOUK" not in rules.URVENUE_NIGHTCLUBS
+    assert "ZOUK Nightclub" not in rules.NIGHTCLUBS
+    assert "ZOUK Nightclub" not in rules.URVENUE_NIGHTCLUBS
+    assert rules.is_zouk("ZOUK") and rules.is_zouk("ZOUK Nightclub") and rules.is_known_vegas_venue("ZOUK Nightclub")
 
 
 def test_drais_closed_night_falls_back_to_omnia(tmp_path, monkeypatch):

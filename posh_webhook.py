@@ -725,20 +725,23 @@ WEBSITE_VENUES = {
                   "Marquee Dayclub", "TAO Beach Dayclub", "OMNIA Dayclub", "Liquid Pool Lounge",
                   "Palm Tree Beach Club", "LAVO Party Brunch",
                   # urvenue.me venues, booked by the worker (Thomas, Nov 21 2026)
-                  "LIV", "LIV Beach", "XS", "Encore Beach Club", "Encore Beach Club At Night"},
+                  "LIV", "LIV Beach", "XS", "Encore Beach Club", "Encore Beach Club At Night",
+                  # no booking platform: PME/GuestlistGo door confirmation email +
+                  # team@ "add to the ZOUK list" email from the worker (Thomas, Nov 24 2026)
+                  "ZOUK"},
     "Scottsdale": {"Almost Famous", "Riot House", "Cake", "El Hefe", "Maya Day Club", "Maya Night Club"},
 }
 # Notify-only website venues (Thomas, Nov 14 2026): accepted by intake, but the
 # only action is one branded team@ email. No Gmail intake insert (so no parse,
 # booking job, OMNIA/closed-night fallback, Marquee Dayclub add or guest email).
 # Nov 21 2026: LIV, LIV Beach, XS and Encore moved to WEBSITE_VENUES (booked on
-# urvenue.me by the worker); ZOUK and Ghostbar stay notify-only.
+# urvenue.me by the worker). Nov 24 2026: ZOUK moved to WEBSITE_VENUES (guest
+# confirmation email + team email from the worker, closed nights fall back);
+# Ghostbar stays notify-only.
 WEBSITE_NOTIFY_ONLY = {
-    "Las Vegas": {"ZOUK", "Ghostbar"},
+    "Las Vegas": {"Ghostbar"},
 }
 WEBSITE_NOTIFY_ONLY_ALIASES = (
-    ("zouk nightclub", "Las Vegas", "ZOUK"),
-    ("zouk", "Las Vegas", "ZOUK"),
     ("ghostbar", "Las Vegas", "Ghostbar"),
     ("ghost bar", "Las Vegas", "Ghostbar"),
 )
@@ -824,6 +827,8 @@ WEBSITE_VENUE_ALIASES = (
     ("liv nightclub", "Las Vegas", "LIV"),
     ("liv las vegas", "Las Vegas", "LIV"),
     ("liv", "Las Vegas", "LIV"),
+    ("zouk nightclub", "Las Vegas", "ZOUK"),
+    ("zouk", "Las Vegas", "ZOUK"),
     ("xs nightclub", "Las Vegas", "XS"),
     ("xs", "Las Vegas", "XS"),
     ("almost famous", "Scottsdale", "Almost Famous"),
@@ -1180,6 +1185,10 @@ def _website_plan(p):
                 out[day].append(canon)
     if len(out) > WEBSITE_MAX_NIGHTS:
         return {}, "nightly plan too long"
+    names = {v for vs in out.values() for v in vs}
+    if "ZOUK" in names and len(names) > 1:
+        # ZOUK is confirmation-email only (no booking platform): its own request.
+        return {}, "ZOUK must be its own request"
     return out, None
 
 
