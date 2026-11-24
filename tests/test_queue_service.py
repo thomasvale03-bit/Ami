@@ -437,6 +437,29 @@ def test_owner_requeue_one_manual_job(raw):
     assert api(s, '/queue/requeue/mock', {'owner_approval': 'pt861u'})[0] == 409  # not manual any more
 
 
+def test_owner_requeue_corrects_guessed_date_and_clears_review(raw):
+    raw.update(start_date='2026-11-24', end_date='2026-11-24',
+               _action_needed=['Posh recurring event: night is a guess.', 'Check Posh.'])
+    s = q.store()
+    held = q.enqueue('mock', raw)
+    assert held['state'] == 'manual' and held['raw']['start_date'] == '2026-11-24'
+    assert held['raw']['_action_needed']
+    code, row = api(s, '/queue/requeue/mock', {
+        'owner_approval': 'pt1195u', 'start_date': '2026-12-19', 'end_date': '2026-12-19'})
+    assert code == 200 and row['state'] == 'queued'
+    assert row['raw']['start_date'] == row['raw']['end_date'] == '2026-12-19'
+    assert '_action_needed' not in row['raw']
+    assert row['metadata']['owner_requeue']['approval'] == 'pt1195u'
+    assert row['metadata']['owner_requeue']['corrected_dates'] == {
+        'from': ['2026-11-24', '2026-11-24'], 'to': ['2026-12-19', '2026-12-19']}
+    # Worker source policy must now allow the job to be claimed and booked.
+    from datetime import date
+    import queue_service as qs
+    assert qs.source_policy('mock', row['raw'], date(2026, 11, 23)) == ''
+    assert api(s, '/queue/requeue/mock', {
+        'owner_approval': 'pt1195u', 'start_date': 'not-a-date'})[0] == 409
+
+
 def test_owner_requeue_refuses_submitted_or_done(raw):
     s, token = assigned(raw)
     api(s, '/queue/jobs/mock', {'claim_token': token, 'action': 'progress',

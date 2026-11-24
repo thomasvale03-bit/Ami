@@ -1,5 +1,6 @@
 """Durable queue only. No browser, vendor, email or webhook execution."""
 from contextlib import contextmanager
+from datetime import date
 import json
 import os
 from pathlib import Path
@@ -214,13 +215,27 @@ class Store:
         return self.get(ref)
 
 
-    def owner_requeue(self, ref, approval, now):
+    def owner_requeue(self, ref, approval, now, start_date=None, end_date=None):
         """Owner-approved: put ONE manual job back to queued. Only for a job
         that was never submitted (no booking/submitting progress), so it can
-        never cause a rebook of completed work. The approval is recorded."""
+        never cause a rebook of completed work. The approval is recorded.
+
+        Optional start_date/end_date correct a held job whose source date was
+        a recurring-series guess, and clear the review flag so the worker can
+        book the real night.
+        """
         approval = str(approval or '').strip()
         if not approval:
             raise Conflict('owner approval (message id) required')
+        new_start = str(start_date or '').strip() or None
+        new_end = str(end_date or '').strip() or new_start
+        if new_start:
+            try:
+                start_d, end_d = date.fromisoformat(new_start), date.fromisoformat(new_end)
+            except ValueError:
+                raise Conflict('start_date and end_date must be YYYY-MM-DD')
+            if end_d < start_d:
+                raise Conflict('end_date precedes start_date')
         with self.connect() as db:
             row = db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone()
             if row is None:
@@ -233,9 +248,21 @@ class Store:
             progress = meta.get('progress') or {}
             if progress.get('submitting') or progress.get('bookings') or meta.get('evidence'):
                 raise Conflict('Job has submission progress; manual review required')
-            meta['owner_requeue'] = {'approval': approval[:200], 'at': now, 'previous_reason': row['reason']}
-            db.execute("UPDATE queue_jobs SET state='queued',reason=?,metadata=?,updated=?,due=?,claim_token=NULL WHERE ref=?",
-                       ('Owner requeue ' + approval[:200], json.dumps(meta), now, now, ref))
+            raw = json.loads(row['raw'])
+            record = {'approval': approval[:200], 'at': now, 'previous_reason': row['reason']}
+            if new_start:
+                record['corrected_dates'] = {
+                    'from': [raw.get('start_date'), raw.get('end_date')],
+                    'to': [new_start, new_end],
+                }
+                raw['start_date'] = new_start
+                raw['end_date'] = new_end
+                raw.pop('_action_needed', None)
+                raw.pop('_missing_required', None)
+            meta['owner_requeue'] = record
+            db.execute(
+                "UPDATE queue_jobs SET raw=?,state='queued',reason=?,metadata=?,updated=?,due=?,claim_token=NULL WHERE ref=?",
+                (json.dumps(raw), 'Owner requeue ' + approval[:200], json.dumps(meta), now, now, ref))
         return self.get(ref)
 
     def owner_complete(self, ref, approval, now):
