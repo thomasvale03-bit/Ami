@@ -28,7 +28,9 @@ class MockCheckoutTests(unittest.TestCase):
 
     def setUp(self):
         # Local stand-ins for the promoter page and its Pass links.
-        urls = {n: (MOCK / n).as_uri() for n in ("event.html", "paid.html", "uncertain.html", "already.html")}
+        urls = {n: (MOCK / n).as_uri() for n in (
+            "event.html", "paid.html", "uncertain.html", "already.html",
+            "enable-2f.html", "always-disabled.html", "click-blocked.html")}
         patches = [
             mock.patch.object(tao_portal, "TAO_PROMOTER_URL", (MOCK / "promoter.html").as_uri()),
             mock.patch.object(tao_portal, "is_safe_pass_url", return_value=True),
@@ -123,6 +125,63 @@ class MockCheckoutTests(unittest.TestCase):
         url = (MOCK / "paid.html").as_uri()
         with mock.patch.object(tao_portal, "_catalog", {("OMNIA Nightclub", date(2026, 10, 6)): {"url": url}}):
             self.assertIsNone(tao_portal.check_availability("OMNIA Nightclub", date(2026, 10, 6)))
+
+    def _fast_enable(self):
+        self.addCleanup(setattr, tao_portal, "SUBMIT_ENABLE_WAIT_MS", tao_portal.SUBMIT_ENABLE_WAIT_MS)
+        self.addCleanup(setattr, tao_portal, "SUBMIT_ENABLE_ATTEMPTS", tao_portal.SUBMIT_ENABLE_ATTEMPTS)
+        self.addCleanup(setattr, tao_portal, "SUBMIT_REGISTER_WAIT_MS", tao_portal.SUBMIT_REGISTER_WAIT_MS)
+        tao_portal.SUBMIT_ENABLE_WAIT_MS = 400
+        tao_portal.SUBMIT_ENABLE_ATTEMPTS = 2
+        tao_portal.SUBMIT_REGISTER_WAIT_MS = 400
+
+    def test_two_female_qty_enables_submit_order_and_books(self):
+        # TicketDriver leaves #orderFormSubmitButton disabled until the female
+        # quantity change event fires (Priyanka's 2F path) and terms are checked.
+        self._fast_enable()
+        marked = []
+        result = tao_portal.submit_registration(
+            self.listing("enable-2f.html"), GUEST, before_submit=lambda: marked.append(True))
+        self.assertTrue(result["verified"], result)
+        self.assertEqual(result["confirmation_id"], "TD-778812")
+        self.assertEqual(marked, [True])
+
+    def test_plus_one_phone_and_two_female_still_enables(self):
+        self._fast_enable()
+        guest = dict(GUEST, phone="+16025550100")
+        result = self.submit("enable-2f.html", guest)
+        self.assertTrue(result["verified"], result)
+
+    def test_disabled_submit_is_not_a_submission(self):
+        self._fast_enable()
+        marked = []
+        result = tao_portal.submit_registration(
+            self.listing("always-disabled.html"), GUEST, before_submit=lambda: marked.append(True))
+        self.assertFalse(result["verified"])
+        self.assertIn("stayed disabled", result["reason"])
+        self.assertEqual(marked, [])
+        self.assertIsNone(result.get("confirmation_id"))
+
+    def test_click_that_does_not_register_is_not_a_submission(self):
+        self._fast_enable()
+        marked = []
+        result = tao_portal.submit_registration(
+            self.listing("click-blocked.html"), GUEST, before_submit=lambda: marked.append(True))
+        self.assertFalse(result["verified"], result)
+        self.assertIn("did not register", result["reason"])
+        self.assertEqual(marked, [True])
+
+
+class SubmitHelperTests(unittest.TestCase):
+    def test_phone_strips_country_code(self):
+        self.assertEqual(tao_portal.phone_digits_for_form("+14254997674"), "4254997674")
+        self.assertEqual(tao_portal.phone_digits_for_form("(425) 499-7674"), "4254997674")
+        self.assertEqual(tao_portal.phone_digits_for_form("4254997674"), "4254997674")
+
+    def test_order_post_hints(self):
+        self.assertTrue(tao_portal.looks_like_order_post("https://tickets.taogroup.com/orders/checkout"))
+        self.assertTrue(tao_portal.looks_like_order_post("https://tickets.taogroup.com/e/x/processOrder"))
+        self.assertFalse(tao_portal.looks_like_order_post("https://tickets.taogroup.com/e/guest-list/tickets"))
+        self.assertFalse(tao_portal.looks_like_order_post("https://tickets.taogroup.com/e/guest-list-x-11-25-2026/tickets"))
 
 
 if __name__ == "__main__":

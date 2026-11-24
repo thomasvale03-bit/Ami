@@ -144,6 +144,15 @@ class Ledger:
         os.chmod(tmp, 0o600)
         os.replace(tmp, self.path)
 
+    def pop(self, key):
+        """Drop a night that was marked submitting but never actually submitted."""
+        data = self._load()
+        data.pop(key, None)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=1, sort_keys=True))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.path)
+
 
 def night_key(ref, venue, night):
     return f"{ref}|{venue}|{night}"
@@ -608,7 +617,7 @@ class Worker:
 
     def _handle_unexpected(self, job, ref, token, raw, exc):
         log.exception("Job %s failed unexpectedly", ref)
-        attempted = any((self.ledger.get(night_key(ref, v, n)) or {}).get("state")
+        attempted = any((self.ledger.get(night_key(ref, v, n)) or {}).get("state") in ("submitting", "booked")
                         for v, n in self._safe_nights(raw))
         if not attempted and retryable_browser_error(exc):
             try:
@@ -622,7 +631,7 @@ class Worker:
             except Exception as retry_exc:  # noqa: BLE001
                 log.exception("Job %s retry after browser restart failed", ref)
                 exc = retry_exc
-                attempted = any((self.ledger.get(night_key(ref, v, n)) or {}).get("state")
+                attempted = any((self.ledger.get(night_key(ref, v, n)) or {}).get("state") in ("submitting", "booked")
                                 for v, n in self._safe_nights(raw))
                 if not attempted and retryable_browser_error(exc):
                     return self._finish_stop(ref, token, raw, Stop(
@@ -948,6 +957,17 @@ class Worker:
             self.api.update(ref, token, "progress", {"progress": {"bookings": {key.split("|", 1)[1]: entry.get("record")}}}
                             if entry.get("record") else {"progress": {"submitting": {key.split("|", 1)[1]: True}}})
 
+    def _clear_unsubmitted(self, ref, token, key):
+        """The click never registered: drop the submitting flag so the worker can retry."""
+        entry = self.ledger.get(key) or {}
+        if entry.get("record") or entry.get("state") not in (None, "", "submitting"):
+            return
+        if entry.get("state") == "submitting":
+            self.ledger.pop(key)
+        if token:
+            night = key.split("|", 1)[1] if "|" in key else key
+            self.api.update(ref, token, "progress", {"progress": {"submitting": {night: False}}})
+
     def _night_party(self, request, night):
         """Women/men for this night (request-level default unless notes/plan override)."""
         import request_plan
@@ -979,8 +999,11 @@ class Worker:
         guest = {**request, "female_count": party["female_count"], "male_count": party["male_count"]}
         shot = self._shot_path(ref, venue, night, "rehearsal" if rehearse else "confirmation")
 
+        submitted = {"started": False}
+
         def before_submit():
             if not rehearse:
+                submitted["started"] = True
                 self._checkpoint(ref, token, key, {"state": "submitting"})
 
         try:
@@ -998,12 +1021,20 @@ class Worker:
         if result.get("assisted_job"):
             raise Stop("manual", f"{venue} {night}: assisted mode is on; worker never hands off. Nothing submitted")
         if not result.get("verified") or not result.get("confirmation_id"):
+            if submitted["started"]:
+                # Click never registered (disabled button, no POST/navigation).
+                # Not a real submit; clear the flag so a later pass can retry.
+                self._clear_unsubmitted(ref, token, key)
             reason = result.get("reason", "could not be verified")
             low = reason.lower()
             kind = "access_code" if "access code" in low else None
             if kind is None and (INVENTORY_GONE.search(reason)):
                 # Pre-submit: the list has no room / no free option for this
                 # party (sold out). Same as a closed list -> fallback chain.
+                kind = "unavailable"
+            if kind is None and re.search(
+                    r"submit order stayed disabled|submit order click did not register", reason, re.I):
+                # Reloads already exhausted inside submit_registration.
                 kind = "unavailable"
             raise Stop("manual", f"{venue} {night}: not submitted — {reason}", **({"kind": kind} if kind else {}))
         record = {"verified": True, "venue": venue, "date": night, "order_id": result["confirmation_id"], "party": party}

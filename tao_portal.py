@@ -17,10 +17,13 @@ Contract with main.py / rules_engine.py:
         page. If the success page has no order ID (TAO does this when the
         guest is already on that night's list), confirmation_id is
         "TAO accepted, no order id" and confirmation_url is kept. Any
-        problem before the final click returns {"confirmation_id": None,
-        "verified": False, "reason": ...}. A real error after the click,
-        or no success page, raises SubmissionUncertain so the request is
-        never retried automatically.
+        problem before the final click — including a Submit Order button
+        that stays disabled, or a click that never registers (no order
+        POST, navigation, spinner or success page) — returns
+        {"confirmation_id": None, "verified": False, "reason": ...} and
+        is not a submission. A real error after a click that did
+        register, or no success page after that click, raises
+        SubmissionUncertain so the request is never retried automatically.
 
 Every event page is reached by opening Playmaker's promoter link and
 clicking through from it (never by going to the event page directly), and
@@ -111,7 +114,9 @@ def is_security_check(title, body):
 
 
 class SubmissionUncertain(Exception):
-    """The final submit click happened but success could not be confirmed."""
+    """The final submit click registered (order POST, navigation, spinner
+    or success page) but confirmation could not be verified. A disabled
+    button or a click that never left the form is not this error."""
 
 
 # --- Pure safety helpers (unit-tested) ------------------------------------
@@ -500,13 +505,224 @@ def _arrival_text(body):
     return " ".join(dict.fromkeys(picks[:4]))
 
 
+def _dispatch_field_events(locator):
+    """Fire input/change/blur so TicketDriver's client validation runs."""
+    try:
+        locator.evaluate(
+            "el => { el.dispatchEvent(new Event('input', {bubbles: true}));"
+            " el.dispatchEvent(new Event('change', {bubbles: true}));"
+            " el.blur && el.blur();"
+            " el.dispatchEvent(new Event('blur', {bubbles: true})); }")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _fill_first(page, selectors, value):
     for selector in selectors:
         field = page.locator(selector).first
         if field.count() and field.is_visible():
             field.fill(str(value))
+            _dispatch_field_events(field)
             return True
     return False
+
+
+def phone_digits_for_form(value):
+    """US 10-digit form value; strips a leading country code 1."""
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits
+
+
+# Wait this long each refill attempt for TicketDriver to enable Submit Order.
+SUBMIT_ENABLE_WAIT_MS = int(os.environ.get("TAO_SUBMIT_ENABLE_WAIT_MS", "8000"))
+SUBMIT_ENABLE_ATTEMPTS = int(os.environ.get("TAO_SUBMIT_ENABLE_ATTEMPTS", "3"))
+# After a click that returned, wait this long for a POST, navigation, spinner or success.
+SUBMIT_REGISTER_WAIT_MS = int(os.environ.get("TAO_SUBMIT_REGISTER_WAIT_MS", "5000"))
+# Prefer paths that are clearly an order submit. Any POST after the click also
+# counts (see on_request in submit_registration) so a TicketDriver form that
+# posts back to /tickets is still treated as a real submit.
+ORDER_POST_HINTS = ("/orders", "/checkout", "/register", "processorder", "submitorder", "/cart")
+
+
+def looks_like_order_post(url):
+    """True when a request URL looks like a TicketDriver order submit.
+
+    Listing pages often contain '/tickets', so that substring is not a hint.
+    """
+    text = (url or "").lower()
+    return any(hint in text for hint in ORDER_POST_HINTS)
+
+
+def submit_button_is_enabled(button):
+    """True when #orderFormSubmitButton (or the submit control) can be clicked."""
+    if button is None:
+        return False
+    try:
+        if not button.count() or not button.is_visible():
+            return False
+        disabled = button.get_attribute("disabled")
+        aria = (button.get_attribute("aria-disabled") or "").lower()
+        classes = (button.get_attribute("class") or "").lower()
+        if disabled is not None or aria in ("true", "1") or "disabledbutton" in classes.replace("-", ""):
+            return False
+        return bool(button.is_enabled())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _submit_button(page):
+    named = page.locator("#orderFormSubmitButton")
+    if named.count():
+        return named.first
+    button = page.locator('button[type="submit"], input[type="submit"]').filter(
+        has_text=re.compile(r"place order|complete|submit|register", re.I)).first
+    if button.count():
+        return button
+    button = page.get_by_role("button", name=re.compile(r"place order|complete|submit|register", re.I)).first
+    return button if button.count() else None
+
+
+def _unsolved_captcha(page):
+    """Visible Turnstile/reCAPTCHA/hCaptcha widget, if any."""
+    sels = (
+        "iframe[src*='turnstile' i], iframe[src*='recaptcha' i], iframe[src*='hcaptcha' i], "
+        ".cf-turnstile, .g-recaptcha, .h-captcha, [data-sitekey]"
+    )
+    try:
+        loc = page.locator(sels)
+        for i in range(min(loc.count(), 6)):
+            if loc.nth(i).is_visible():
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _apply_agreements(page):
+    """Check terms/21+/required boxes (label click) and uncheck marketing.
+
+    Terms or a required box wins when the same control also mentions
+    marketing, so a 'I agree to the terms and to receive email' box is
+    checked rather than cleared.
+    """
+    boxes = page.locator('input[type="checkbox"]')
+    for i in range(boxes.count()):
+        box = boxes.nth(i)
+        try:
+            box_id = box.get_attribute("id") or ""
+            label_el = page.locator(f'label[for="{box_id}"]') if box_id else None
+            label = label_el.first.inner_text() if label_el is not None and label_el.count() else ""
+            parent_text = box.evaluate(PARENT_TEXT_JS)
+            context = f"{label} {parent_text}"
+            is_terms = bool(TERMS_TEXT.search(context) or box.get_attribute("required") is not None)
+            is_marketing = box_id in ("OrderOptedInSms", "OrderOptedIn") or bool(MARKETING_TEXT.search(context))
+            if is_terms:
+                if not box.is_checked():
+                    if label_el is not None and label_el.count():
+                        label_el.first.click()
+                    else:
+                        box.check()
+            elif is_marketing and box.is_checked():
+                box.uncheck()
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def _set_ticket_quantities(page, guest, selects):
+    for gender, count in (("female", guest["female_count"]), ("male", guest["male_count"])):
+        if count == 0:
+            continue
+        select = selects.get(gender)
+        if not select or not select["selector"] or max_quantity(select["options"]) < count:
+            return f"{gender} Guest List quantity {count} is not available"
+        own_text = option_price_text(select["levels"])
+        if has_positive_price(own_text) or not has_free_evidence(own_text):
+            return f"{gender} option is not shown as free: {own_text[:80]}"
+        option = next((o for o in select["options"]
+                       if re.match(r"\d+", o["value"] or o["text"] or "")
+                       and int(re.match(r"\d+", o["value"] or o["text"]).group()) == count), None)
+        if not option:
+            return f"{gender} quantity {count} is not offered"
+        loc = page.locator(select["selector"])
+        loc.select_option(option["value"])
+        _dispatch_field_events(loc)
+    return None
+
+
+def _fill_order_fields(page, guest):
+    fields = [
+        (["#OrderEmail", 'input[name="Email"]', "#Email", 'input[type="email"]'], guest["email"]),
+        (["#OrderFirstName", 'input[name="FirstName"]', "#FirstName", 'input[autocomplete="given-name"]'], guest["first_name"]),
+        (["#OrderLastName", 'input[name="LastName"]', "#LastName", 'input[autocomplete="family-name"]'], guest["last_name"]),
+    ]
+    for selectors, value in fields:
+        if not _fill_first(page, selectors, value):
+            return f"Required TAO field not found: {selectors[0]}"
+    phone = phone_digits_for_form(guest.get("phone")) or guest.get("phone")
+    _fill_first(page, ["#OrderPhone", 'input[name="Phone"]', "#Phone", 'input[type="tel"]'], phone)
+    _fill_first(page, ["#OrderPostalCode", 'input[name="Zip"]', 'input[name="PostalCode"]', "#Zip",
+                       'input[autocomplete="postal-code"]'], guest.get("billing_zip"))
+    # Any other visible required text input still empty (not the access-code box).
+    try:
+        required = page.locator("input[required], select[required]")
+        for i in range(required.count()):
+            field = required.nth(i)
+            if not field.is_visible():
+                continue
+            typ = (field.get_attribute("type") or "text").lower()
+            if typ in ("checkbox", "radio", "hidden", "submit"):
+                continue
+            fid = (field.get_attribute("id") or field.get_attribute("name") or "").lower()
+            if "accesscode" in fid or "promo" in fid:
+                continue
+            try:
+                current = field.input_value()
+            except Exception:  # noqa: BLE001
+                continue
+            if not (current or "").strip() and typ in ("text", "email", "tel", "number", "search", ""):
+                # Leave unknown required fields alone; just fire events if we filled them above.
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _order_total_problem(page):
+    totals = " ".join(page.locator('[id*="total" i], [class*="total" i]').all_inner_texts())
+    proposed = page.locator("#OrderProposedTotal")
+    proposed_value = proposed.input_value() if proposed.count() else "0"
+    body = page.locator("body").inner_text()
+    if has_positive_price(totals) or float(proposed_value or 0) > 0:
+        return f"Order total is not $0 ({totals or proposed_value})", totals
+    if not has_free_evidence(body):
+        return "Could not verify the registration is free", totals
+    return None, totals
+
+
+def _submit_started(page, started, url_before):
+    """True when a click actually registered as an order submit."""
+    if started.get("post") or started.get("nav"):
+        return True
+    try:
+        url = page.url or ""
+    except Exception:  # noqa: BLE001
+        url = ""
+    if url and url != url_before and (
+            CONFIRMATION_URL.search(url) or re.search(r"confirmation|ordered=true", url, re.I)):
+        return True
+    try:
+        spin = page.locator(".spinner, .loading, [class*='spinner' i], [id*='spinner' i], [class*='loading' i]").first
+        if spin.count() and spin.is_visible():
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        body = page.locator("body").inner_text()
+    except Exception:  # noqa: BLE001
+        body = ""
+    return bool(SUCCESS_TEXT.search(body or ""))
 
 
 # --- Public API -------------------------------------------------------------
@@ -696,68 +912,46 @@ def submit_registration(listing, guest, rehearse=False, screenshot_path=None, be
                 return stop("Pass link is no longer on the Playmaker promoter page")
             if is_code_gated(page):
                 return stop("listing requires an access code")
-            selects = _selects_by_gender(page)
-            for gender, count in (("female", guest["female_count"]), ("male", guest["male_count"])):
-                if count == 0:
+            last_reason = None
+            selects = {}
+            totals = ""
+            button = None
+            for attempt in range(1, SUBMIT_ENABLE_ATTEMPTS + 1):
+                if attempt > 1:
+                    if not _open_via_promoter(page, url):
+                        return stop("Pass link is no longer on the Playmaker promoter page")
+                    if is_code_gated(page):
+                        return stop("listing requires an access code")
+                selects = _selects_by_gender(page)
+                qty_reason = _set_ticket_quantities(page, guest, selects)
+                if qty_reason:
+                    return stop(qty_reason)
+                page.wait_for_timeout(300)
+                field_reason = _fill_order_fields(page, guest)
+                if field_reason:
+                    return stop(field_reason)
+                _apply_agreements(page)
+                problem, totals = _order_total_problem(page)
+                if problem:
+                    return stop(problem)
+                button = _submit_button(page)
+                if button is None:
+                    last_reason = "TAO submit button not found"
                     continue
-                select = selects.get(gender)
-                if not select or not select["selector"] or max_quantity(select["options"]) < count:
-                    return stop(f"{gender} Guest List quantity {count} is not available")
-                # Each option being selected must itself be provably free,
-                # whatever the page total says.
-                own_text = option_price_text(select["levels"])
-                if has_positive_price(own_text) or not has_free_evidence(own_text):
-                    return stop(f"{gender} option is not shown as free: {own_text[:80]}")
-                option = next((o for o in select["options"]
-                               if re.match(r"\d+", o["value"] or o["text"] or "")
-                               and int(re.match(r"\d+", o["value"] or o["text"]).group()) == count), None)
-                if not option:
-                    return stop(f"{gender} quantity {count} is not offered")
-                page.locator(select["selector"]).select_option(option["value"])
-            page.wait_for_timeout(500)
-
-            fields = [
-                (["#OrderEmail", 'input[name="Email"]', "#Email", 'input[type="email"]'], guest["email"]),
-                (["#OrderFirstName", 'input[name="FirstName"]', "#FirstName", 'input[autocomplete="given-name"]'], guest["first_name"]),
-                (["#OrderLastName", 'input[name="LastName"]', "#LastName", 'input[autocomplete="family-name"]'], guest["last_name"]),
-            ]
-            for selectors, value in fields:
-                if not _fill_first(page, selectors, value):
-                    return stop(f"Required TAO field not found: {selectors[0]}")
-            # Phone and ZIP only where TAO asks for them.
-            _fill_first(page, ["#OrderPhone", 'input[name="Phone"]', "#Phone", 'input[type="tel"]'], guest["phone"])
-            _fill_first(page, ["#OrderPostalCode", 'input[name="Zip"]', 'input[name="PostalCode"]', "#Zip",
-                               'input[autocomplete="postal-code"]'], guest["billing_zip"])
-
-            boxes = page.locator('input[type="checkbox"]')
-            for i in range(boxes.count()):
-                box = boxes.nth(i)
-                box_id = box.get_attribute("id") or ""
-                label_el = page.locator(f'label[for="{box_id}"]') if box_id else None
-                label = label_el.first.inner_text() if label_el is not None and label_el.count() else ""
-                parent_text = box.evaluate(PARENT_TEXT_JS)
-                context = f"{label} {parent_text}"
-                if box_id in ("OrderOptedInSms", "OrderOptedIn") or MARKETING_TEXT.search(context):
-                    if box.is_checked():
-                        box.uncheck()  # never opt customers into marketing
-                elif TERMS_TEXT.search(context) or box.get_attribute("required") is not None:
-                    box.check()  # authorized: TAO authorization sec. 4 + customer's form consent
-
-            totals = " ".join(page.locator('[id*="total" i], [class*="total" i]').all_inner_texts())
-            proposed = page.locator("#OrderProposedTotal")
-            proposed_value = proposed.input_value() if proposed.count() else "0"
-            body = page.locator("body").inner_text()
-            if has_positive_price(totals) or float(proposed_value or 0) > 0:
-                return stop(f"Order total is not $0 ({totals or proposed_value})")
-            if not has_free_evidence(body):
-                return stop("Could not verify the registration is free")
-
-            button = page.locator('button[type="submit"], input[type="submit"]').filter(
-                has_text=re.compile(r"place order|complete|submit|register", re.I)).first
-            if not button.count():
-                button = page.get_by_role("button", name=re.compile(r"place order|complete|submit|register", re.I)).first
-            if not button.count():
-                return stop("TAO submit button not found")
+                deadline = time.monotonic() + max(SUBMIT_ENABLE_WAIT_MS, 200) / 1000
+                while time.monotonic() < deadline:
+                    if submit_button_is_enabled(button):
+                        break
+                    _apply_agreements(page)
+                    _fill_order_fields(page, guest)
+                    _set_ticket_quantities(page, guest, selects)
+                    page.wait_for_timeout(400 if _unsolved_captcha(page) else 200)
+                if submit_button_is_enabled(button):
+                    break
+                last_reason = ("Submit Order stayed disabled (terms, required fields, "
+                               "ticket quantity or captcha)")
+            if button is None:
+                return stop(last_reason or "TAO submit button not found")
 
             if rehearse:
                 return {"confirmation_id": None, "verified": False, "rehearsal": True,
@@ -769,9 +963,45 @@ def submit_registration(listing, guest, rehearse=False, screenshot_path=None, be
                         "checkboxes": page.locator('input[type="checkbox"]').evaluate_all(
                             "els => els.map(e => [e.id || e.name || '(unnamed)', e.checked])"),
                         "totals": totals, "submit_button": button.inner_text().strip()}
+
+            if not submit_button_is_enabled(button):
+                return stop(last_reason or "Submit Order stayed disabled; nothing submitted")
+
+            started = {"post": False, "nav": False}
+
+            def on_request(request):
+                try:
+                    # Any POST after the click is a real submit signal: TicketDriver
+                    # may post the form to the event /tickets URL itself.
+                    if request.method == "POST":
+                        started["post"] = True
+                except Exception:  # noqa: BLE001
+                    pass
+
+            def on_nav(frame):
+                try:
+                    if frame == page.main_frame:
+                        started["nav"] = True
+                except Exception:  # noqa: BLE001
+                    pass
+
+            page.on("request", on_request)
+            page.on("framenavigated", on_nav)
+            url_before = page.url
             if before_submit is not None:
                 before_submit()
-            button.click()
+            try:
+                button.click(timeout=8_000)
+            except Exception as exc:  # noqa: BLE001 - click never fired
+                return stop(f"Submit Order click did not register ({type(exc).__name__}); nothing submitted")
+            deadline = time.monotonic() + max(SUBMIT_REGISTER_WAIT_MS, 200) / 1000
+            while time.monotonic() < deadline and not _submit_started(page, started, url_before):
+                try:
+                    page.wait_for_timeout(200)
+                except Exception:  # noqa: BLE001
+                    break
+            if not _submit_started(page, started, url_before):
+                return stop("Submit Order click did not register (no order POST or navigation); nothing submitted")
             # From here on the order may exist: never report a plain failure.
             try:
                 # TAO redirects to /orders/confirmation/<order id> once the
