@@ -12,7 +12,7 @@ import gmail_client
 import posh_webhook as pw
 import worker_emails
 
-NOTIFY = ("ZOUK", "Ghostbar")
+NOTIFY = ("Ghostbar",)  # ZOUK left notify-only Nov 24 2026 (worker confirmation)
 GUEST_PHONE = "6025550100"
 
 

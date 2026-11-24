@@ -149,3 +149,19 @@ Keys are `"LIV Nightclub|YYYY-MM-DD"` or `"LIV Beach|YYYY-MM-DD"` under `"nights
 see `liv_rules.py`. Nothing is guessed: a night with no entry shows the day and the
 urvenue event title plus "Guestlist terms will be confirmed", and the worker writes a
 `liv_rules_missing` note to `data/alerts.jsonl`.
+
+### ZOUK confirmations (Nov 24 2026)
+
+ZOUK website sign-ups are no longer notify-only. They go through normal intake
+(queue job) and the worker, but nothing is submitted anywhere (ZOUK has no
+booking platform): the night is recorded `system: email_only`, the guest gets
+Tom's "Must show this at the door" confirmation (`worker_emails.zouk_guest_email`;
+PME branding, or GuestlistGo branding from confirmations@guestlistgo.me for
+guestlistgo.me sign-ups) and team@ gets "Add to ZOUK list: ..." asking the team
+to add the guest to the ZOUK list with the venue. Event and terms come from
+`zouk-night-rules.json` (`ZOUK|YYYY-MM-DD`: event, women, men, cutoff, drinks;
+`notes` is internal and never shown to guests). With no entry for the night the
+email uses Tom's default ("Everyone free entry until 1:25 AM or earlier", list
+10:30 PM to 1:30 AM). A `closed` / `no_list` night falls back through
+DEFAULT_ROUTING (OMNIA first) like Drai's. Mixed ZOUK + other-venue requests go
+to review. Ghostbar stays notify-only.

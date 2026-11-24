@@ -102,6 +102,9 @@ def source_policy(ref, raw, today):
         drais = [v for v in venues if rules.is_drais(v)]
         if drais and len(venues) != 1:
             return "Drai's is Speakeasy-only; mixed TAO/Drai's request requires review"
+        zouk = [v for v in venues if rules.is_zouk(v)]
+        if zouk and len(set(venues)) != 1:
+            return "ZOUK is confirmation-email only; mixed ZOUK/other-venue request requires review"
         # JEWEL after Nov 21 and same-day OMNIA Fri/Sat are CLOSED nights, not
         # review cases: the worker books the fallback chain (OMNIA first, then
         # any open club). Parking them here left guests unbooked (Thomas,
@@ -247,6 +250,15 @@ def validate_completion(raw, metadata, require_team_receipt=True):
                     allowed = {'first_name', 'last_name', 'male_count', 'female_count', 'name', 'party_size'}
                     if not isinstance(fields, list) or not fields or not set(fields) <= allowed:
                         raise Conflict("Drai's permits only name+party fields")
+            elif rules.is_zouk(venue) and not fallback:
+                # ZOUK (Thomas, Nov 24 2026): no booking platform. The receipt
+                # is the guest confirmation + team@ "add to the ZOUK list"
+                # email; never a TAO/urvenue order.
+                if record.get('system') != 'email_only' or record.get('order_id'):
+                    raise Conflict('ZOUK receipt must be email_only, never a booking-system order')
+                receipts = evidence.get('email_receipts')
+                if not isinstance(receipts, list) or not receipts:
+                    raise Conflict('ZOUK: guest and team email receipts required')
             elif not record.get('order_id'):
                 raise Conflict('Actual order ID required')
             if fallback:
@@ -327,9 +339,14 @@ def lookup_prior_send(raw, kind):
     email = (raw.get('email') or '').strip()
     if not email:
         return None
-    drais = any(rules.is_drais(rules.normalize_venue_name(v)) for v in raw.get('venues') or [])
-    subject = (worker_emails.drais_guest_subject if drais else worker_emails.guest_subject)(
-        raw['start_date'], raw['end_date'])
+    venues = [rules.normalize_venue_name(v) for v in raw.get('venues') or []]
+    drais = any(rules.is_drais(v) for v in venues)
+    zouk = bool(venues) and all(rules.is_zouk(v) for v in venues)
+    if zouk:
+        subject = worker_emails.zouk_guest_subject(raw['start_date'], raw['end_date'], worker_emails.hold_brand(raw))
+    else:
+        subject = (worker_emails.drais_guest_subject if drais else worker_emails.guest_subject)(
+            raw['start_date'], raw['end_date'])
     return gmail_client.prior_sent(gmail_client.get_service(), f'to:{email} subject:"{subject}"')
 
 

@@ -30,7 +30,8 @@ PAUSED_VENUES = {"Drai's"}  # never submit unless explicitly reactivated
 MANUAL_VENUES = set()
 
 # Wynn / Fontainebleau clubs booked on Playmaker's urvenue.me (UrGuestlist)
-# account (Thomas, Nov 21 2026). ZOUK and Ghostbar stay notify-only.
+# account (Thomas, Nov 21 2026). Ghostbar stays notify-only; ZOUK is
+# confirmation-email only (see ZOUK_VENUE below).
 URVENUE_VENUES = {
     "LIV Nightclub",
     "LIV Beach",
@@ -44,6 +45,20 @@ URVENUE_NIGHTCLUBS = {"LIV Nightclub", "XS Nightclub"}
 
 # Last night JEWEL may be booked automatically (owner: no JEWEL after Nov 21, 2026).
 JEWEL_LAST_NIGHT = "2026-11-21"
+
+
+# ZOUK Nightclub (Resorts World) has no booking platform: Thomas puts guests
+# on the list with the venue himself. Website sign-ups get a PME (or
+# GuestlistGo) door confirmation email plus a team@ "add to the ZOUK list"
+# email; nothing is submitted anywhere (Thomas, Nov 24 2026). A closed /
+# no_list night in zouk-night-rules.json falls back through DEFAULT_ROUTING
+# (OMNIA first), like Drai's.
+ZOUK_VENUE = "ZOUK Nightclub"
+
+
+def is_zouk(name):
+    key = (name or "").strip().lower()
+    return key in ("zouk", "zouk nightclub", "zouk las vegas", "zouk nightclub las vegas")
 
 
 def is_drais(name):
@@ -118,6 +133,10 @@ VENUE_ALIASES = {
     "encore beach": "Encore Beach Club",
     "encore": "Encore Beach Club",
     "ebc": "Encore Beach Club",
+    "zouk": "ZOUK Nightclub",
+    "zouk nightclub": "ZOUK Nightclub",
+    "zouk las vegas": "ZOUK Nightclub",
+    "zouk nightclub las vegas": "ZOUK Nightclub",
     "drai's": "Drai's",
     "drais": "Drai's",
     "drai’s": "Drai's",
@@ -169,7 +188,8 @@ def is_scottsdale(name):
 
 
 def is_known_vegas_venue(name):
-    return name in ALL_AUTHORIZED_VENUES or is_drais(name) or is_manual_venue(name) or is_urvenue(name)
+    return (name in ALL_AUTHORIZED_VENUES or is_drais(name) or is_zouk(name) or is_manual_venue(name)
+            or is_urvenue(name))
 
 
 def is_urvenue(name):
@@ -391,8 +411,8 @@ def keep_requested_night(venue, date_obj):
     no_list/closed night (also so fallback can run); off-schedule Drai's
     dates (Mon-Wed) are still dropped. Verified-dark daylife is dropped.
     """
-    if venue in NIGHTCLUBS or venue in URVENUE_NIGHTCLUBS:
-        return True
+    if venue in NIGHTCLUBS or venue in URVENUE_NIGHTCLUBS or is_zouk(venue):
+        return True  # ZOUK: open nights are email-only; closed nights fall back
     if is_drais(venue):
         return night_rules_closed(venue, date_obj) or _scheduled_open(venue, date_obj) is not False
     return venue_open_on(venue, date_obj) is not False

@@ -584,6 +584,323 @@ def drais_team_email(ref, raw, request, bookings):
 
 
 
+# --- ZOUK Nightclub (Thomas, Nov 24 2026) ------------------------------------
+# No booking platform: Thomas puts guests on the ZOUK list with the venue.
+# Website sign-ups get Tom's "Must show this at the door" confirmation (PME
+# branding; GuestlistGo branding for guestlistgo.me sign-ups, from
+# confirmations@guestlistgo.me with no PME / Playmaker / Thomas Vale mention)
+# and team@ gets an "add them to the ZOUK list" email. The night's event and
+# terms come from zouk-night-rules.json (read at send time, never guessed);
+# with no terms on file the email uses Tom's default line. Closed / no_list
+# nights never get here: the worker falls back through DEFAULT_ROUTING.
+
+ZOUK_VENUE = rules.ZOUK_VENUE
+ZOUK_PLACE = "Resorts World Las Vegas"
+ZOUK_DOORS = "Doors open 10:30 PM (arrive 10 to 11 PM)"
+ZOUK_DEFAULT_TERMS = "Everyone free entry until 1:25 AM or earlier"
+ZOUK_DEFAULT_CUTOFF = "1:30 AM"
+ZOUK_LINE_NOTE = "Guest list line is indoors by Redtail and can extend to the giant Sphere."
+ZOUK_ADMISSION = ("Bring a valid, government-issued 21+ photo ID. Guest-list admission is subject to "
+                  "the venue's rules, dress code, and capacity.")
+PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)")
+
+
+def zouk_guest_subject(start, end, brand="playmaker"):
+    name = "GuestlistGo" if brand == "guestlistgo" else "Playmaker Entertainment"
+    return f"You're on the list: ZOUK Nightclub — {name} ({date_label(start, end)})"
+
+
+def is_zouk_row(b):
+    """A ZOUK night confirmed by email only (never a fallback club's order)."""
+    b = b or {}
+    return rules.is_zouk(b.get("venue")) and b.get("system") == "email_only"
+
+
+def _ampm(text):
+    """'1:30am' -> '1:30 AM', '1am' -> '1 AM' (Tom's rules file style -> email style)."""
+    return re.sub(r"\b(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\b\.?",
+                  lambda m: f"{m.group(1)}{':' + m.group(2) if m.group(2) else ''} {m.group(3).upper()}M",
+                  str(text or "").strip(), flags=re.I)
+
+
+def _zouk_term(text):
+    t = _ampm(text)
+    return re.sub(r"^comp(?=\s+until\b|\s*$)", "Complimentary entry", t, flags=re.I)
+
+
+def zouk_night(iso, rule=None):
+    """Door details for one ZOUK night from Tom's rules entry (or {}):
+    {'event': 'Friday 11/27 James Hype', 'terms': [...], 'cutoff': '1:30 AM'}."""
+    import liv_rules
+    rule = liv_rules.for_night(ZOUK_VENUE, iso) if rule is None else rule
+    d = date.fromisoformat(iso)
+    event = (rule.get("event") or "").strip()
+    if event.upper() == "CLOSED":
+        event = ""
+    terms = []
+    women, men = rule.get("women"), rule.get("men")
+    if women and men and _zouk_term(women).lower() == _zouk_term(men).lower():
+        terms.append(f"Everyone: {_zouk_term(women)}")
+    else:
+        if women:
+            terms.append(f"Ladies: {_zouk_term(women)}")
+        if men:
+            terms.append(f"Guys: {_zouk_term(men)}")
+    if rule.get("cutoff") and not terms:
+        terms.append(f"Guest list until {_ampm(rule['cutoff'])}")
+    if not terms:
+        terms.append(ZOUK_DEFAULT_TERMS)
+    if rule.get("drinks"):
+        terms.append(_ampm(rule["drinks"]))
+    return {"event": f"{d.strftime('%A')} {d.month:02d}/{d.day:02d}" + (f" {event}" if event else ""),
+            "terms": terms, "cutoff": _ampm(rule.get("cutoff")) or ZOUK_DEFAULT_CUTOFF,
+            "has_terms": bool(women or men or rule.get("cutoff"))}
+
+
+def _zouk_name(request, raw, iso):
+    import request_plan
+    name = f"{request.get('first_name', '')} {request.get('last_name', '')}".strip() or (raw or {}).get("name", "")
+    f, m = request_plan.party_for_night(raw or {}, iso, request["female_count"], request["male_count"])
+    extra = int(f or 0) + int(m or 0) - 1
+    return f"{name} +{extra}" if extra > 0 else name
+
+
+def zouk_door_lines(request, raw, iso, brand="playmaker", rule=None):
+    """Tom's door text for one night (plain text lines)."""
+    night = zouk_night(iso, rule)
+    gg = brand == "guestlistgo"
+    head = ["MUST SHOW THIS AT THE DOOR!", ""]
+    head += ["GUESTLISTGO GUEST LIST"] if gg else ["THOMAS VALE'S LIST", "ACADEMY"]
+    confirm = (f"Confirmed VIP guest list for ZOUK Nightclub at Resorts World, 10:30 PM to {night['cutoff']}. "
+               + ("Go to the guest list area to check in with your name and ID. " if gg else
+                  "Go to the guest list area to check in. Tell them you're on PROMOTER Thomas Vale's guest list. ")
+               + "Arrive early with your entire group; dress code will be enforced. Show this email.")
+    return head + [
+        "", ZOUK_VENUE, ZOUK_PLACE, night["event"],
+        "", ZOUK_DOORS, *night["terms"],
+        "", ZOUK_LINE_NOTE,
+        "", "YOUR CONFIRMATION",
+        *([] if gg else ["ACADEMY - Thomas Vale"]),
+        _zouk_name(request, raw, iso),
+        confirm,
+        "GuestlistGo" if gg else "Thomas Vale - Academy",
+    ]
+
+
+def _zouk_conf_p(escaped, bold):
+    inner = f'<strong style="color:#FFFFFF;">{escaped}</strong>' if bold else escaped
+    return f'<p style="margin:0 0 4px 0;">{inner}</p>'
+
+
+def _zouk_door_html(lines):
+    """Gold 'show this at the door' card (same look as the Drai's card)."""
+    e = _html.escape
+    i = lines.index("YOUR CONFIRMATION")
+    top, conf = lines[2:i], lines[i + 1:]
+    blank = [n for n, x in enumerate(top) if x == ""]
+    brand_lines, venue_lines = top[:blank[0]], top[blank[0] + 1:blank[1]]
+    door_lines, line_note = top[blank[1] + 1:blank[2]], top[blank[2] + 1:]
+    p = '<p style="margin:0;">{}</p>'
+    out = ['<tr><td align="center" style="padding:26px 32px 8px 32px;font-family:Inter,Helvetica,Arial,sans-serif;'
+           'font-size:13px;letter-spacing:3px;color:#D4AF37;font-weight:800;background-color:#0d0d0d;" '
+           'bgcolor="#0d0d0d">&#9660; MUST SHOW THIS AT THE DOOR &#9660;</td></tr>',
+           '<tr><td style="padding:0 32px 8px 32px;background-color:#0d0d0d;background-image:linear-gradient('
+           '#0d0d0d,#0d0d0d);" bgcolor="#0d0d0d">',
+           '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:3px '
+           'solid #D4AF37;border-radius:10px;background-color:#111111;background-image:linear-gradient(#111111,'
+           '#111111);" bgcolor="#111111">',
+           '<tr><td style="padding:22px 24px;font-family:Inter,Helvetica,Arial,sans-serif;color:#F5F5F5;'
+           'font-size:15px;line-height:24px;">']
+    if len(brand_lines) == 2:
+        out.append('<p style="margin:0 0 2px 0;font-size:15px;letter-spacing:3px;color:#D4AF37;font-weight:800;">'
+                   f'{e(brand_lines[0])}</p>')
+        out.append('<p style="margin:0 0 14px 0;font-family:\'Playfair Display\',Georgia,serif;font-size:34px;'
+                   f'line-height:40px;color:#D4AF37;font-weight:800;letter-spacing:2px;">{e(brand_lines[1])}</p>')
+    else:
+        out.append('<p style="margin:0 0 14px 0;font-family:\'Playfair Display\',Georgia,serif;font-size:28px;'
+                   f'line-height:34px;color:#D4AF37;font-weight:800;letter-spacing:2px;">{e(brand_lines[0])}</p>')
+    out.append(f'<p style="margin:0;"><strong style="color:#D4AF37;">{e(venue_lines[0])}</strong> &middot; '
+               f'{e(venue_lines[1])}</p>')
+    out.append(f'<p style="margin:0 0 12px 0;"><strong>{e(venue_lines[2])}</strong></p>')
+    out += [p.format(e(x)) for x in door_lines]
+    out.append(f'<p style="margin:12px 0 0 0;">{e(" ".join(line_note))}</p>')
+    out.append('</td></tr></table>\n</td></tr>')
+    out.append('<tr><td style="padding:12px 32px 8px 32px;background-color:#0d0d0d;" bgcolor="#0d0d0d">'
+               '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+               'style="background-color:#141414;border-left:3px solid #D4AF37;border-radius:6px;"><tr>'
+               '<td style="padding:18px 22px;font-family:Inter,Helvetica,Arial,sans-serif;font-size:15px;'
+               'line-height:23px;color:#E6E6E6;">'
+               '<p style="margin:0 0 8px 0;font-size:11px;letter-spacing:3px;color:#C9A84C;font-weight:700;">'
+               'YOUR CONFIRMATION</p>'
+               + "".join(_zouk_conf_p(e(x), n < len(conf) - 2) for n, x in enumerate(conf))
+               + '</td></tr></table></td></tr>')
+    return "\n".join(out) + "\n"
+
+
+def _zouk_brand_html(page, brand):
+    """Swap the PME template's brand pieces for GuestlistGo (logo, title,
+    preheader, sign-off, footer) and drop the PME VIP block."""
+    if brand != "guestlistgo":
+        return page
+    b = html_emails.HOLD_BRANDS["guestlistgo"]
+    a = page.index("    <!-- Logo -->")
+    z = page.index("    <!-- Hero -->")
+    page = page[:a] + "    <!-- Logo -->\n" + b["logo"] + "\n\n" + page[z:]
+    a = page.index("    <!-- Optional VIP upsell")
+    z = page.index("    <!-- Sign-off -->")
+    page = page[:a] + page[z:]
+    page = page.replace("You're on the list | Playmaker Entertainment", "You're on the list | GuestlistGo")
+    page = page.replace("You're on the Playmaker guest list. Here's how to get your passes for the night.",
+                        "You're on the GuestlistGo guest list for ZOUK Nightclub.")
+    page = page.replace(">Playmaker Entertainment</p>", ">GuestlistGo</p>")
+    a = page.index("    <!-- Footer -->")
+    fa = page.index(">", page.index("<td", a)) + 1
+    fz = page.index("<span", fa)
+    page = page[:fa] + "\n      " + b["footer"] + "<br>\n      " + page[fz:]
+    return page
+
+
+def zouk_guest_email(request, bookings, raw=None, pending=None):
+    """bookings: the job's rows. ZOUK nights (email_only) get Tom's door
+    card; any other night (a closed ZOUK night's fallback club) is listed
+    with its order like the normal confirmation."""
+    raw = raw or {}
+    brand = hold_brand(raw)
+    gg = brand == "guestlistgo"
+    import liv_rules
+    nights_rules = liv_rules.load()  # read at send time: Tom edits it weekly
+    first = request.get("first_name") or "there"
+    rows = sorted(bookings, key=lambda b: (b["date"], b["venue"]))
+    zouk_rows = [b for b in rows if is_zouk_row(b)]
+    other = [b for b in rows if not is_zouk_row(b)]
+    list_lines, cards, door_text = [], [], []
+    for b in rows:
+        if is_zouk_row(b):
+            list_lines.append(f"{html_emails._short_date(b['date'])} - {ZOUK_VENUE}")
+        else:
+            event = (b.get("event") or "").strip()
+            oid = f"Order ID {b['order_id']}" if b.get("order_id") and not is_tao_no_order(b) else "on the guest list"
+            list_lines.append(f"{html_emails._short_date(b['date'])} - {b['venue']} ("
+                              + (f"{event} — {oid}" if event else oid) + ")")
+            if b.get("fallback"):
+                list_lines.append(html_emails.FALLBACK_NOTICE)
+    for b in zouk_rows:
+        rule = liv_rules.for_night(ZOUK_VENUE, b["date"], nights_rules)
+        lines = zouk_door_lines(request, raw, b["date"], brand, rule)
+        door_text.append("\n".join(lines))
+        cards.append(_zouk_door_html(lines))
+    waiting = pending_note(pending)
+    tao_note = ""
+    if other:
+        tao_note = (f"For {_names([b['venue'] for b in other])}: download the TAO Group Hospitality Rewards app, "
+                    "sign up with this same email address, and open Ticket Wallet. Your passes will be waiting there.")
+    text = "\n\n".join(x for x in [
+        f"Hi {first},",
+        "You're on the list for:\n" + "\n".join(list_lines),
+        CAPACITY_LINE,
+        waiting,
+        "\n\n".join(door_text),
+        tao_note,
+        ZOUK_ADMISSION,
+        "Questions? Just reply to this email." if gg else "Questions? Email info@playmakerentertainment.com",
+        "GuestlistGo" if gg else "Playmaker Entertainment",
+    ] if x)
+    night_rows = [(html_emails._short_date(b["date"]), b["venue"] if not is_zouk_row(b) else ZOUK_VENUE,
+                   (zouk_night(b["date"], liv_rules.for_night(ZOUK_VENUE, b["date"], nights_rules))["event"]
+                    if is_zouk_row(b) else _card_event(b)))
+                  for b in rows]
+    fallback_nights = [html_emails._short_date(b["date"]) for b in other if b.get("fallback")]
+    page = html_emails.render_confirmation(
+        first, night_rows, html_emails.party_size(request["female_count"], request["male_count"]),
+        waiting or None, fallback_nights=fallback_nights or None)
+    door = "".join(cards)
+    a = page.index("    <!-- How to get passes -->")
+    if other:
+        page = page[:a] + door + "\n" + page[a:]
+    else:
+        z = page.index("    <!-- Before you go -->")
+        page = page[:a] + door + "\n" + page[z:]
+        page = page.replace("Follow the steps to grab your passes before you head out.",
+                            "Show this email at the door with your ID.")
+    html = _zouk_brand_html(page, brand)
+    subject = zouk_guest_subject(request["start_date"], request["end_date"], brand)
+    for body in (text, html):
+        low = body.lower()
+        if LINE_PRIORITY_RE.search(body) or "jarvis" in low:
+            raise ValueError("ZOUK email must not promise line-jumping or mention Jarvis")
+        if "subject to capacity" not in low:
+            raise ValueError("ZOUK email must say subject to capacity")
+        if gg and ("playmaker" in low or "thomas vale" in low or "pme" in re.findall(r"[a-z]+", low)):
+            raise ValueError("GuestlistGo ZOUK email must not mention PME, Playmaker or Thomas Vale")
+    if PHONE_RE.search(text) or any(PHONE_RE.search(c) for c in cards):
+        raise ValueError("ZOUK email must not include phone numbers")
+    payload = {"to": request["email"], "subject": subject, "text": text, "html": html,
+               "dedupe_query": f'to:{request["email"]} subject:"{subject}"'}
+    if gg:
+        payload["from"] = GUESTLISTGO_FROM
+    return payload
+
+
+def zouk_team_email(ref, raw, request, bookings):
+    """team@: the guest got their ZOUK confirmation; add them to the ZOUK list
+    with the venue. Every guest detail, never a phone number."""
+    import liv_rules
+    import request_plan
+    raw = raw or {}
+    nights_rules = liv_rules.load()
+    name = f"{request.get('first_name', '')} {request.get('last_name', '')}".strip() or raw.get("name", "")
+    f, m = int(request["female_count"]), int(request["male_count"])
+    brand = hold_brand(raw)
+    source = raw.get("source") or ("playmaker" if str(raw.get("form_ref") or "").startswith("pm-") else "website")
+    posh = raw.get("posh") or {}
+    if posh.get("order_number"):
+        source = f"Posh order {posh['order_number']}"
+    per_night = request_plan.night_parties(raw)
+    rows = sorted(bookings, key=lambda b: (b["date"], b["venue"]))
+    dates, others = [], []
+    for b in rows:
+        d = date.fromisoformat(b["date"])
+        nf, nm = request_plan.party_for_night(raw, b["date"], request["female_count"], request["male_count"])
+        party_bit = f" ({nf}F {nm}M)" if per_night else ""
+        if is_zouk_row(b):
+            night = zouk_night(b["date"], liv_rules.for_night(ZOUK_VENUE, b["date"], nights_rules))
+            event = night["event"].split(" ", 2)[2] if night["event"].count(" ") >= 2 else ""
+            terms = "" if night["has_terms"] else " [no ZOUK rules on file for this night: default terms used]"
+            dates.append(f"{d.strftime('%a')} {b['date']}" + (f" ({event})" if event else "") + party_bit + terms)
+        else:
+            oid = b.get("order_id") or "signed up"
+            others.append(f"{d.strftime('%a')} {b['date']} - {b['venue']}"
+                          + (" (ZOUK closed that night: fallback)" if b.get("fallback") else "")
+                          + f" - Order ID {oid}" + party_bit)
+    lines = [
+        "ACTION NEEDED: add this guest to the ZOUK list with the venue.",
+        f"AMY sent the guest their ZOUK confirmation email ({'GuestlistGo' if brand == 'guestlistgo' else 'PME'} "
+        "branding). ZOUK has no booking platform, so nothing was booked; the guest is not on the venue's list "
+        "until the team adds them.",
+        "",
+        f"Guest: {name}",
+        f"Email: {request['email']}",
+        f"Venue: {ZOUK_VENUE}",
+        ("Date: " + dates[0]) if len(dates) == 1 else "Dates: " + "; ".join(dates),
+        f"Female guests: {f}",
+        f"Male guests: {m}",
+        f"Promoter: {request.get('promoter') or raw.get('promoter') or 'Not provided'}",
+        *_promoter_contact(raw),
+        f"Source: {source}",
+        f"Ref: {raw.get('form_ref') or '-'}",
+    ]
+    if others:
+        lines += ["", "Also booked by the worker (no action needed):", *others]
+    lines += ["", f"AMY ref: {ref}"]
+    text = "\n".join(lines)
+    label = date_label(request["start_date"], request["end_date"])
+    subject = f"Add to ZOUK list: {name} - ZOUK {label} ({f}F {m}M)".replace(",", "").replace(";", "")
+    html = "<pre style=\"font-family:Helvetica,Arial,sans-serif;white-space:pre-wrap\">" + \
+        _html.escape(text, quote=False) + "</pre>"
+    return {"to": TEAM_TO, "subject": subject, "text": text, "html": html,
+            "dedupe_query": f'to:{TEAM_TO} subject:"{subject}" "AMY ref: {ref}"'}
+
+
 # --- Guest "on hold" status email (Thomas, Nov 21 2026) ----------------------
 # When a request (or some of its nights) is waiting for a guest list that is
 # not open yet, needs an access code, or is closed with no open fallback, the

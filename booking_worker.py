@@ -761,7 +761,25 @@ class Worker:
                     continue
             if any(rules.is_manual_venue(v) for v in (raw.get("venues") or [])):
                 raise Stop("manual", "Requested venue stays manual")
-            if rules.is_drais(venue):
+            if rules.is_zouk(venue):
+                night_date = date.fromisoformat(night)
+                if rules.venue_open_on(venue, night_date) is False:
+                    # Closed / no-list ZOUK night (zouk-night-rules.json): the
+                    # same DEFAULT_ROUTING fallback (OMNIA first) as Drai's.
+                    try:
+                        item = self._fallback_nightclub(
+                            job["ref"], venue, night, night_date, request, rehearse, token, out,
+                            Stop("retry", f"{venue} {night}: closed that night per Tom's ZOUK rules; nothing submitted",
+                                 kind="unavailable"))
+                    except Stop as stop:
+                        if (waiting is None or stop.action != "retry"
+                                or stop.extra.get("kind") != "unposted"):
+                            raise
+                        waiting.append((venue, night, stop))
+                        continue
+                else:
+                    item = self._book_zouk(job["ref"], venue, night, request, rehearse, token)
+            elif rules.is_drais(venue):
                 night_date = date.fromisoformat(night)
                 if rules.venue_open_on(venue, night_date) is False:
                     # Closed / no-list Drai's night: same DEFAULT_ROUTING
@@ -797,7 +815,7 @@ class Worker:
     def _add_marquee_dayclub(self, ref, nights, request, rehearse, token, out):
         """Add Marquee Dayclub on each itinerary date it is open, through 2027-03-31."""
         from config import rules
-        if nights and all(rules.is_drais(v) for v, _ in nights):
+        if nights and all(rules.is_drais(v) or rules.is_zouk(v) for v, _ in nights):
             return
         dates = []
         for _, night in nights:
@@ -1143,14 +1161,35 @@ class Worker:
         self._checkpoint(ref, token, key, {"state": "email_only", "record": record, "meta": {}})
         return {"record": record, "meta": {}}
 
+    def _book_zouk(self, ref, venue, night, request, rehearse, token):
+        """ZOUK (Thomas, Nov 24 2026): no booking platform. Record the night as
+        email-only; _send_emails sends the guest's ZOUK door confirmation and
+        the team@ "add to the ZOUK list" email. Nothing is submitted."""
+        from config import rules
+        venue = rules.ZOUK_VENUE
+        key = night_key(ref, venue, night)
+        party = self._night_party(request, night)
+        male, female = party["male_count"], party["female_count"]
+        if rehearse:
+            return {"venue": venue, "date": night, "rehearsal": True, "email_only": True}
+        record = {"verified": True, "venue": venue, "date": night, "system": "email_only",
+                  "party": {"male_count": male, "female_count": female}}
+        self._checkpoint(ref, token, key, {"state": "email_only", "record": record, "meta": {}})
+        return {"record": record, "meta": {}}
+
     def _send_emails(self, job, ref, token, raw, bookings, drais=False, pending=None):
         import worker_emails
         from rules_engine import normalize_guest_request
         request = normalize_guest_request(raw)
         rows = [{**b["record"], **(b.get("meta") or {})} for b in bookings]
         pending = list(pending or [])
+        zouk = not drais and any(worker_emails.is_zouk_row(r) for r in rows)
+        email_only = drais or zouk
 
         def build(update=False):
+            if zouk:
+                return (("guest", worker_emails.zouk_guest_email(request, rows, raw=raw, pending=pending)),
+                        ("team", worker_emails.zouk_team_email(ref, raw, request, rows)))
             if drais:
                 return (("guest", worker_emails.drais_guest_email(request, rows)),
                         ("team", worker_emails.drais_team_email(ref, raw, request, rows)))
@@ -1162,7 +1201,7 @@ class Worker:
         saved = dict(((job.get("metadata") or {}).get("progress") or {}).get("emails") or {})
         saved.update(entry.get("receipts") or {})
         update = False
-        if saved and order_ids and not drais:
+        if saved and order_ids and not email_only:
             # Saved receipts only count when they already covered every order.
             # A venue added later (e.g. Marquee Dayclub after the night was
             # confirmed) gets an "Updated:" guest confirmation and team notice
@@ -1177,7 +1216,7 @@ class Worker:
             if set(order_ids) - set(covered):
                 saved, update = {}, True
         payloads = dict(build(update))
-        if not update and not drais and not saved.get("guest") and (self._hold_marker(job, ref) or {}).get("via") == "hold_email":
+        if not update and not email_only and not saved.get("guest") and (self._hold_marker(job, ref) or {}).get("via") == "hold_email":
             # The guest already got a hold-status email for this request: the
             # confirmation for the night(s) that booked is an "Updated:" one.
             payloads["guest"] = dict(build(True))["guest"]
@@ -1189,13 +1228,13 @@ class Worker:
                 continue
             if not worker_emails.allowed_recipient(payload["to"]):
                 raise Stop("manual", f"{kind} email recipient blocked; bookings done, DO NOT rebook")
-            updated = None if drais else (lambda k=kind: dict(build(True))[k])
+            updated = None if email_only else (lambda k=kind: dict(build(True))[k])
             message_id = self._send_one(kind, payload, order_ids=order_ids, updated=updated)
             saved[kind] = message_id
             self.ledger.put(f"{ref}|emails", {"receipts": dict(saved), "orders": order_ids})
             self.api.update(ref, token, "progress", {"progress": {"emails": {kind: message_id}}})
             receipts.append({"kind": kind, "id": message_id})
-            if kind == "guest" and not drais:
+            if kind == "guest" and not email_only:
                 self._note_liv_rules_missing(ref, raw, rows, message_id)
         return receipts
 

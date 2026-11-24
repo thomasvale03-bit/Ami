@@ -200,7 +200,6 @@ def test_retry_with_future_due_not_flagged(tmp_path):
     ("TAO Nightclub 2026-11-20: guest list not posted on TAO yet; nothing submitted", ("TAO Nightclub",), None),
     ("Hakkasan Nightclub 2026-11-22: no guest list posted on TAO yet (other nights already booked)", ("Hakkasan",), None),
     ("Past or invalid source date; never move to tonight", ("OMNIA Nightclub",), None),
-    ("Notify only", ("ZOUK Nightclub",), None),
     ("Notify only", ("Ghostbar",), None),
     ("Unspecified/unsupported venue; reviewed routing required", ("Riot House | Guest List",), None),
     ("Source request requires review; do not guess", ("Almost Famous",), None),
@@ -212,6 +211,13 @@ def test_retry_with_future_due_not_flagged(tmp_path):
 def test_expected_holds_not_flagged(tmp_path, reason, venues, meta):
     m, _ = mon(tmp_path, FakeApi([job("h", "manual", reason=reason, venues=venues, meta=meta)]))
     assert m.audit(now=NOW)["flagged"] == 0
+
+
+def test_held_zouk_job_is_flagged_now_that_zouk_is_confirmed_by_the_worker(tmp_path):
+    # Nov 24 2026: ZOUK is no longer notify-only, so a stuck ZOUK job is real.
+    m, _ = mon(tmp_path, FakeApi([job("z", "manual", reason="Source request malformed (x)",
+                                      venues=("ZOUK Nightclub",))]))
+    assert m.audit(now=NOW)["flagged"] == 1
 
 
 def test_new_exceptions_for_today_or_later_flagged(tmp_path):
