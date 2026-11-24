@@ -470,6 +470,47 @@ def test_owner_requeue_refuses_submitted_or_done(raw):
     assert api(s, '/queue/requeue/unknown', {'owner_approval': 'pt861u'})[0] == 409
 
 
+def test_progress_false_clears_submitting_flag(raw):
+    s, token = assigned(raw)
+    api(s, '/queue/jobs/mock', {'claim_token': token, 'action': 'progress',
+                                'metadata': {'progress': {'submitting': {'OMNIA Nightclub|2026-12-19': True}}}})
+    api(s, '/queue/jobs/mock', {'claim_token': token, 'action': 'progress',
+                                'metadata': {'progress': {'submitting': {'OMNIA Nightclub|2026-12-19': False}}}})
+    sub = ((s.get('mock').get('metadata') or {}).get('progress') or {}).get('submitting') or {}
+    assert 'OMNIA Nightclub|2026-12-19' not in sub
+
+
+def test_owner_requeue_clears_bogus_submitting_without_order(raw):
+    s, token = assigned(raw)
+    api(s, '/queue/jobs/mock', {'claim_token': token, 'action': 'progress',
+                                'metadata': {'progress': {'submitting': {'OMNIA Nightclub|2026-12-19': True}}}})
+    api(s, '/queue/jobs/mock', {'claim_token': token, 'action': 'uncertain',
+                                'reason': 'Submit Order stayed disabled; click never registered'})
+    assert s.get('mock')['state'] == 'submission_uncertain'
+    # Without the owner clear flag, refuse — a real submit must not be retried.
+    assert api(s, '/queue/requeue/mock', {'owner_approval': 'pt1195u'})[0] == 409
+    code, row = api(s, '/queue/requeue/mock', {
+        'owner_approval': 'pt1195u', 'clear_unsubmitted': True})
+    assert code == 200 and row['state'] == 'queued'
+    sub = ((row.get('metadata') or {}).get('progress') or {}).get('submitting') or {}
+    assert not sub
+    assert row['metadata']['owner_requeue']['cleared_submitting'] == ['OMNIA Nightclub|2026-12-19']
+    assert row['metadata']['owner_requeue']['approval'] == 'pt1195u'
+
+
+def test_owner_requeue_clear_unsubmitted_refuses_real_booking(raw):
+    s, token = assigned(raw)
+    api(s, '/queue/jobs/mock', {'claim_token': token, 'action': 'progress',
+                                'metadata': {'progress': {
+                                    'submitting': {'OMNIA Nightclub|2026-12-19': True},
+                                    'bookings': {'OMNIA Nightclub|2026-12-19': {
+                                        'verified': True, 'order_id': 'KEEP-ME'}}}}})
+    api(s, '/queue/jobs/mock', {'claim_token': token, 'action': 'uncertain',
+                                'reason': 'check TAO'})
+    assert api(s, '/queue/requeue/mock', {
+        'owner_approval': 'pt1195u', 'clear_unsubmitted': True})[0] == 409
+
+
 def test_complete_accepts_per_night_party(raw):
     raw.update(start_date='2026-11-21', end_date='2026-11-22',
                venues=['LAVO Party Brunch', 'TAO Nightclub'],

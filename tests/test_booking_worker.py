@@ -665,6 +665,40 @@ def test_timeout_after_click_is_uncertain_not_retried(tmp_path, monkeypatch):
     assert s.get('a')['state'] == 'submission_uncertain'
 
 
+def test_disabled_submit_clears_flag_and_is_not_uncertain(tmp_path):
+    def no_click(before_submit):
+        # Button never enabled: submit_registration does not call before_submit.
+        return {'verified': False, 'confirmation_id': None,
+                'reason': 'Submit Order stayed disabled (terms, required fields, ticket quantity or captcha)'}
+
+    s, api, worker = make(tmp_path, tao=FakeTao(submit=no_click))
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    key = bw.night_key('a', 'Marquee Nightclub', '2026-11-25')
+    assert worker.ledger.get(key) is None
+    assert result['status'] != 'uncertain', result
+    assert s.get('a')['state'] != 'submission_uncertain'
+    sub = ((s.get('a').get('metadata') or {}).get('progress') or {}).get('submitting') or {}
+    assert not any(sub.values()) if isinstance(sub, dict) else not sub
+
+
+def test_unregistered_click_clears_submitting_and_is_not_uncertain(tmp_path):
+    def no_register(before_submit):
+        before_submit()
+        return {'verified': False, 'confirmation_id': None,
+                'reason': 'Submit Order click did not register (no order POST or navigation); nothing submitted'}
+
+    s, api, worker = make(tmp_path, tao=FakeTao(submit=no_register))
+    s.enqueue('a', raw(), NOW)
+    result = worker.run_once()
+    key = bw.night_key('a', 'Marquee Nightclub', '2026-11-25')
+    assert worker.ledger.get(key) is None
+    assert result['status'] != 'uncertain', result
+    assert s.get('a')['state'] != 'submission_uncertain'
+    sub = ((s.get('a').get('metadata') or {}).get('progress') or {}).get('submitting') or {}
+    assert not any(sub.values()) if isinstance(sub, dict) else not sub
+
+
 def test_job_time_cap_unsticks_hung_listing_and_retries(tmp_path, monkeypatch):
     import threading
     released = threading.Event()

@@ -13,6 +13,24 @@ class Conflict(ValueError):
     pass
 
 
+def submitting_open(progress):
+    """True when any venue/night still has a live submitting flag."""
+    sub = (progress or {}).get('submitting') or {}
+    if isinstance(sub, dict):
+        return any(bool(v) for v in sub.values())
+    return bool(sub)
+
+
+def has_submission_record(progress, meta=None):
+    """True when the job already has a booking record or saved evidence."""
+    if (meta or {}).get('evidence'):
+        return True
+    bookings = (progress or {}).get('bookings') or {}
+    if not isinstance(bookings, dict):
+        return bool(bookings)
+    return any(bool(v) for v in bookings.values())
+
+
 class Store:
     def __init__(self, path):
         self.path = str(path)
@@ -160,7 +178,7 @@ class Store:
         for row in rows:
             raw, meta = json.loads(row['raw']), json.loads(row['metadata'] or '{}')
             progress = meta.get('progress') or {}
-            if progress.get('submitting') or progress.get('bookings') or meta.get('evidence') or meta.get('revived'):
+            if submitting_open(progress) or has_submission_record(progress, meta) or meta.get('revived'):
                 continue
             meta['revived'] = {'from_reason': row['reason'], 'at': now}
             db.execute("""UPDATE queue_jobs SET state='retry',attempts=0,due=?,updated=?,metadata=?,
@@ -192,7 +210,7 @@ class Store:
                 raise Conflict('Only an in-flight or manual job can be stall-requeued')
             meta = json.loads(row['metadata'] or '{}')
             progress = meta.get('progress') or {}
-            if progress.get('submitting') or progress.get('bookings') or meta.get('evidence'):
+            if submitting_open(progress) or has_submission_record(progress, meta):
                 raise Conflict('Job has submission progress; manual review required')
             meta['stall_requeue'] = {'at': now, 'previous_reason': row['reason'], 'previous_state': row['state']}
             db.execute(
@@ -201,14 +219,19 @@ class Store:
         return self.get(ref)
 
 
-    def owner_requeue(self, ref, approval, now, start_date=None, end_date=None):
-        """Owner-approved: put ONE manual job back to queued. Only for a job
-        that was never submitted (no booking/submitting progress), so it can
-        never cause a rebook of completed work. The approval is recorded.
+    def owner_requeue(self, ref, approval, now, start_date=None, end_date=None, clear_unsubmitted=False):
+        """Owner-approved: put ONE manual, retry, or submission_uncertain job
+        back to queued. Only for a job that was never actually submitted (no
+        booking record or evidence), so it can never cause a rebook of
+        completed work. The approval is recorded.
 
         Optional start_date/end_date correct a held job whose source date was
         a recurring-series guess, and clear the review flag so the worker can
         book the real night.
+
+        clear_unsubmitted=True (after a TAO-dashboard check found no order)
+        drops a bogus submitting flag on a submission_uncertain job whose
+        click never registered.
         """
         approval = str(approval or '').strip()
         if not approval:
@@ -228,14 +251,25 @@ class Store:
                 raise Conflict('Unknown job')
             # Owner may also pull a pre-submit retry job forward (Thomas, Nov 15
             # 2026: list opened tonight, don't wait for the hourly retry).
-            if row['state'] not in ('manual', 'retry'):
-                raise Conflict('Only a manual or retry job can be requeued')
+            if row['state'] not in ('manual', 'retry', 'submission_uncertain'):
+                raise Conflict('Only a manual, retry or submission_uncertain job can be requeued')
             meta = json.loads(row['metadata'] or '{}')
             progress = meta.get('progress') or {}
-            if progress.get('submitting') or progress.get('bookings') or meta.get('evidence'):
+            if has_submission_record(progress, meta):
                 raise Conflict('Job has submission progress; manual review required')
+            if submitting_open(progress):
+                if not clear_unsubmitted:
+                    raise Conflict('Job has a submitting flag; pass clear_unsubmitted after confirming no TAO order')
+                cleared = [k for k, v in (progress.get('submitting') or {}).items() if v]
+                progress['submitting'] = {}
+                meta['progress'] = progress
+            else:
+                cleared = []
             raw = json.loads(row['raw'])
-            record = {'approval': approval[:200], 'at': now, 'previous_reason': row['reason']}
+            record = {'approval': approval[:200], 'at': now, 'previous_reason': row['reason'],
+                      'previous_state': row['state']}
+            if cleared:
+                record['cleared_submitting'] = cleared
             if new_start:
                 record['corrected_dates'] = {
                     'from': [raw.get('start_date'), raw.get('end_date')],
@@ -445,7 +479,15 @@ class Store:
                     raise Conflict('Progress requires an assigned job and a progress object')
                 merged = dict(saved.get('progress') or {})
                 for key, value in metadata['progress'].items():
-                    if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                    if key == 'submitting' and isinstance(value, dict):
+                        cur = dict(merged.get('submitting') or {})
+                        for night, flag in value.items():
+                            if flag:
+                                cur[night] = True
+                            else:
+                                cur.pop(night, None)
+                        merged['submitting'] = cur
+                    elif isinstance(value, dict) and isinstance(merged.get(key), dict):
                         merged[key] = {**merged[key], **value}
                     else:
                         merged[key] = value
