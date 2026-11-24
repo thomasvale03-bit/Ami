@@ -261,10 +261,11 @@ def source_nights(raw):
     # Every requested venue on every night, or exactly the request's nightly
     # plan (one job for a whole date-range trip, Thomas Nov 19 2026).
     pairs = request_plan.requested_pairs(raw)
-    # Nightclubs still appear on dark nights so DEFAULT_ROUTING can cover them.
-    # Verified-dark daylife / Drai's dates are dropped (no lookup, no retry).
+    # Nightclubs, Drai's, and urvenue nightclubs still appear on dark /
+    # no-list nights so DEFAULT_ROUTING can cover them. Verified-dark
+    # daylife dates are dropped (no lookup, no retry).
     return [(v, n) for v, n in pairs
-            if v in rules.NIGHTCLUBS or rules.venue_open_on(v, date.fromisoformat(n)) is not False]
+            if rules.keep_requested_night(v, date.fromisoformat(n))]
 
 
 def drais_offset():
@@ -652,6 +653,17 @@ class Worker:
         except Exception:  # noqa: BLE001
             return []
 
+    @staticmethod
+    def _is_drais_email_job(raw, bookings):
+        """True only when confirmations should use the Drai's email-only
+        template. A closed / no-list Drai's night that fell back to a TAO
+        club uses the normal nightclub confirmation (and fallback notice)."""
+        from config import rules
+        if not any(rules.is_drais(v) for v in raw.get("venues") or []):
+            return False
+        rows = [b.get("record") or b for b in (bookings or ())]
+        return bool(rows) and all(rules.is_drais(r.get("venue")) for r in rows)
+
     def _process(self, job, ref, token, raw):
         import queue_service
         today = datetime.fromtimestamp(self.now(), PHOENIX).date()
@@ -659,7 +671,6 @@ class Worker:
         if reason:
             raise Stop("manual", reason)
         from config import rules
-        drais = any(rules.is_drais(v) for v in raw.get("venues") or [])
         waiting = []
         self._booked_so_far = []
         try:
@@ -667,12 +678,14 @@ class Worker:
         except Stop as stop:
             # A closed / access-code night with no open fallback stops the job
             # before the end; the guest still hears (once) what is on hold.
+            drais = self._is_drais_email_job(raw, self._booked_so_far)
             if (not drais and stop.action == "retry" and stop.extra.get("hold_kind")
                     and stop.extra.get("venue") and stop.extra.get("night")):
                 held = [(v, n, "unposted") for v, n, _ in waiting]
                 held.append((stop.extra["venue"], stop.extra["night"], stop.extra["hold_kind"]))
                 self._notify_hold(job, ref, token, raw, held, booked=bool(self._booked_so_far))
             raise
+        drais = self._is_drais_email_job(raw, bookings)
         if waiting:
             # Some nights of this request are only waiting for their guest list
             # to be posted. Confirm everything booked so far in ONE guest and
@@ -749,9 +762,23 @@ class Worker:
             if any(rules.is_manual_venue(v) for v in (raw.get("venues") or [])):
                 raise Stop("manual", "Requested venue stays manual")
             if rules.is_drais(venue):
-                if rules.venue_open_on(venue, date.fromisoformat(night)) is False:
-                    continue
-                item = self._book_drais(job["ref"], venue, night, request, rehearse, token)
+                night_date = date.fromisoformat(night)
+                if rules.venue_open_on(venue, night_date) is False:
+                    # Closed / no-list Drai's night: same DEFAULT_ROUTING
+                    # fallback as a dark TAO or closed LIV/XS night.
+                    try:
+                        item = self._fallback_nightclub(
+                            job["ref"], venue, night, night_date, request, rehearse, token, out,
+                            Stop("retry", f"{venue} {night}: does not operate that night; nothing submitted",
+                                 kind="unavailable"))
+                    except Stop as stop:
+                        if (waiting is None or stop.action != "retry"
+                                or stop.extra.get("kind") != "unposted"):
+                            raise
+                        waiting.append((venue, night, stop))
+                        continue
+                else:
+                    item = self._book_drais(job["ref"], venue, night, request, rehearse, token)
             else:
                 try:
                     item = self._book_requested_or_fallback(

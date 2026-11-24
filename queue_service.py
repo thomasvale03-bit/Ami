@@ -158,14 +158,22 @@ FALLBACK_TARGETS = frozenset({'OMNIA Nightclub', 'Marquee Nightclub', 'TAO Night
 
 def is_approved_fallback(record, venue, night, requested_nights, drais):
     """A booked venue that differs from the request is accepted ONLY on a night
-    that is in the request (exact-date rule never relaxes), never for Drai's
-    jobs or as a Drai's receipt, and only when the worker marked it
-    fallback:true (nightclub) or it is one of the approved fallback venues.
+    that is in the request (exact-date rule never relaxes), never as a
+    Drai's receipt, and only when the worker marked it fallback:true
+    (nightclub) or it is one of the approved fallback venues. Open Drai's
+    jobs still cannot complete on a TAO club; a closed / no-list Drai's
+    night may fall back like other clubs.
     Each accepted change is returned by validate_completion, saved on the job
     and emailed to team@ (venue changes are always flagged)."""
     from config import rules
-    if drais or night not in requested_nights or rules.is_drais(venue) or not rules.is_known_vegas_venue(venue):
+    if night not in requested_nights or rules.is_drais(venue) or not rules.is_known_vegas_venue(venue):
         return False
+    if drais:
+        # Open or off-schedule Drai's nights still cannot complete as a TAO
+        # receipt. Weekly no_list/closed Drai's nights may fall back.
+        night_date = date.fromisoformat(night) if isinstance(night, str) else night
+        if not rules.night_rules_closed("Drai's After Hours", night_date):
+            return False
     return venue in FALLBACK_TARGETS or (record.get('fallback') is True and 'Nightclub' in venue)
 
 
@@ -191,11 +199,11 @@ def validate_completion(raw, metadata, require_team_receipt=True):
         # the request carries one (one job for a whole date-range trip).
         import request_plan
         expected = set(request_plan.requested_pairs(raw))
-        open_on = getattr(rules, 'venue_open_on', None)
-        if open_on:
-            # Verified-dark daylife/Drai's dates are never booked by the worker.
+        if getattr(rules, 'keep_requested_night', None):
+            # Verified-dark daylife dates are never booked by the worker.
+            # Closed nightclubs / Drai's / urvenue nightclubs stay so fallback can cover them.
             expected = {(v, n) for v, n in expected
-                        if v in rules.NIGHTCLUBS or open_on(v, date.fromisoformat(n)) is not False}
+                        if rules.keep_requested_night(v, date.fromisoformat(n))}
         requested_nights = {night for _v, night in expected}
         actual = set()
         fallbacks = []
@@ -219,7 +227,7 @@ def validate_completion(raw, metadata, require_team_receipt=True):
                 raise Conflict('Receipt party counts must match the source')
             if record.get('closed') or record.get('access_code_required'):
                 raise Conflict('Closed/access-code lists cannot be marked booked')
-            if drais:
+            if drais and not fallback:
                 if not rules.is_drais(venue):
                     raise Conflict("Drai's receipt must be a Drai's venue, never TAO")
                 # Drai's (Thomas, Nov 10 2026): guest confirmation + team@
@@ -255,7 +263,7 @@ def validate_completion(raw, metadata, require_team_receipt=True):
                                   'order_id': record.get('order_id')})
         if actual != expected:
             raise Conflict('All exact source venue/date records required; incomplete jobs stay active/manual')
-        if not drais or evidence.get('email_receipts'):
+        if not drais or evidence.get('email_receipts') or fallbacks:
             receipts = evidence.get('email_receipts')
             if not isinstance(receipts, list) or not receipts or any(not isinstance(r, dict) or not r.get('id') for r in receipts):
                 raise Conflict('Actual email send receipts required before completion')

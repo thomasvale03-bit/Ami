@@ -330,9 +330,21 @@ def _in_season(date_obj, season):
     return month >= start or month <= end
 
 
-def venue_open_on(venue, date_obj):
-    """True or False when the venue has a verified schedule; None when tbd
-    or unknown. None must never be treated as closed."""
+def night_rules_closed(venue, date_obj):
+    """True when a weekly *-night-rules.json entry marks this venue+date
+    no_list or closed. Missing or unreadable files (or any error) are
+    fail-safe: treat as not closed, so the schedule result stands."""
+    try:
+        import liv_rules
+        day = date_obj.isoformat() if hasattr(date_obj, "isoformat") else str(date_obj)
+        return liv_rules.is_no_list(liv_rules.for_night(venue, day))
+    except Exception:
+        return False
+
+
+def _scheduled_open(venue, date_obj):
+    """True or False from the verified weekday/season schedule only; None
+    when tbd or unknown. Does not consult weekly night-rules files."""
     entry = venue_schedule(venue)
     if not entry or entry.get("status") != "verified" or not entry.get("days"):
         return None
@@ -346,6 +358,20 @@ def venue_open_on(venue, date_obj):
     return weekday in entry["days"]
 
 
+def venue_open_on(venue, date_obj):
+    """True or False when the venue has a verified schedule; None when tbd
+    or unknown. None must never be treated as closed.
+
+    A weekly night-rules entry marked no_list or closed for this venue+date
+    returns False (dark that night). Missing or unreadable files leave the
+    schedule result unchanged.
+    """
+    scheduled = _scheduled_open(venue, date_obj)
+    if scheduled is not False and night_rules_closed(venue, date_obj):
+        return False
+    return scheduled
+
+
 def normalize_venue_name(name):
     key = name.strip().lower()
     return VENUE_ALIASES.get(key, name.strip())
@@ -356,6 +382,20 @@ def normalize_venue_name(name):
 # DEFAULT_GUEST_PHONE / DEFAULT_BILLING_ZIP.
 FALLBACK_PHONE = "4802649387"
 FALLBACK_BILLING_ZIP = "85281"
+
+
+def keep_requested_night(venue, date_obj):
+    """True when this requested venue/night stays in the booking set.
+    Nightclubs and urvenue nightclubs remain even when dark or no-list so
+    DEFAULT_ROUTING can cover them. Drai's stays only on a weekly
+    no_list/closed night (also so fallback can run); off-schedule Drai's
+    dates (Mon-Wed) are still dropped. Verified-dark daylife is dropped.
+    """
+    if venue in NIGHTCLUBS or venue in URVENUE_NIGHTCLUBS:
+        return True
+    if is_drais(venue):
+        return night_rules_closed(venue, date_obj) or _scheduled_open(venue, date_obj) is not False
+    return venue_open_on(venue, date_obj) is not False
 
 
 def fallback_phone():

@@ -26,6 +26,7 @@ def _no_flag_alert_threads(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_real_night_rules(tmp_path, monkeypatch):
-    """Never read Tom's real LIV / XS night-rules files in tests."""
+    """Never read Tom's real weekly night-rules files in tests."""
     monkeypatch.setenv("LIV_NIGHT_RULES", str(tmp_path / "no-liv-rules.json"))
     monkeypatch.setenv("XS_NIGHT_RULES", str(tmp_path / "no-xs-rules.json"))
+    monkeypatch.setenv("NIGHT_RULES_DIR", str(tmp_path))
