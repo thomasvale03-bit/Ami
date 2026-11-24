@@ -270,6 +270,47 @@ def test_reconcile_route_dispatches_alert(_no_flag_alert_threads, monkeypatch):
     assert _no_flag_alert_threads == ['j2']
 
 
+def test_reconcile_covered_by_closes_uncertain_job_without_email(tmp_path):
+    s = q.store()
+    # Covering job already done with order + guest/team receipts.
+    s.enqueue('a', raw(venues=('OMNIA Nightclub',), start='2026-11-24', end='2026-11-24',
+                       email='pablo@example.invalid', name='Pablo Lopez'), NOW)
+    ev = meta(rec('OMNIA Nightclub', '2026-11-24', order='66512456-6e0a-41a2-9371-6b92ab64bd6f'))
+    ev['evidence']['email_receipts'] = [{'kind': 'guest', 'id': 'G-PABLO'}, {'kind': 'team', 'id': 'T-PABLO'}]
+    with s.connect() as db:
+        db.execute("UPDATE queue_jobs SET state='done',metadata=?,reason=? WHERE ref='a'",
+                   (json.dumps(ev), 'Booked by Railway worker'))
+    # Second sign-up went uncertain with no booking of its own.
+    s.enqueue('b', raw(venues=('OMNIA Nightclub',), start='2026-11-24', end='2026-11-24',
+                       email='pablo@example.invalid', name='Pablo Lopez'), NOW)
+    with s.connect() as db:
+        db.execute("UPDATE queue_jobs SET state='submission_uncertain',metadata=?,reason=? WHERE ref='b'",
+                   (json.dumps({'progress': {'submitting': {'OMNIA Nightclub|2026-11-24': True}}}),
+                    'OMNIA Nightclub 2026-11-24: submitted once but no confirmation'))
+    code, row = q.handle('POST', '/queue/owner-reconcile/b', {'Authorization': 'Bearer ' + TOKEN},
+                         {'owner_approval': 't1194u', 'covered_by': 'a', 'alert': False}, s=s, now=NOW)
+    assert code == 200 and row['state'] == 'done', row
+    assert row['metadata']['owner_reconcile']['covered_by'] == 'a'
+    assert row['metadata']['owner_reconcile']['approval'] == 't1194u'
+    bookings = row['metadata']['evidence']['bookings']
+    assert bookings[0]['order_id'] == '66512456-6e0a-41a2-9371-6b92ab64bd6f'
+    receipts = {r['kind']: r['id'] for r in row['metadata']['evidence']['email_receipts']}
+    assert receipts == {'guest': 'G-PABLO', 'team': 'T-PABLO'}
+
+
+def test_reconcile_covered_by_unknown_or_self_is_refused():
+    s = q.store()
+    s.enqueue('b', raw(), NOW)
+    with s.connect() as db:
+        db.execute("UPDATE queue_jobs SET state='submission_uncertain' WHERE ref='b'")
+    with pytest.raises(Conflict, match='Unknown covered_by'):
+        s.owner_reconcile('b', 't1194u', NOW, covered_by='missing')
+    with pytest.raises(Conflict, match='cannot be this job'):
+        s.owner_reconcile('b', 't1194u', NOW, covered_by='b')
+    with pytest.raises(Conflict, match='No verified booking'):
+        s.owner_reconcile('b', 't1194u', NOW)
+
+
 # --- 3. flags + alert ---------------------------------------------------------
 
 def _elkabes(s):

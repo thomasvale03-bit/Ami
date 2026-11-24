@@ -28,7 +28,7 @@ class MockCheckoutTests(unittest.TestCase):
 
     def setUp(self):
         # Local stand-ins for the promoter page and its Pass links.
-        urls = {n: (MOCK / n).as_uri() for n in ("event.html", "paid.html", "uncertain.html")}
+        urls = {n: (MOCK / n).as_uri() for n in ("event.html", "paid.html", "uncertain.html", "already.html")}
         patches = [
             mock.patch.object(tao_portal, "TAO_PROMOTER_URL", (MOCK / "promoter.html").as_uri()),
             mock.patch.object(tao_portal, "is_safe_pass_url", return_value=True),
@@ -101,6 +101,13 @@ class MockCheckoutTests(unittest.TestCase):
     def test_no_success_page_is_uncertain_not_failed(self):
         with self.assertRaises(tao_portal.SubmissionUncertain):
             self.submit("uncertain.html")
+
+    def test_success_page_without_order_id_is_booked(self):
+        result = self.submit("already.html")
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["confirmation_id"], tao_portal.NO_ORDER_ID)
+        self.assertTrue(result.get("no_order_id"))
+        self.assertTrue(result.get("confirmation_url"))
 
     def test_availability_reads_a_free_listing(self):
         from datetime import date

@@ -176,7 +176,7 @@ class TaoBooker:
 
 class DraisBooker:
     """SpeakeasyGo manager: add name + party to the listing date, verify the
-    row appears, never add a name that is already there."""
+    row appears. Unused in live (Drai's is email-only)."""
 
     LIST_URL = "https://manager.speakeasygo.com/guest-details?date={d}"
 
@@ -193,9 +193,7 @@ class DraisBooker:
                 speakeasy._login(page)
                 page.goto(url, wait_until="domcontentloaded")
                 page.wait_for_timeout(8000)
-                before = page.locator("body").inner_text()
-                if name.lower() in before.lower():
-                    raise Stop("manual", f"{name} is already on the Drai's {listing_date} list; not adding twice")
+                page.locator("body").inner_text()
                 if rehearse:
                     return {"rehearsal": True, "screenshot": _shot(page, screenshot_path)}
                 speakeasy.MANAGER_URL = url
@@ -216,11 +214,6 @@ class DraisBooker:
                 return {"verified": True, "row": row[:200], "screenshot": shot}
             finally:
                 browser.close()
-
-
-def _reused(item):
-    """A booking copied in from another job's verified ledger entry."""
-    return bool(((item or {}).get("meta") or {}).get("reused_from_job"))
 
 
 class UrvenueBooker:
@@ -495,7 +488,7 @@ def box_lock(ref):
 
 class Worker:
     def __init__(self, api, ledger, tao=None, drais=None, *, mode="dry-run", evidence_dir=None,
-                 now=None, sleep=time.sleep, email_wait_seconds=None, duplicate_check=None, alerts=None,
+                 now=None, sleep=time.sleep, email_wait_seconds=None, alerts=None,
                  job_time_cap=None, hold_emails=None, urvenue=None):
         self.api, self.ledger, self.mode = api, ledger, mode
         self.tao, self.drais = tao or TaoBooker(), drais or DraisBooker()
@@ -506,13 +499,9 @@ class Worker:
                            if email_wait_seconds is None else email_wait_seconds)
         self.job_time_cap = (int(os.environ.get("AMY_WORKER_JOB_SECONDS", str(JOB_TIME_CAP_SECONDS)))
                              if job_time_cap is None else job_time_cap)
-        # Thomas, Nov 22 2026: cross-job / already-on-list checks are off
-        # unless AMY_DEDUPE or AMY_WORKER_DUPLICATE_CHECK is true. Each sign-up
-        # is booked even if the guest is already on the list or another job
-        # already booked them. The per-job ledger still skips a night already
+        # Thomas, Nov 23 2026: the worker never considers duplicates. Each
+        # sign-up is booked. The per-job ledger still skips a night already
         # submitted for this job, and SubmissionUncertain is never retried.
-        import urvenue
-        self.duplicate_check = (urvenue.dedupe_enabled() if duplicate_check is None else duplicate_check)
         self.alerts = (os.environ.get("AMY_WORKER_ALERTS", "").lower() == "true" if alerts is None else alerts)
         # Thomas, Nov 21 2026: email the guest (team@ on BCC) once when their
         # request goes on hold (list not open yet / access code / closed with
@@ -660,8 +649,6 @@ class Worker:
         reason = queue_service.source_policy(ref, raw, today)
         if reason:
             raise Stop("manual", reason)
-        if self.duplicate_check:
-            self._check_duplicates(ref, raw)
         from config import rules
         drais = any(rules.is_drais(v) for v in raw.get("venues") or [])
         waiting = []
@@ -689,12 +676,7 @@ class Worker:
             # Only the first partial confirmation goes out early; nights booked
             # later wait until the whole request is done (one Updated email).
             confirmation = None
-            # Bookings reused from another job (the guest already got that
-            # confirmation) are not news: with nothing newly booked, the guest
-            # gets the normal hold email instead of a fresh, non-"Updated"
-            # confirmation that repeats old nights (Elaina W., Nov 21 2026).
-            fresh = [b for b in bookings if not _reused(b)]
-            if fresh and not drais and not already:
+            if bookings and not drais and not already:
                 receipts = self._send_emails(job, ref, token, raw, bookings, drais=False,
                                              pending=[(v, n) for v, n, _ in waiting])
                 confirmation = next((r["id"] for r in receipts if r["kind"] == "guest"), None)
@@ -705,21 +687,14 @@ class Worker:
                 # nights ("Still to come"), so it counts as the hold notice;
                 # otherwise one hold-status email goes out (deduped).
                 self._notify_hold(job, ref, token, raw, [(v, n, "unposted") for v, n, _ in waiting],
-                                  booked=bool(fresh), confirmation_id=confirmation)
+                                  booked=bool(bookings), confirmation_id=confirmation)
             first = waiting[0][2]
             reason = first.reason if len(waiting) == 1 else (
                 f"{len(waiting)} night(s) waiting for their guest list to be posted ("
                 + "; ".join(f"{v} {n}" for v, n, _ in waiting) + "); nothing submitted for them")
             raise Stop("retry", reason, kind="unposted")
         evidence = {"verified": True, "worker": "railway", "bookings": [b["record"] for b in bookings]}
-        covered = None if drais else self._already_confirmed_elsewhere(job, ref, bookings)
-        if covered:
-            # Every night is a booking the guest was already confirmed for (by
-            # another job, after this job's hold email): no repeat email.
-            evidence["email_receipts"] = covered
-            evidence["confirmed_by_other_job"] = True
-        else:
-            evidence["email_receipts"] = self._send_emails(job, ref, token, raw, bookings, drais=drais)
+        evidence["email_receipts"] = self._send_emails(job, ref, token, raw, bookings, drais=drais)
         code, body = self.api.update(ref, token, "complete", {"evidence": evidence}, "Booked by Railway worker")
         if code != 200:
             raise Stop("manual", f"Booked and emailed but completion refused (HTTP {code}: "
@@ -727,22 +702,6 @@ class Worker:
                        evidence=evidence)
         log.info("Job %s complete: %s", ref, [b["record"].get("order_id") or b["record"].get("entry_id") or b["record"].get("system") for b in bookings])
         return {"status": "done", "ref": ref, "evidence": evidence}
-
-    def _check_duplicates(self, ref, raw):
-        """Same guest email + venue + night already completed in the queue."""
-        code, body = self.api.jobs("done", 100)
-        if code != 200:
-            return
-        mine = set(self._safe_nights(raw))
-        email = (raw.get("email") or "").strip().lower()
-        for other in body.get("jobs") or []:
-            oraw = other.get("raw") or {}
-            if other.get("ref") == ref or (oraw.get("email") or "").strip().lower() != email:
-                continue
-            overlap = mine & set(self._safe_nights(oraw))
-            if overlap:
-                v, n = sorted(overlap)[0]
-                raise Stop("manual", f"Duplicate suspicion: {email} already booked {v} on {n} (job {other['ref']})")
 
     def _book_all(self, job, raw, *, rehearse, token=None, waiting=None):
         """Book every requested venue/night. With `waiting` (a list), a night
@@ -919,22 +878,6 @@ class Worker:
         from rules_engine import fallback_venues_for
         prev = self._previous_nightclub(night, booked)
         last_stop = stop
-        if not rehearse and self.duplicate_check:
-            # Off unless AMY_DEDUPE / AMY_WORKER_DUPLICATE_CHECK is true
-            # (Thomas, Nov 22 2026: each sign-up books its own order).
-            other = self._guest_night_elsewhere(ref, night)
-            if other:
-                other_ref, other_venue, other_order, other_rec, other_meta = other
-                if other_rec.get("party") == self._night_party(request, night):
-                    # Same guest, same party, already booked that night under
-                    # another job: that booking covers this night too.
-                    rec = {**other_rec, "fallback": True}
-                    meta = {**(other_meta or {}), "fallback": True, "fallback_from": venue,
-                            "reused_from_job": other_ref}
-                    return {"record": rec, "meta": meta}
-                raise Stop("manual", f"{venue} {night}: closed, but this guest already has {other_venue} booked "
-                           f"that night (job {other_ref}, order {other_order}) with a different party; "
-                           "no second fallback booking", kind="already_booked")
         for alt in fallback_venues_for(night_date, prev, skip={venue}, today=self._today()):
             alt_key = night_key(ref, alt, night)
             alt_entry = self.ledger.get(alt_key) or {}
@@ -966,22 +909,6 @@ class Worker:
                    venue=venue, night=night,
                    hold_kind="access_code" if stop.extra.get("kind") == "access_code" else "closed")
 
-    def _already_confirmed_elsewhere(self, job, ref, bookings):
-        """Receipts of the other job whose confirmation already covers every
-        booking here (all reused, one source job, sent after any hold email
-        this job sent). None when this job must send its own email."""
-        if not bookings or not all(_reused(b) for b in bookings):
-            return None
-        metas = [b.get("meta") or {} for b in bookings]
-        sources = {m.get("reused_from_job") for m in metas}
-        receipts = metas[0].get("reused_receipts")
-        if len(sources) != 1 or not receipts:
-            return None
-        hold_at = (self._hold_marker(job, ref) or {}).get("at") or 0
-        if min(m.get("reused_updated") or 0 for m in metas) <= hold_at:
-            return None
-        return [{"kind": "guest", "id": receipts["guest"]}, {"kind": "team", "id": receipts["team"]}]
-
     def _today(self):
         return datetime.fromtimestamp(self.now(), PHOENIX).date()
 
@@ -1009,41 +936,6 @@ class Worker:
             except Exception:  # noqa: BLE001
                 log.warning("posted() lookup failed for %s %s", other, night_date)
         return False
-
-    def _guest_night_elsewhere(self, ref, night):
-        """(job ref, venue, order id, record, meta) when this guest (same email)
-        already has a verified nightclub booking on `night` in another job."""
-        from config import rules
-        email = ((getattr(self, "_job_raw", None) or {}).get("email") or "").strip().lower()
-        if not email:
-            return None
-        base = ref.split(":")[0]
-        for state in ("done", "retry", "manual", "submission_uncertain", "claimed", "queued"):
-            try:
-                code, body = self.api.jobs(state, 300)
-            except Exception:  # noqa: BLE001
-                continue
-            if code != 200:
-                continue
-            for other in (body or {}).get("jobs") or []:
-                if other.get("ref") in (ref, base):
-                    continue
-                oraw = other.get("raw") or {}
-                if (oraw.get("email") or "").strip().lower() != email:
-                    continue
-                meta = other.get("metadata") or {}
-                records = list((((meta.get("progress") or {}).get("bookings")) or {}).values())
-                records += list(((meta.get("evidence") or {}).get("bookings")) or [])
-                for rec in records:
-                    rec = rec or {}
-                    if (rec.get("verified") and rec.get("date") == night and rec.get("order_id")
-                            and rules.is_nightclub(rec.get("venue"))):
-                        sent = (meta.get("progress") or {}).get("emails") or {}
-                        return (other.get("ref"), rec.get("venue"), rec.get("order_id"), dict(rec),
-                                {"event": f"Guest List - {rec.get('venue')}",
-                                 "reused_receipts": dict(sent) if sent.get("guest") and sent.get("team") else None,
-                                 "reused_updated": other.get("updated") or 0})
-        return None
 
     def _shot_path(self, ref, venue, night, suffix):
         safe = "".join(c if c.isalnum() else "-" for c in venue)
@@ -1115,6 +1007,8 @@ class Worker:
                 kind = "unavailable"
             raise Stop("manual", f"{venue} {night}: not submitted — {reason}", **({"kind": kind} if kind else {}))
         record = {"verified": True, "venue": venue, "date": night, "order_id": result["confirmation_id"], "party": party}
+        if result.get("no_order_id"):
+            record["no_order_id"] = True
         meta = {"event": result.get("event") or listing.get("event"), "event_time": listing.get("event_time"),
                 "confirmation_url": result.get("confirmation_url"), "screenshot": result.get("screenshot"),
                 "screenshot_sha256": _sha256(result.get("screenshot"))}
@@ -1156,9 +1050,6 @@ class Worker:
                        kind="closed")
         except urvenue.LoginUnavailable as exc:
             raise Stop("retry", f"{venue} {night}: {exc}; nothing submitted", kind="login")
-        except urvenue.AlreadyListed as exc:
-            raise Stop("manual", f"{venue} {night}: a guest with this name is already on the urvenue list "
-                       f"({exc.row[:120]}); not adding twice", kind="already_listed")
         except urvenue.UrvenueError as exc:
             raise Stop("manual", f"{venue} {night}: urvenue: {exc}; nothing submitted")
         except urvenue.SubmissionUncertain as exc:
@@ -1227,10 +1118,6 @@ class Worker:
                            and (self.ledger.get(night_key(ref, r["venue"], r["date"])) or {}).get("at", 0) <= sent_at]
             if set(order_ids) - set(covered):
                 saved, update = {}, True
-        if not update and not drais and not saved and any(_reused(b) for b in bookings):
-            # Part of this email repeats a booking the guest was already sent
-            # (reused from another job): it is an "Updated:" confirmation.
-            update = True
         payloads = dict(build(update))
         if not update and not drais and not saved.get("guest") and (self._hold_marker(job, ref) or {}).get("via") == "hold_email":
             # The guest already got a hold-status email for this request: the

@@ -23,14 +23,14 @@ service's authenticated HTTPS API (`/queue/*`, `/send-branded`).
 2. Re-checks the source rules (`queue_service.source_policy`: past dates, held
    Shanequa/Ashley refs, JEWEL after Nov 21, same-day OMNIA Fri/Sat, mixed
    Drai's, >14 nights, missing consent/party) -> manual.
-3. Each sign-up is booked even if the guest is already on a list or another
-   job already booked them (Thomas, Nov 22 2026). The per-job ledger still
-   skips a venue/night already booked for this job, so a crash/retry never
-   resubmits the same order, and an uncertain write is never blindly retried.
-   One guest email and one team email still go out per trip, per job.
-   `AMY_DEDUPE=true` (or `AMY_WORKER_DUPLICATE_CHECK=true`) restores the old
-   cross-job checks: already-on-list refusal, reuse of another job's
-   same-party booking, and the "duplicate suspicion" manual stop.
+3. Each sign-up is booked. The worker never considers duplicates (Thomas,
+   Nov 23 2026). The per-job ledger still skips a venue/night already booked
+   for this job, so a crash/retry never resubmits the same order, and an
+   uncertain write is never blindly retried. One guest email and one team
+   email still go out per trip, per job. A bounced address is never retried.
+   If TAO shows a success page with no order ID (the guest is already on
+   that night's list), the night is recorded as booked ("TAO accepted, no
+   order id" plus the page URL) and the confirmation is sent.
 4. For each exact source venue x night:
    * already booked (worker ledger or server `progress`) -> reuse, never resubmit;
    * ledger says `submitting` with no order -> **uncertain**, never resubmitted;
@@ -93,7 +93,7 @@ not treated as a stall.
 | `AMY_BROWSER_PROFILE` | `/data/worker/profile` (keeps Cloudflare clearance cookies) |
 | `AMY_BROWSER_PROXY` | residential proxy URL if Cloudflare blocks Railway IPs |
 | `AMY_WORKER_DRAIS`, `SPEAKEASY_EMAIL`, `SPEAKEASY_PASSWORD` | unused for booking (Drai's is email-only; Speakeasy probe still uses these) |
-| `URVENUE_EMAIL` (default info@playmakerentertainment.com), `URVENUE_PASSWORD` | urvenue.me login for LIV, LIV Beach, XS, Encore Beach Club (+ At Night). The worker tries the UrGuestlist API first (`POST users/login`, `GET guestlist/dayview`, `POST guestlist/mylist` to add), then falls back to the browser on a pre-write API error. Already-on-list refusal is off unless `AMY_DEDUPE=true`. Set `URVENUE_API_DISABLE=true` to skip the API. Box worker: `/home/box/.config/amy-worker.env`. Missing password + expired session = pre-submit retry, no guest email. Optional `URVENUE_VENUE_IDS` JSON override (`{"LIV Nightclub": "2386/1121561"}`). Read-only check: `python3 booking_worker.py --probe-urvenue "XS Nightclub" 2026-12-04` |
+| `URVENUE_EMAIL` (default info@playmakerentertainment.com), `URVENUE_PASSWORD` | urvenue.me login for LIV, LIV Beach, XS, Encore Beach Club (+ At Night). The worker tries the UrGuestlist API first (`POST users/login`, `GET guestlist/dayview`, `POST guestlist/mylist` to add), then falls back to the browser on a pre-write API error. A guest is always added, even if already on the list. Set `URVENUE_API_DISABLE=true` to skip the API. Box worker: `/home/box/.config/amy-worker.env`. Missing password + expired session = pre-submit retry, no guest email. Optional `URVENUE_VENUE_IDS` JSON override (`{"LIV Nightclub": "2386/1121561"}`). Read-only check: `python3 booking_worker.py --probe-urvenue "XS Nightclub" 2026-12-04` |
 | `AMY_BROWSER_LAUNCH` | `plain`: start a normal Chrome and attach over CDP (needed for Cloudflare) |
 | `AMY_WORKER_ALERTS` | `true` to email team@ (WATCHDOG_ALERT_TO) on each manual/uncertain stop |
 | `AMY_SIGNUP_MODE` | must be unset |

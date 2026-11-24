@@ -40,7 +40,7 @@ def test_revived_job_still_unposted_waits_in_retry_not_manual(tmp_path):
     assert s.get('l')['state'] == 'retry'
 
 
-def test_not_revived_when_other_reason_past_date_progress_or_overlap(tmp_path):
+def test_not_revived_when_other_reason_past_date_or_progress(tmp_path):
     s, api, worker = make(tmp_path, tao=FakeTao())
     s.enqueue('other', lavo(), NOW)
     park(s, 'other', reason='Source request requires review; do not guess')
@@ -48,13 +48,22 @@ def test_not_revived_when_other_reason_past_date_progress_or_overlap(tmp_path):
     park(s, 'prog', metadata={'progress': {'submitting': {'LAVO Party Brunch|2026-12-05': True}}})
     s.enqueue('today', lavo(email='t@example.invalid', start_date='2026-11-10', end_date='2026-11-10'), NOW)
     park(s, 'today')
+    assert worker.run_once()['status'] == 'idle'
+    for ref in ('other', 'prog', 'today'):
+        assert s.get(ref)['state'] == 'manual', ref
+    assert api.sent == []
+
+
+def test_overlapping_guest_job_does_not_block_revival(tmp_path):
+    s, api, worker = make(tmp_path, tao=FakeTao())
     s.enqueue('a1', lavo(email='dup@example.invalid', venues=['OMNIA Nightclub'], start_date='2026-12-25',
                          end_date='2026-12-26'), NOW)
     s.enqueue('a2', lavo(email='dup@example.invalid', venues=['Marquee Nightclub'], start_date='2026-12-25',
                          end_date='2026-12-25'), NOW)
     park(s, 'a1')
     park(s, 'a2')
-    assert worker.run_once()['status'] == 'idle'
-    for ref in ('other', 'prog', 'today', 'a1', 'a2'):
-        assert s.get(ref)['state'] == 'manual', ref
-    assert api.sent == []
+    result = worker.run_once()
+    assert result['status'] == 'done', result
+    states = {s.get('a1')['state'], s.get('a2')['state']}
+    assert 'done' in states
+    assert 'manual' not in states

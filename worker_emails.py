@@ -70,8 +70,8 @@ def update_subject(subject, bookings):
     # urvenue refs (UV-...) are internal and never shown to the guest; those
     # nights are named by venue + date instead, which keeps each update's
     # subject unique for /send-branded dedupe (Thomas, Nov 21 2026).
-    ids = sorted({str(b.get("order_id"))[:8] for b in bookings if b.get("order_id") and not is_urvenue(b)})
-    uv = sorted({(b["date"], b["venue"]) for b in bookings if is_urvenue(b)})
+    ids = sorted({str(b.get("order_id"))[:8] for b in bookings if b.get("order_id") and not is_urvenue(b) and not is_tao_no_order(b)})
+    uv = sorted({(b["date"], b["venue"]) for b in bookings if is_urvenue(b) or is_tao_no_order(b)})
     parts = ([f"Order {' + '.join(ids)}"] if ids else []) + [
         f"{v} {date.fromisoformat(d).strftime('%b')} {date.fromisoformat(d).day}" for d, v in uv]
     tail = f" ({' + '.join(parts)})" if parts else ""
@@ -94,6 +94,12 @@ URVENUE_SYSTEM = "urvenue"
 
 def is_urvenue(b):
     return (b or {}).get("system") == URVENUE_SYSTEM
+
+
+def is_tao_no_order(b):
+    """TAO accepted the guest but issued no order ID (already on the list)."""
+    rec = b or {}
+    return rec.get("no_order_id") is True or str(rec.get("order_id") or "") == "TAO accepted, no order id"
 
 
 # Wynn venues booked on urvenue: Wynn emails the guest and the reservation
@@ -389,7 +395,7 @@ def guest_email(request, bookings, update=False, pending=None):
     lines = []
     for b in sorted(bookings, key=lambda b: (b["date"], b["venue"])):
         event = (b.get("event") or "").strip()
-        if is_urvenue(b):
+        if is_urvenue(b) or is_tao_no_order(b):
             show = ", ".join(x for x in (event, (b.get("event_time") or "").strip()) if x)
             inner = f"{show} — on the guest list" if show else "on the guest list"
         else:
@@ -447,6 +453,7 @@ def team_email(ref, raw, request, bookings, update=False, pending=None):
                       + party_bit
                       + (f"\n✅ Added to the {b['venue']} guest list on urvenue ({b.get('list_item') or 'General List'}, "
                          f"owner Thomas Vale) — Ref {b['order_id']}" if is_urvenue(b)
+                         else f"\n✅ Signed up — {b['order_id']}" if is_tao_no_order(b)
                          else f"\n✅ Signed up — Order ID {b['order_id']}")
                       + (f"\n{b['confirmation_url']}" if b.get("confirmation_url") else ""))
     text = "\n".join([

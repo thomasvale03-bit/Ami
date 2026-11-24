@@ -13,11 +13,14 @@ Contract with main.py / rules_engine.py:
          "arrival_text", "capacity": {"female": n, "male": n}}
 
     submit_registration(listing, guest) -> dict
-        {"confirmation_id", "verified": True, ...} only when TAO shows a
-        success page with an order ID. Any problem before the final click
-        returns {"confirmation_id": None, "verified": False, "reason": ...}.
-        A problem after the final click raises SubmissionUncertain so the
-        request is flagged for a person and never retried automatically.
+        {"confirmation_id", "verified": True, ...} when TAO shows a success
+        page. If the success page has no order ID (TAO does this when the
+        guest is already on that night's list), confirmation_id is
+        "TAO accepted, no order id" and confirmation_url is kept. Any
+        problem before the final click returns {"confirmation_id": None,
+        "verified": False, "reason": ...}. A real error after the click,
+        or no success page, raises SubmissionUncertain so the request is
+        never retried automatically.
 
 Every event page is reached by opening Playmaker's promoter link and
 clicking through from it (never by going to the event page directly), and
@@ -69,6 +72,9 @@ ACCESS_CODE_INPUTS = (
 )
 SUCCESS_TEXT = re.compile(
     r"order confirmation|registration confirmed|you(?:'|’)re on the guest list|thank you for your order", re.I)
+# TAO sometimes shows a success page with no order ID when the guest is
+# already on that night's list. Treat it as booked (Thomas, Nov 23 2026).
+NO_ORDER_ID = "TAO accepted, no order id"
 MARKETING_TEXT = re.compile(r"marketing|promotional|newsletter|offers|email updates|text messages|sms", re.I)
 TERMS_TEXT = re.compile(r"terms|conditions|privacy|21\+|\bage\b", re.I)
 
@@ -784,7 +790,16 @@ def submit_registration(listing, guest, rehearse=False, screenshot_path=None, be
             if not order_id:
                 if not (SUCCESS_TEXT.search(body) or re.search(r"confirmation|ordered=true", page.url, re.I)):
                     raise SubmissionUncertain("TAO did not show a success page after submit")
-                raise SubmissionUncertain(f"TAO success page had no order ID ({page.url})")
+                return {
+                    "confirmation_id": NO_ORDER_ID,
+                    "verified": True,
+                    "no_order_id": True,
+                    "confirmation_url": page.url,
+                    "screenshot": shot,
+                    "event": listing.get("event"),
+                    "arrival_text": _arrival_text(body) or listing.get("arrival_text", ""),
+                    "authorization": TAO_AUTOMATION_AUTHORIZATION,
+                }
             return {
                 "confirmation_id": order_id,
                 "verified": True,
