@@ -85,7 +85,7 @@ def test_submitted_job_is_not_requeued_and_is_finished(tmp_path):
     })
     worker = bw.Worker(api, ledger, tao=FakeTao(), mode='live', evidence_dir=tmp_path / 'w',
                        now=lambda: NOW, sleep=lambda s: None, email_wait_seconds=0,
-                       duplicate_check=False, alerts=False)
+                       alerts=False)
     result = sw.recover_assigned_jobs(api, ledger, worker=worker)
     assert result['requeued'] == []
     assert result['finished'] == [ref]

@@ -149,19 +149,6 @@ def test_fallback_books_a_second_signup_even_if_the_guest_is_already_booked(tmp_
     assert len(worker.tao.submits) == 2
 
 
-def test_dedupe_on_does_not_book_a_guest_twice_for_one_night(tmp_path):
-    tao = MapTao({("TAO Nightclub", "2026-11-12")})
-    s, api, worker = make(tmp_path, tao=tao, duplicate_check=True)
-    s.enqueue("first", raw(venues=["TAO Nightclub"], start_date="2026-11-12", end_date="2026-11-12"), NOW)
-    assert worker.run_once()["status"] == "done"
-    # Different party for the same night: never a second booking -> manual.
-    s.enqueue("second", raw(venues=["Hakkasan Nightclub"], start_date="2026-11-12", end_date="2026-11-12",
-                            female_count="5"), NOW)
-    result = worker.run_once()
-    assert result["status"] == "manual", result
-    assert "already has TAO Nightclub booked" in result["reason"]
-    assert len(worker.tao.submits) == 1
-
 
 def test_closed_night_on_a_later_signup_books_its_own_fallback(tmp_path):
     # Multi-night trip split over jobs: Friday Hakkasan is closed, so this
@@ -176,17 +163,6 @@ def test_closed_night_on_a_later_signup_books_its_own_fallback(tmp_path):
     assert booked(s, "trip") == [("TAO Nightclub", "2026-11-12", True), ("Hakkasan Nightclub", "2026-11-13", False)]
     assert len(worker.tao.submits) == 3  # first TAO + this job's TAO fallback + Hakkasan
 
-
-def test_dedupe_on_reuses_same_party_other_job_booking(tmp_path):
-    tao = MapTao({("TAO Nightclub", "2026-11-12"), ("Hakkasan Nightclub", "2026-11-13")})
-    s, api, worker = make(tmp_path, tao=tao, duplicate_check=True)
-    s.enqueue("first", raw(venues=["TAO Nightclub"], start_date="2026-11-12", end_date="2026-11-12"), NOW)
-    assert worker.run_once()["status"] == "done"
-    s.enqueue("trip", raw(venues=["Hakkasan Nightclub"], start_date="2026-11-12", end_date="2026-11-13"), NOW)
-    result = worker.run_once()
-    assert result["status"] == "done", result
-    assert booked(s, "trip") == [("TAO Nightclub", "2026-11-12", True), ("Hakkasan Nightclub", "2026-11-13", False)]
-    assert len(worker.tao.submits) == 2  # TAO once (first job) + Hakkasan
 
 
 def test_fallback_order_and_same_day_omnia_skip():
@@ -216,20 +192,6 @@ def test_second_signup_sends_its_own_confirmation(tmp_path):
     assert len(worker.tao.submits) == 2
 
 
-def test_dedupe_on_reused_night_sends_no_repeat_email(tmp_path):
-    # Two sign-ups for one closed night: the first job books the open club and
-    # emails; the second (no hold email sent) reuses it without a 2nd email.
-    tao = MapTao({("TAO Nightclub", "2026-11-12")})
-    s, api, worker = make(tmp_path, tao=tao, duplicate_check=True)
-    s.enqueue("a", raw(venues=["OMNIA Nightclub"], start_date="2026-11-12", end_date="2026-11-12"), NOW)
-    assert worker.run_once()["status"] == "done"
-    sent = len(api.sent)
-    s.enqueue("b", raw(venues=["Hakkasan Nightclub"], start_date="2026-11-12", end_date="2026-11-12"), NOW)
-    result = worker.run_once()
-    assert result["status"] == "done", result
-    assert len(api.sent) == sent
-    assert len(worker.tao.submits) == 1
-
 
 def test_second_signup_after_hold_email_gets_its_own_confirmation(tmp_path):
     tao = MapTao({("TAO Nightclub", "2026-11-12")})
@@ -248,17 +210,3 @@ def test_second_signup_after_hold_email_gets_its_own_confirmation(tmp_path):
     assert len(worker.tao.submits) == 2
 
 
-def test_dedupe_on_reused_night_after_hold_gets_updated_confirmation(tmp_path):
-    tao = MapTao({("TAO Nightclub", "2026-11-12")})
-    s, api, worker = make(tmp_path, tao=tao, duplicate_check=True)
-    s.enqueue("a", raw(venues=["TAO Nightclub"], start_date="2026-11-12", end_date="2026-11-12"), NOW)
-    assert worker.run_once()["status"] == "done"
-    s.enqueue("b", raw(venues=["Hakkasan Nightclub"], start_date="2026-11-12", end_date="2026-11-12"), NOW)
-    worker.ledger.put("b|hold_notified", {"via": "hold_email", "signature": ["x"], "at": NOW + 10})
-    sent = len(api.sent)
-    result = worker.run_once()
-    assert result["status"] == "done", result
-    new = api.sent[sent:]
-    assert [p["to"] for p in new] == ["guest@example.invalid", "team@playmakerentertainment.com"]
-    assert new[0]["subject"].startswith("Updated")
-    assert len(worker.tao.submits) == 1

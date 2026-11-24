@@ -6,13 +6,11 @@ Flow:
   API first (https://api.urvenue.me, UrGuestlist system id 4): sign in with
   URVENUE_EMAIL / URVENUE_PASSWORD, GET guestlist/dayview, POST
   guestlist/mylist to add the party, then re-read dayview to confirm.
-  Cross-list dedupe (AlreadyListed when a name / ref / AMY comment already
-  appears on the dayview or browser list) is off unless AMY_DEDUPE or
-  AMY_WORKER_DUPLICATE_CHECK is true (Thomas, Nov 22 2026: always add).
+  A sign-up is always added, even if a matching name is already on the
+  list (Thomas, Nov 23 2026: never consider duplicates).
   URVENUE_API_DISABLE=true skips the API and uses the browser. On an API
   error before a write, fall back to the browser. SubmissionUncertain is
-  never retried in the browser (no blind resubmit). AlreadyListed, when
-  dedupe is on, is also not retried in the browser.
+  never retried in the browser (no blind resubmit).
 
   Browser (same one the TAO worker uses, see tao_portal._browser_page):
   1. open the venue's month calendar on guestlist.urvenue.me; sign in on
@@ -21,10 +19,9 @@ Flow:
   2. check the venue switcher shows the requested venue (never another one);
   3. find the night on the calendar: no event tile = list not posted yet;
   4. open the event, require the "<event> - Open" status;
-  5. search the event's list for the guest (AlreadyListed only when dedupe is on);
-  6. "+ Add Guest" -> General List, owner Thomas Vale, one textarea line
+  5. "+ Add Guest" -> General List, owner Thomas Vale, one textarea line
      `Name email 2M 3F !internal comment` -> "Add Guests";
-  7. re-read the list and require the guest's row.
+  6. re-read the list and require the guest's row.
 
 Everything before the final click raises an UrvenueError subclass (nothing
 submitted). After the click, a missing row raises SubmissionUncertain (never
@@ -105,12 +102,6 @@ class NotOpen(UrvenueError):
     def __init__(self, status, event=""):
         super().__init__(f"event {event!r} status is {status!r}, not Open")
         self.status, self.event = status, event
-
-
-class AlreadyListed(UrvenueError):
-    def __init__(self, row):
-        super().__init__("guest is already on this list")
-        self.row = row
 
 
 class SubmissionUncertain(Exception):
@@ -917,25 +908,6 @@ def api_enabled():
     return has_password()
 
 
-def _flag_on(name):
-    raw = os.environ.get(name)
-    if raw is None or not str(raw).strip():
-        return None
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def dedupe_enabled():
-    """Cross-job / already-on-list checks. Off unless AMY_DEDUPE or
-    AMY_WORKER_DUPLICATE_CHECK is true (Thomas, Nov 22 2026). AMY_DEDUPE
-    wins when both are set. Per-job ledger idempotency and
-    SubmissionUncertain are separate and always stay on."""
-    for name in ("AMY_DEDUPE", "AMY_WORKER_DUPLICATE_CHECK"):
-        val = _flag_on(name)
-        if val is not None:
-            return val
-    return False
-
-
 def _secret_fragments():
     frags = [v for v in (
         os.environ.get("URVENUE_PASSWORD", ""),
@@ -974,11 +946,10 @@ def _norm_person_name(value):
 def find_dayview_row(chats, name, email="", ref=""):
     """The dayview chat for this guest, or None.
 
-    A row is a duplicate only when the guest name matches (case- and
-    whitespace-insensitive, on partyname or in original/comment/message)
-    or when our job/UV ref or AMY booking comment is on the row. A shared
-    email is not enough: a different person can use the same address.
-    The email argument is accepted for callers but is not used as a key.
+    Used after a create to confirm the row is on the list. Matches the
+    guest name (case- and whitespace-insensitive, on partyname or in
+    original/comment/message) or our job/UV ref / AMY booking comment.
+    A shared email is not used as a key.
     """
     name_n = _norm_person_name(name)
     ref_l = (ref or "").strip().lower()
@@ -1161,9 +1132,7 @@ def add_guest_api(venue, night, guest, *, ref, rehearse=False, screenshot_path=N
     if status != "success" or not isinstance(data, dict):
         raise UrvenueError(_redact(f"urvenue dayview failed ({message or status})"))
     chats = data.get("chats") if isinstance(data.get("chats"), list) else []
-    existing = find_dayview_row(chats, name, email, ref)
-    if existing and dedupe_enabled():
-        raise AlreadyListed(dayview_row_text(existing))
+    find_dayview_row(chats, name, email, ref)  # list read only; never refuse a create
     items_payload = client.get("guestlist/dayitem", {**common, "ownerid": client.userid, "status": "7"})
     istatus, _, imessage, idata = _uv_parts(items_payload)
     if istatus != "success":
@@ -1224,8 +1193,7 @@ def add_guest(venue, night, guest, *, ref, rehearse=False, screenshot_path=None,
     """Sign `guest` up on `venue`'s urvenue list for `night` (a date).
     Tries the UrGuestlist API first, then the browser. rehearse=True stops
     before saving. SubmissionUncertain is never retried on the other path
-    (no blind resubmit). AlreadyListed (only raised when dedupe is on) is
-    also not retried on the other path."""
+    (no blind resubmit)."""
     if venue not in VENUES:
         raise UrvenueError(f"{venue} is not a urvenue venue")
     booking_line(guest, ref)  # validate early, before either path
@@ -1233,7 +1201,7 @@ def add_guest(venue, night, guest, *, ref, rehearse=False, screenshot_path=None,
         try:
             return add_guest_api(venue, night, guest, ref=ref, rehearse=rehearse,
                                  screenshot_path=screenshot_path, before_submit=before_submit)
-        except (AlreadyListed, SubmissionUncertain, NotPosted, NotOpen, LoginUnavailable):
+        except (SubmissionUncertain, NotPosted, NotOpen, LoginUnavailable):
             raise
         except UrvenueError as exc:
             log.warning("urvenue API path failed (%s); falling back to browser", _redact(str(exc)))
@@ -1256,9 +1224,7 @@ def add_guest_browser(venue, night, guest, *, ref, rehearse=False, screenshot_pa
         try:
             open_calendar(page, venue)
             info = open_event(page, venue, night)
-            existing = find_row(list_text(page, name), name, email)
-            if existing and dedupe_enabled():
-                raise AlreadyListed(existing)
+            list_text(page, name)  # open the list; never refuse a create because a row exists
             add = page.get_by_text(re.compile(r"^\s*\+?\s*Add Guest\s*$"))
             btn = None
             for i in range(add.count()):

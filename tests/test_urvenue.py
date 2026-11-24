@@ -36,8 +36,6 @@ class FakeUrvenue:
             raise urvenue.NotPosted("no event")
         if out == "closed":
             raise urvenue.NotOpen("Closed", "Some Night")
-        if out == "already":
-            raise urvenue.AlreadyListed("Mock Guest 2 1 1")
         if out == "error":
             raise urvenue.UrvenueError("Select Item missing")
         if rehearse:
@@ -152,13 +150,6 @@ def test_closed_liv_beach_goes_on_hold(tmp_path):
     assert worker.run_once()["status"] == "retry"
     assert len(api.sent) == 1 and "on hold" in api.sent[0]["subject"]
 
-
-def test_already_on_list_never_added_twice(tmp_path):
-    uv = FakeUrvenue({("XS Nightclub", "2026-11-25"): "already"})
-    s, api, worker = mk(tmp_path, uv)
-    s.enqueue("d", raw(venues=["XS"]), NOW)
-    assert worker.run_once()["status"] == "manual"
-    assert uv.adds == [] and api.sent == []
 
 
 def test_uncertain_after_click_is_never_resubmitted(tmp_path):
@@ -481,19 +472,6 @@ def test_browser_adds_even_when_a_row_already_exists(site_browser):
         site.__exit__()
 
 
-def test_browser_existing_row_blocks_second_add_when_dedupe_on(site_browser, monkeypatch):
-    monkeypatch.setenv("AMY_DEDUPE", "true")
-    start, mock = site_browser
-    ev = {"name": "Diplo", "status": "Open", "hours": "10:30pm to 4:00am",
-          "rows": [{"name": "Mock Guest", "email": "x", "m": 1, "f": 2}]}
-    site = start({("79", "1115"): ("XS Nightclub", {"2026-12-05": ev})})
-    try:
-        with pytest.raises(urvenue.AlreadyListed):
-            urvenue.add_guest("XS Nightclub", date(2026, 12, 5), GUEST, ref="r4",
-                              before_submit=lambda: pytest.fail("must not submit"))
-    finally:
-        site.__exit__()
-
 
 def test_browser_logs_in_two_step_and_finds_liv_nightclub(site_browser, monkeypatch):
     start, mock = site_browser
@@ -553,27 +531,25 @@ def test_no_items_liv_beach_goes_on_hold(tmp_path):
     assert len(api.sent) == 1 and "on hold" in api.sent[0]["subject"]
 
 
-def _seed_reused(worker, ref, venue, night, order="0138d09f-cc19-4a55-8bca-bc94f5c1b269"):
+def _seed_booked(worker, ref, venue, night, order="0138d09f-cc19-4a55-8bca-bc94f5c1b269"):
     worker.ledger.put(bw.night_key(ref, venue, night), {
         "state": "booked",
         "record": {"date": night, "order_id": order, "party": {"female_count": 2, "male_count": 1},
                    "venue": venue, "verified": True},
-        "meta": {"event": "Bijou", "event_time": "11:00 AM", "reused_from_job": "older-job",
+        "meta": {"event": "Bijou", "event_time": "11:00 AM",
                  "confirmation_url": f"https://tickets.taogroup.com/orders/confirmation/{order}/ordered=true"}})
 
 
-def test_reused_only_with_unposted_night_sends_hold_not_fresh_confirmation(tmp_path):
+def test_already_booked_night_in_this_job_is_not_resubmitted(tmp_path):
     uv = FakeUrvenue({("LIV Nightclub", "2026-11-25"): "notposted"})
     s, api, worker = mk(tmp_path, uv, FakeTao(dayclubs=True))
-    _seed_reused(worker, "e", "Marquee Dayclub", "2026-11-25")
+    _seed_booked(worker, "e", "Marquee Dayclub", "2026-11-25")
     s.enqueue("e", raw(venues=["LIV"]), NOW)
     assert worker.run_once()["status"] == "retry"
-    assert len(api.sent) == 1
-    hold = api.sent[0]
-    assert "on hold" in hold["subject"] and "You're on the Playmaker" not in hold["subject"]
-    assert "Any nights that already went through" not in hold["text"]
+    guest = [p for p in api.sent if p["to"] == "guest@example.invalid"]
+    assert len(guest) == 1 and guest[0]["subject"].startswith("You're on the Playmaker")
+    assert "Still to come" in guest[0]["text"]
     assert worker.tao.submits == []  # Marquee Dayclub never rebooked
-    # list posts -> ONE "Updated:" confirmation with both nights, one team email
     uv.outcomes.clear()
     api.now += 3600
     worker.now = lambda: api.now
@@ -581,24 +557,26 @@ def test_reused_only_with_unposted_night_sends_hold_not_fresh_confirmation(tmp_p
     guest = [p for p in api.sent if p["to"] == "guest@example.invalid"]
     assert len(guest) == 2 and guest[-1]["subject"].startswith("Updated: You're on the Playmaker")
     assert "Marquee Dayclub" in guest[-1]["text"] and "LIV Nightclub" in guest[-1]["text"]
-    assert len([p for p in api.sent if p["to"] == TEAM]) == 1
+    team = [p for p in api.sent if p["to"] == TEAM]
+    assert len(team) == 2 and team[-1]["subject"].startswith("Updated")
     assert worker.tao.submits == [] and len(uv.adds) == 1
 
 
-def test_reused_plus_new_booking_is_an_updated_confirmation(tmp_path):
+def test_already_booked_night_plus_new_booking_sends_confirmation(tmp_path):
     uv = FakeUrvenue()
     s, api, worker = mk(tmp_path, uv, FakeTao(dayclubs=True))
-    _seed_reused(worker, "hb", "Marquee Dayclub", "2026-11-25")
+    _seed_booked(worker, "hb", "Marquee Dayclub", "2026-11-25")
     s.enqueue("hb", raw(venues=["XS"]), NOW)
     assert worker.run_once()["status"] == "done"
     guest, team = api.sent
-    assert guest["subject"].startswith("Updated: You're on the Playmaker") and "UV-" not in guest["subject"]
+    assert guest["subject"].startswith("You're on the Playmaker") and "UV-" not in guest["subject"]
+    assert "Marquee Dayclub" in guest["text"] and "XS Nightclub" in guest["text"]
     assert worker.tao.submits == [] and len(uv.adds) == 1
 
 
-def test_fresh_partial_confirmation_unchanged_when_nothing_reused(tmp_path):
+def test_fresh_partial_confirmation_when_a_night_is_still_unposted(tmp_path):
     """A newly booked night + an unposted night still gets the early partial
-    confirmation ("Still to come"), as before."""
+    confirmation ("Still to come")."""
     uv = FakeUrvenue({("LIV Nightclub", "2026-11-26"): "notposted"})
     s, api, worker = mk(tmp_path, uv)
     s.enqueue("p", raw(venues=["XS", "LIV"], start_date="2026-11-25", end_date="2026-11-26",

@@ -148,9 +148,8 @@ class Store:
         so future requests (e.g. LAVO Brunch Dec 5/12/19) were parked as manual
         and never re-checked even after TAO posted the list. Put those back in
         retry so the live feed is read again: only future-dated jobs whose
-        reason is exactly "not posted", with nothing submitted or booked, and
-        no other job for the same guest on overlapping dates (that needs a
-        person). Returns the revived refs."""
+        reason is exactly "not posted", with nothing submitted or booked.
+        Returns the revived refs."""
         from queue_service import PHOENIX
         from datetime import datetime
         today = datetime.fromtimestamp(now, PHOENIX).date().isoformat()
@@ -162,19 +161,6 @@ class Store:
             raw, meta = json.loads(row['raw']), json.loads(row['metadata'] or '{}')
             progress = meta.get('progress') or {}
             if progress.get('submitting') or progress.get('bookings') or meta.get('evidence') or meta.get('revived'):
-                continue
-            email = (raw.get('email') or '').strip().lower()
-            start, end = raw.get('start_date') or '', raw.get('end_date') or raw.get('start_date') or ''
-            overlap = False
-            for other in db.execute("SELECT ref, raw FROM queue_jobs WHERE ref<>?", (row['ref'],)).fetchall():
-                oraw = json.loads(other['raw'])
-                if (oraw.get('email') or '').strip().lower() != email:
-                    continue
-                os_, oe = oraw.get('start_date') or '', oraw.get('end_date') or oraw.get('start_date') or ''
-                if os_ and start and os_ <= end and start <= oe:
-                    overlap = True
-                    break
-            if overlap:
                 continue
             meta['revived'] = {'from_reason': row['reason'], 'at': now}
             db.execute("""UPDATE queue_jobs SET state='retry',attempts=0,due=?,updated=?,metadata=?,
@@ -335,17 +321,18 @@ class Store:
                 out.append(rec)
         return out
 
-    def owner_reconcile(self, ref, approval, now, lookup_prior=None):
+    def owner_reconcile(self, ref, approval, now, lookup_prior=None, covered_by=None):
         """Owner-approved: mark ONE manual/submission_uncertain job done from the
         verified bookings the worker already recorded (refused-completion
-        evidence or per-night progress). Never books and never sends email.
+        evidence or per-night progress), or from a covering job the owner
+        names (`covered_by`). Never books and never sends email.
 
         The bookings must pass validate_completion (exact requested dates,
         party counts, order ids; approved same-night venue fallbacks only), so
         a partial job (a night not booked yet) stays manual. A guest receipt is
-        required: the saved send id, or the earlier identical email found by
-        lookup_prior(raw, 'guest') when /send-branded refused it as a
-        duplicate. A missing team receipt is recorded, not invented."""
+        required: the saved send id, the covering job's receipts, or the
+        earlier identical email found by lookup_prior(raw, 'guest'). A
+        missing team receipt is recorded, not invented."""
         approval = str(approval or '').strip()
         if not approval:
             raise Conflict('owner approval (message id) required')
@@ -358,6 +345,16 @@ class Store:
             meta = json.loads(row['metadata'] or '{}')
             raw = json.loads(row['raw'])
             bookings = self.saved_bookings(meta)
+            cover_ref = str(covered_by or '').strip() or None
+            cover_row = None
+            if cover_ref:
+                if cover_ref == ref:
+                    raise Conflict('covered_by cannot be this job')
+                cover_row = self.decode(db.execute('SELECT * FROM queue_jobs WHERE ref=?', (cover_ref,)).fetchone())
+                if cover_row is None:
+                    raise Conflict('Unknown covered_by job')
+            if not bookings and cover_row:
+                bookings = self.saved_bookings(cover_row.get('metadata') or {})
             if not bookings:
                 raise Conflict('No verified booking saved on this job')
             receipts = {}
@@ -367,6 +364,14 @@ class Store:
             for kind, mid in ((meta.get('progress') or {}).get('emails') or {}).items():
                 if mid and kind in ('guest', 'team'):
                     receipts.setdefault(kind, {'kind': kind, 'id': mid})
+            if cover_row:
+                cmeta = cover_row.get('metadata') or {}
+                for source in ((cmeta.get('evidence') or {}).get('email_receipts') or []):
+                    if isinstance(source, dict) and source.get('id') and source.get('kind') in ('guest', 'team'):
+                        receipts.setdefault(source['kind'], {'kind': source['kind'], 'id': source['id']})
+                for kind, mid in ((cmeta.get('progress') or {}).get('emails') or {}).items():
+                    if mid and kind in ('guest', 'team'):
+                        receipts.setdefault(kind, {'kind': kind, 'id': mid})
             if 'guest' not in receipts and lookup_prior:
                 prior = lookup_prior(raw, 'guest')
                 if prior and prior.get('id'):
@@ -383,6 +388,8 @@ class Store:
             meta['owner_reconcile'] = {'approval': approval[:200], 'at': now, 'previous_state': row['state'],
                                        'previous_reason': row['reason'],
                                        'team_receipt_missing': 'team' not in receipts}
+            if cover_ref:
+                meta['owner_reconcile']['covered_by'] = cover_ref
             db.execute("UPDATE queue_jobs SET state='done',reason=?,metadata=?,updated=?,claim_token=NULL WHERE ref=?",
                        ('Reconciled from saved verified bookings (owner ' + approval[:200] + '); no booking/email',
                         json.dumps(meta), now, ref))

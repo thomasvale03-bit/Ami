@@ -160,20 +160,6 @@ def _script(login_ok=True, chats=None, items=None, saved=1, post=None, second_ch
     return handler
 
 
-def test_dedupe_enabled_defaults_off_and_honors_flags(monkeypatch):
-    monkeypatch.delenv("AMY_DEDUPE", raising=False)
-    monkeypatch.delenv("AMY_WORKER_DUPLICATE_CHECK", raising=False)
-    assert urvenue.dedupe_enabled() is False
-    monkeypatch.setenv("AMY_WORKER_DUPLICATE_CHECK", "true")
-    assert urvenue.dedupe_enabled() is True
-    monkeypatch.setenv("AMY_DEDUPE", "false")
-    assert urvenue.dedupe_enabled() is False  # AMY_DEDUPE wins
-    monkeypatch.setenv("AMY_DEDUPE", "true")
-    assert urvenue.dedupe_enabled() is True
-    monkeypatch.setenv("AMY_DEDUPE", "true")
-    monkeypatch.setenv("AMY_WORKER_DUPLICATE_CHECK", "false")
-    assert urvenue.dedupe_enabled() is True
-
 
 def test_find_dayview_row_matches_name_and_ref():
     chats = [
@@ -190,13 +176,13 @@ def test_find_dayview_row_matches_name_and_ref():
 
 
 def test_find_dayview_row_ignores_shared_email_when_name_differs():
-    """A different guest can reuse an email; that alone is not AlreadyListed."""
+    """A shared email does not identify the row when the name differs."""
     chats = [
         _chat(partyname="Thomas Vale", original="Thomas Vale 3M 3F  thomas.vale03@gmail.com",
               email="thomas.vale03@gmail.com", message="Thomas Vale with guests (3M 3F)"),
     ]
     assert urvenue.find_dayview_row(chats, "Obed Vale", "thomas.vale03@gmail.com", "1a206aa51e70667c") is None
-    # Same person, different spacing/case, still a duplicate even with another email.
+    # Same person, different spacing/case, still matches for post-create verification.
     assert urvenue.find_dayview_row(chats, "thomas  vale", "other@example.com", "")["partyname"] == "Thomas Vale"
 
 
@@ -228,8 +214,8 @@ def test_api_books_and_verifies_without_posting_twice(api_env, monkeypatch):
 
 
 def test_api_posts_even_when_already_on_the_list(api_env, monkeypatch):
-    """Default (AMY_DEDUPE off): always POST guestlist/mylist, even if a
-    matching name / email / ref / AMY comment is already on dayview."""
+    """Always POST guestlist/mylist, even if a matching name / ref / AMY
+    comment is already on dayview."""
     opener = FakeOpener(_script(chats=[_chat()], second_chats=[_chat()]))
     _install(monkeypatch, opener)
     result = urvenue.add_guest("XS Nightclub", NIGHT, GUEST, ref=REF)
@@ -237,14 +223,6 @@ def test_api_posts_even_when_already_on_the_list(api_env, monkeypatch):
     assert result["via"] == "api"
     assert sum(1 for c in opener.calls if c["path"].endswith("/guestlist/mylist/json/")) == 1
 
-
-def test_api_dedupes_before_create_when_enabled(api_env, monkeypatch):
-    monkeypatch.setenv("AMY_DEDUPE", "true")
-    opener = FakeOpener(_script(chats=[_chat()]))
-    _install(monkeypatch, opener)
-    with pytest.raises(urvenue.AlreadyListed):
-        urvenue.add_guest("XS Nightclub", NIGHT, GUEST, ref=REF)
-    assert not any(c["path"].endswith("/guestlist/mylist/json/") for c in opener.calls)
 
 
 def test_shared_email_different_name_is_not_a_duplicate(api_env, monkeypatch):
@@ -276,16 +254,6 @@ def test_shared_email_different_name_is_not_a_duplicate(api_env, monkeypatch):
     assert "Obed Vale" in result["row"]
     assert sum(1 for c in opener.calls if c["path"].endswith("/guestlist/mylist/json/")) == 1
 
-
-def test_already_listed_does_not_fall_back_to_browser(api_env, monkeypatch):
-    monkeypatch.setenv("AMY_DEDUPE", "true")
-    opener = FakeOpener(_script(chats=[_chat()]))
-    _install(monkeypatch, opener)
-    called = []
-    monkeypatch.setattr(urvenue, "add_guest_browser", lambda *a, **k: called.append(1) or {})
-    with pytest.raises(urvenue.AlreadyListed):
-        urvenue.add_guest("LIV Nightclub", NIGHT, GUEST, ref=REF)
-    assert called == []
 
 
 def test_invalid_login_does_not_fall_back(api_env, monkeypatch):

@@ -417,7 +417,7 @@ def handle(method, url, headers, payload, *, s=None, now=None):
             if not isinstance(payload, dict):
                 raise Conflict('JSON object required')
             ref = unquote(path[len('/queue/owner-reconcile/'):])
-            row = s.owner_reconcile(ref, payload.get('owner_approval'), now, lookup_prior=lookup_prior_send)
+            row = s.owner_reconcile(ref, payload.get('owner_approval'), now, lookup_prior=lookup_prior_send, covered_by=payload.get('covered_by'))
             import job_tracker
             job_tracker.update(ref, queue_owned=True, status='done', done_at=now)
             if payload.get('alert', True) is not False:

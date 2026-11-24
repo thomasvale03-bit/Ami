@@ -218,19 +218,9 @@ def test_stops_are_terminal_with_reasons(tmp_path, tao, expected, state):
         assert api.sent == []
 
 
-def test_duplicate_suspicion_goes_manual(tmp_path):
-    s, api, worker = make(tmp_path, duplicate_check=True)
-    s.enqueue('first', raw(), NOW - 5)
-    assert worker.run_once()['status'] == 'done'
-    s.enqueue('again', raw(source_message_id='again'), NOW)
-    result = worker.run_once()
-    assert result['status'] == 'manual' and 'Duplicate suspicion' in result['reason']
-    assert len(worker.tao.submits) == 1
 
-
-def test_duplicate_check_off_by_default_books_second_signup(tmp_path):
+def test_second_signup_is_always_booked(tmp_path):
     s, api, worker = make(tmp_path)
-    assert worker.duplicate_check is False
     s.enqueue('first', raw(), NOW - 5)
     assert worker.run_once()['status'] == 'done'
     s.enqueue('again', raw(source_message_id='again'), NOW)
@@ -240,16 +230,27 @@ def test_duplicate_check_off_by_default_books_second_signup(tmp_path):
     assert s.get('again')['state'] == 'done'
 
 
-def test_amy_dedupe_env_turns_duplicate_check_on(tmp_path, monkeypatch):
-    monkeypatch.setenv("AMY_DEDUPE", "true")
-    s, api, worker = make(tmp_path)
-    assert worker.duplicate_check is True
-    s.enqueue('first', raw(), NOW - 5)
-    assert worker.run_once()['status'] == 'done'
-    s.enqueue('again', raw(source_message_id='again'), NOW)
+def test_tao_success_without_order_id_is_booked_and_emailed(tmp_path):
+    class NoIdTao(FakeTao):
+        def submit(self, listing, guest, *, rehearse, screenshot_path, before_submit):
+            before_submit()
+            self.submits.append((listing['event'], rehearse))
+            return {'verified': True, 'confirmation_id': 'TAO accepted, no order id',
+                    'no_order_id': True,
+                    'confirmation_url': 'https://tickets.taogroup.com/e/guest-list-omnia-nc-11-24-2026/tickets'}
+
+    s, api, worker = make(tmp_path, tao=NoIdTao())
+    s.enqueue('p', raw(), NOW)
     result = worker.run_once()
-    assert result['status'] == 'manual' and 'Duplicate suspicion' in result['reason']
-    assert len(worker.tao.submits) == 1
+    assert result['status'] == 'done', result
+    booking = s.get('p')['metadata']['evidence']['bookings'][0]
+    assert booking['order_id'] == 'TAO accepted, no order id' and booking.get('no_order_id') is True
+    guest, team = api.sent
+    assert "You're on the Playmaker" in guest['subject']
+    assert 'Order ID TAO accepted' not in guest['text']
+    assert 'on the guest list' in guest['text']
+    assert 'TAO accepted, no order id' in team['text']
+    assert 'https://tickets.taogroup.com/e/guest-list-omnia-nc-11-24-2026/tickets' in team['text']
 
 
 class FakeDrais:

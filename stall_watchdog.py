@@ -420,7 +420,7 @@ def supervise(directory=None, *, stall_seconds=None, poll=None, clock=time.time,
                     ledger = bw.Ledger(directory / "ledger.json")
                     try:
                         worker = bw.Worker(api, ledger, mode="live", evidence_dir=directory,
-                                           email_wait_seconds=120, duplicate_check=False, alerts=False)
+                                           email_wait_seconds=120, alerts=False)
                     except Exception:  # noqa: BLE001
                         worker = None
                     handle_stall(proc, directory, api, ledger, clock=clock, worker=worker, sleep=sleep)
