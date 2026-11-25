@@ -195,6 +195,7 @@ def load_liv_xs(data_dir, start, end, flyers_dir=None):
           "week_start": "2026-12-01",
           "enabled": true,
           "lineup_flyer": "261201_LIV_weekend-lineup.jpg",
+          "xs_lineup_flyer": "261201_XS_weekend-lineup.jpg",
           "events": [
             {
               "venue": "LIV",
@@ -266,7 +267,9 @@ def load_liv_xs(data_dir, start, end, flyers_dir=None):
         if cleaned:
             notes.append(cleaned)
     lineup_path = _resolve_flyer(cfg.get("lineup_flyer") or cfg.get("lineup") or "", data_dir, flyers_dir)
-    if not events and not notes and not lineup_path:
+    xs_lineup_path = _resolve_flyer(
+        cfg.get("xs_lineup_flyer") or cfg.get("xs_lineup") or "", data_dir, flyers_dir)
+    if not events and not notes and not lineup_path and not xs_lineup_path:
         return None
     return {
         "week_start": week_start,
@@ -274,6 +277,8 @@ def load_liv_xs(data_dir, start, end, flyers_dir=None):
         "notes": notes,
         "lineup_path": lineup_path,
         "lineup_cid": None,
+        "xs_lineup_path": xs_lineup_path,
+        "xs_lineup_cid": None,
         "capacity_note": CAPACITY_NOTE,
     }
 
@@ -417,18 +422,38 @@ def _card(p, cid):
             f'{_btn()}</td>')
 
 
+def _weekly_lineup_items(liv_xs=None):
+    """TAO weekly lineups, then optional LIV / XS weekly lineup flyers."""
+    items = [(cid, alt) for _, cid, alt in LINEUP_FILES]
+    if liv_xs:
+        if liv_xs.get("lineup_cid"):
+            items.append((liv_xs["lineup_cid"], "LIV weekend lineup"))
+        if liv_xs.get("xs_lineup_cid"):
+            items.append((liv_xs["xs_lineup_cid"], "XS weekend lineup"))
+    return items
+
+
+def _lineup_grid(items):
+    """Two-column lineup grid. With only the TAO flyers this is the same
+    single 50/50 row as before. Extra weekly flyers wrap onto the next row."""
+    cells = [
+        (f'<td class="col" width="50%" valign="top" style="padding:6px;"><img src="cid:{cid}" width="276" '
+         f'alt="{html.escape(alt)}" style="display:block;width:100%;max-width:276px;height:auto;border-radius:8px;"></td>')
+        for cid, alt in items
+    ]
+    rows = "".join("<tr>" + "".join(cells[i:i + 2]) + "</tr>" for i in range(0, len(cells), 2))
+    return ('<tr><td style="padding:0 8px;"><table role="presentation" width="100%" '
+            f'cellpadding="0" cellspacing="0" border="0">{rows}</table></td></tr>')
+
+
 def _liv_xs_html(liv_xs):
-    """Compact LIV & XS block, or empty string when the section is off."""
-    if not liv_xs:
+    """Compact LIV & XS block (night flyers + rules only). Weekly lineup
+    flyers live in the top LINEUP grid, not here. Empty if no events/notes."""
+    if not liv_xs or not (liv_xs.get("events") or liv_xs.get("notes")):
         return ""
     H = lambda t: (f'<tr><td style="padding:14px 14px 2px;"><p style="margin:0;{F}font-size:11px;letter-spacing:4px;'
                    f'text-transform:uppercase;color:#D4AF37;font-weight:700;">{t}</p></td></tr>')
     parts = [H("LIV &amp; XS")]
-    if liv_xs.get("lineup_cid"):
-        parts.append(
-            '<tr><td style="padding:0 14px 8px;"><img src="cid:' + liv_xs["lineup_cid"] +
-            '" width="572" alt="LIV weekend lineup" style="display:block;width:100%;max-width:572px;'
-            'height:auto;border-radius:8px;"></td></tr>')
     flyer_ev = [e for e in liv_xs.get("events") or [] if e.get("cid")]
     if flyer_ev:
         cells = []
@@ -464,10 +489,7 @@ def _liv_xs_html(liv_xs):
 
 
 def render_html(start, end, picks, pick_cids, also, liv_xs=None):
-    lineup = "".join(
-        f'<td class="col" width="50%" valign="top" style="padding:6px;"><img src="cid:{cid}" width="276" '
-        f'alt="{alt}" style="display:block;width:100%;max-width:276px;height:auto;border-radius:8px;"></td>'
-        for _, cid, alt in LINEUP_FILES)
+    lineup_block = _lineup_grid(_weekly_lineup_items(liv_xs))
     top = "".join(_card(p, c) for p, c in zip(picks, pick_cids))
     rows = "".join(
         f'<tr><td valign="top" width="58" style="padding:5px 0;border-bottom:1px solid #1f1a0c;{F}font-size:11px;'
@@ -495,7 +517,7 @@ def render_html(start, end, picks, pick_cids, also, liv_xs=None):
 <tr><td align="center" style="padding:8px 20px 6px;"><h1 style="margin:0;font-family:'Playfair Display',Georgia,serif;font-size:30px;line-height:36px;color:#F5F5F5;">This Week in Vegas</h1>
 <p style="margin:6px 0 0;{F}font-size:14px;line-height:20px;color:#BDBDBD;">Big names, best rooms, and you&rsquo;re on the list.</p></td></tr>
 {H(f"The Lineup &middot; {start:%b} {start.day}&ndash;{end:%b} {end.day}")}
-<tr><td style="padding:0 8px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>{lineup}</tr></table></td></tr>
+{lineup_block}
 {H("Don&rsquo;t Miss")}
 <tr><td style="padding:0 8px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>{top}</tr></table></td></tr>
 {liv_block}
@@ -553,6 +575,9 @@ def build(today, data_dir, flyers_dir, headliners_map):
         if liv_xs.get("lineup_path"):
             liv_xs["lineup_cid"] = "liv-xs-lineup"
             inline.append((liv_xs["lineup_path"], "liv-xs-lineup"))
+        if liv_xs.get("xs_lineup_path"):
+            liv_xs["xs_lineup_cid"] = "liv-xs-lineup-xs"
+            inline.append((liv_xs["xs_lineup_path"], "liv-xs-lineup-xs"))
         for i, ev in enumerate(liv_xs["events"]):
             if ev.get("flyer_path"):
                 ev["cid"] = f"liv-xs-{i}"

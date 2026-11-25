@@ -2,7 +2,8 @@
   "week_start": "2026-12-01",
   "enabled": false,
   "lineup_flyer": "",
+  "xs_lineup_flyer": "",
   "events": [],
   "notes": [],
-  "_comment": "Optional LIV & XS section for the Wednesday 'This Week in Vegas' newsletter. Fill this in when Wednesday's LIV/XS rules arrive (around 7 AM PT), before the 9 AM Vegas send. week_start is that week's Tuesday. Set enabled to true and add events to include the section; leave enabled false, or leave events empty, to omit it. A past or mismatched week_start also omits the section and the rest of the newsletter still sends. Event fields: venue, date (YYYY-MM-DD), weekday (optional), event or headliner, rules (venue terms such as comp/open bar/list times; never promise entry), flyer (optional filename in data/flyers, e.g. 261204_LIV_SOSA.jpg). lineup_flyer is an optional weekend lineup image in data/flyers. notes is a list of strings (closed nights, etc.). The template always adds 'All subject to capacity.'"
+  "_comment": "Optional LIV & XS section for the Wednesday 'This Week in Vegas' newsletter. Fill this in when Wednesday's LIV/XS rules arrive (around 7 AM PT), before the 9 AM Vegas send. week_start is that week's Tuesday. Set enabled to true and add events to include the section; leave enabled false, or leave events empty, to omit it. A past or mismatched week_start also omits the section and the rest of the newsletter still sends. Event fields: venue, date (YYYY-MM-DD), weekday (optional), event or headliner, rules (venue terms such as comp/open bar/list times; never promise entry), flyer (optional filename in data/flyers, e.g. 261204_LIV_SOSA.jpg). lineup_flyer is an optional LIV weekend lineup image in data/flyers; xs_lineup_flyer is the optional XS weekly lineup. Weekly lineup flyers appear in the top LINEUP grid with the TAO flyers, not in the lower LIV & XS block. notes is a list of strings (closed nights, etc.). The template always adds 'All subject to capacity.'"
 }

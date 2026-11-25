@@ -100,6 +100,9 @@ class LivXsSectionTests(unittest.TestCase):
         self.assertIn("All subject to capacity.", html)
         self.assertIn("All subject to capacity.", text)
         self.assertIn("cid:liv-xs-lineup", html)
+        self.assertEqual(html.count('src="cid:liv-xs-lineup"'), 1)  # top row only, not also in LIV & XS
+        self.assertLess(html.index("cid:liv-xs-lineup"), html.index("LIV &amp; XS"))
+        self.assertGreater(html.index("cid:liv-xs-0"), html.index("LIV &amp; XS"))
         self.assertIn("cid:liv-xs-0", html)
         self.assertTrue(any(c == "liv-xs-lineup" for _, c in inline))
         self.assertTrue(any(c == "liv-xs-0" for _, c in inline))
@@ -107,7 +110,47 @@ class LivXsSectionTests(unittest.TestCase):
         self.assertFalse(any(c == "liv-xs-1" for _, c in inline))
         self.assertIn("Fri-10-16_LIV_SOSA.jpg", [f for _, f in files])
 
+    def test_no_lineup_flyer_keeps_tao_top_row(self):
+        with tempfile.TemporaryDirectory() as d:
+            _flyers(d)
+            subject, text, html, inline, files = w.build(WEDNESDAY, FIXTURE, d, {})
+        self.assertIn("cid:lineup-nightclub", html)
+        self.assertIn("cid:lineup-dayclub", html)
+        self.assertNotIn("cid:liv-xs-lineup", html)
+        self.assertEqual(html.count('width="50%"'), 2)  # just the two TAO weekly flyers
+
+    def test_liv_and_xs_weekly_lineups_in_top_grid(self):
+        start, end = w.week_window(WEDNESDAY)
+        with tempfile.TemporaryDirectory() as root:
+            data = os.path.join(root, "data")
+            flyers = os.path.join(root, "flyers")
+            os.makedirs(data)
+            os.makedirs(flyers)
+            shutil.copy(os.path.join(FIXTURE, "top_picks.json"), data)
+            shutil.copy(os.path.join(FIXTURE, "also_this_week.json"), data)
+            _flyers(flyers)
+            Path(flyers, "261013_LIV_weekend-lineup.jpg").write_bytes(b"\xff\xd8\xff\xe0liv")
+            Path(flyers, "261013_XS_weekend-lineup.jpg").write_bytes(b"\xff\xd8\xff\xe0xs")
+            _write(os.path.join(data, "liv_xs.json"), {
+                "week_start": "2026-10-13",
+                "enabled": True,
+                "lineup_flyer": "261013_LIV_weekend-lineup.jpg",
+                "xs_lineup_flyer": "261013_XS_weekend-lineup.jpg",
+                "events": [{"venue": "LIV", "date": "2026-10-16", "event": "SOSA",
+                            "rules": "Guys and girls comp with open bar, list until 2 AM."}],
+            })
+            subject, text, html, inline, files = w.build(WEDNESDAY, data, flyers, {})
+        self.assertIn("cid:liv-xs-lineup", html)
+        self.assertIn("cid:liv-xs-lineup-xs", html)
+        self.assertLess(html.index("cid:liv-xs-lineup"), html.index("LIV &amp; XS"))
+        self.assertLess(html.index("cid:liv-xs-lineup-xs"), html.index("LIV &amp; XS"))
+        # 2x2 grid: TAO night, TAO day, LIV, XS
+        self.assertEqual(html.count('width="50%"'), 4)
+        self.assertEqual(html.count('src="cid:liv-xs-lineup"'), 1)
+        self.assertEqual(html.count('src="cid:liv-xs-lineup-xs"'), 1)
+
     def test_does_not_promise_entry(self):
+
         start, end = w.week_window(WEDNESDAY)
         with tempfile.TemporaryDirectory() as data:
             _write(os.path.join(data, "liv_xs.json"), {
