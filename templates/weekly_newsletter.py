@@ -186,6 +186,44 @@ def stage_liv_xs_flyer(src_path, flyers_dir, venue, event_date, event):
         return dest
 
 
+def stage_weekly_lineup_flyer(src_path, flyers_dir, venue, week_start):
+    """Copy a LIV/XS weekly lineup into data/flyers as
+    YYMMDD_LIV_weekend-lineup.jpg / YYMMDD_XS_weekend-lineup.jpg, using the
+    week's Tuesday (week_start)."""
+    return stage_liv_xs_flyer(src_path, flyers_dir, venue, week_start, "weekend-lineup")
+
+
+# Portrait tile used when 3+ weekly lineups share a row (9:16, same as the
+# TAO nightclub / LIV / XS story flyers). Shorter flyers are cover-cropped.
+LINEUP_TILE_ASPECT = 16 / 9
+
+
+def fit_lineup_tile(src_path, dest_path, aspect=LINEUP_TILE_ASPECT, max_side=1080):
+    """Cover-crop (or copy) a flyer into a consistent portrait tile so a
+    3-across or 2x2 lineup grid has matching heights. Tall 9:16 flyers are
+    left intact; shorter ones are cropped from the center. Returns dest_path."""
+    try:
+        from PIL import Image
+    except ImportError:
+        shutil.copy2(src_path, dest_path)
+        return dest_path
+    os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
+    with Image.open(src_path) as im:
+        im = im.convert("RGB")
+        w, h = im.size
+        current = h / float(w) if w else aspect
+        if current > aspect + 0.02:
+            new_h = max(1, int(round(w * aspect)))
+            im = im.crop((0, 0, w, min(h, new_h)))  # keep branding at the top
+        elif current < aspect - 0.02:
+            new_w = max(1, int(round(h / aspect)))
+            left = max(0, (w - new_w) // 2)
+            im = im.crop((left, 0, min(w, left + new_w), h))
+        im.thumbnail((max_side, int(max_side * aspect) + 2))
+        im.save(dest_path, "JPEG", quality=88, optimize=True)
+    return dest_path
+
+
 def load_liv_xs(data_dir, start, end, flyers_dir=None):
     """Optional LIV & XS guest-list section for the current Tue-Mon week.
 
@@ -434,38 +472,35 @@ def _weekly_lineup_items(liv_xs=None):
 
 
 def _lineup_grid(items):
-    """Two-column lineup grid. With only the TAO flyers this is the same
-    single 50/50 row as before. Extra weekly flyers wrap onto the next row."""
+    """Weekly lineup tiles. Two TAO flyers alone stay a 50/50 row (unchanged).
+    Three become one row of equal 33% tiles; four become a 2x2 of equal tiles.
+    When there are 3+, build() cover-crops them to the same aspect so heights match."""
+    n = len(items)
+    if n <= 2:
+        width, img_w, per_row = 50, 276, 2
+    elif n == 3:
+        width, img_w, per_row = 33, 176, 3
+    else:
+        width, img_w, per_row = 50, 276, 2
     cells = [
-        (f'<td class="col" width="50%" valign="top" style="padding:6px;"><img src="cid:{cid}" width="276" '
-         f'alt="{html.escape(alt)}" style="display:block;width:100%;max-width:276px;height:auto;border-radius:8px;"></td>')
+        (f'<td class="col" width="{width}%" valign="top" style="padding:6px;"><img src="cid:{cid}" width="{img_w}" '
+         f'alt="{html.escape(alt)}" style="display:block;width:100%;max-width:{img_w}px;height:auto;border-radius:8px;"></td>')
         for cid, alt in items
     ]
-    rows = "".join("<tr>" + "".join(cells[i:i + 2]) + "</tr>" for i in range(0, len(cells), 2))
+    rows = "".join("<tr>" + "".join(cells[i:i + per_row]) + "</tr>" for i in range(0, len(cells), per_row))
     return ('<tr><td style="padding:0 8px;"><table role="presentation" width="100%" '
             f'cellpadding="0" cellspacing="0" border="0">{rows}</table></td></tr>')
 
 
 def _liv_xs_html(liv_xs):
-    """Compact LIV & XS block (night flyers + rules only). Weekly lineup
-    flyers live in the top LINEUP grid, not here. Empty if no events/notes."""
+    """Compact LIV & XS rules block. Weekly lineup flyers live in the top
+    LINEUP grid; individual night flyers are omitted so they are not shown
+    twice. Empty if no events/notes."""
     if not liv_xs or not (liv_xs.get("events") or liv_xs.get("notes")):
         return ""
     H = lambda t: (f'<tr><td style="padding:14px 14px 2px;"><p style="margin:0;{F}font-size:11px;letter-spacing:4px;'
                    f'text-transform:uppercase;color:#D4AF37;font-weight:700;">{t}</p></td></tr>')
     parts = [H("LIV &amp; XS")]
-    flyer_ev = [e for e in liv_xs.get("events") or [] if e.get("cid")]
-    if flyer_ev:
-        cells = []
-        width = 50 if len(flyer_ev) <= 2 else 33
-        for e in flyer_ev:
-            alt = html.escape(f"{e['event']} at {e['venue']}")
-            cells.append(
-                f'<td class="col" width="{width}%" valign="top" style="padding:6px;">'
-                f'<img src="cid:{e["cid"]}" width="276" alt="{alt}" '
-                'style="display:block;width:100%;max-width:276px;height:auto;border-radius:8px;"></td>')
-        parts.append('<tr><td style="padding:0 8px 4px;"><table role="presentation" width="100%" '
-                     f'cellpadding="0" cellspacing="0" border="0"><tr>{"".join(cells)}</tr></table></td></tr>')
     rows = []
     for e in liv_xs.get("events") or []:
         label = html.escape(f"{e['weekday']} {date.fromisoformat(e['date']).day} · {e['venue']} · {e['event']}")
@@ -578,10 +613,23 @@ def build(today, data_dir, flyers_dir, headliners_map):
         if liv_xs.get("xs_lineup_path"):
             liv_xs["xs_lineup_cid"] = "liv-xs-lineup-xs"
             inline.append((liv_xs["xs_lineup_path"], "liv-xs-lineup-xs"))
-        for i, ev in enumerate(liv_xs["events"]):
-            if ev.get("flyer_path"):
-                ev["cid"] = f"liv-xs-{i}"
-                inline.append((ev["flyer_path"], ev["cid"]))
+        # Night-event flyers are not inlined: the weekly LIV/XS lineup already
+        # shows those acts, and the lower block is rules text only.
+        weekly_cids = {"lineup-nightclub", "lineup-dayclub", "liv-xs-lineup", "liv-xs-lineup-xs"}
+        n_weekly = sum(1 for _, cid in inline if cid in weekly_cids)
+        if n_weekly >= 3:
+            import tempfile
+            tile_dir = tempfile.mkdtemp(prefix="lineup_tiles_")
+            fitted = []
+            for path, cid in inline:
+                if cid in weekly_cids:
+                    dest = os.path.join(tile_dir, f"{cid}.jpg")
+                    try:
+                        path = fit_lineup_tile(path, dest)
+                    except Exception:  # noqa: BLE001 - keep the original if crop fails
+                        pass
+                fitted.append((path, cid))
+            inline = fitted
     # Subject names the Wednesday send day (unchanged wording, so the weekly
     # dedupe still matches an issue that already went out).
     send_day = start + timedelta(days=(2 - start.weekday()) % 7)

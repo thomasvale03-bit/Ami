@@ -102,13 +102,13 @@ class LivXsSectionTests(unittest.TestCase):
         self.assertIn("cid:liv-xs-lineup", html)
         self.assertEqual(html.count('src="cid:liv-xs-lineup"'), 1)  # top row only, not also in LIV & XS
         self.assertLess(html.index("cid:liv-xs-lineup"), html.index("LIV &amp; XS"))
-        self.assertGreater(html.index("cid:liv-xs-0"), html.index("LIV &amp; XS"))
-        self.assertIn("cid:liv-xs-0", html)
+        # Individual night flyers are omitted from the body (the weekly lineup already shows them)
+        self.assertNotIn("cid:liv-xs-0", html)
+        self.assertFalse(any(c == "liv-xs-0" for _, c in inline))
         self.assertTrue(any(c == "liv-xs-lineup" for _, c in inline))
-        self.assertTrue(any(c == "liv-xs-0" for _, c in inline))
-        # XS has no flyer, so only one event cid
-        self.assertFalse(any(c == "liv-xs-1" for _, c in inline))
-        self.assertIn("Fri-10-16_LIV_SOSA.jpg", [f for _, f in files])
+        # Three weekly lineups (TAO night, TAO day, LIV) share one equal-tile row
+        self.assertIn('width="33%"', html)
+        self.assertIn("Fri-10-16_LIV_SOSA.jpg", [f for _, f in files])  # still attached from flyers dir
 
     def test_no_lineup_flyer_keeps_tao_top_row(self):
         with tempfile.TemporaryDirectory() as d:
@@ -144,12 +144,25 @@ class LivXsSectionTests(unittest.TestCase):
         self.assertIn("cid:liv-xs-lineup-xs", html)
         self.assertLess(html.index("cid:liv-xs-lineup"), html.index("LIV &amp; XS"))
         self.assertLess(html.index("cid:liv-xs-lineup-xs"), html.index("LIV &amp; XS"))
-        # 2x2 grid: TAO night, TAO day, LIV, XS
+        # 2x2 of equal tiles: TAO night, TAO day, LIV, XS
         self.assertEqual(html.count('width="50%"'), 4)
+        lineup_html = html.split("Don&rsquo;t Miss")[0]
+        self.assertNotIn('width="33%"', lineup_html)  # 2x2, not 4-across
         self.assertEqual(html.count('src="cid:liv-xs-lineup"'), 1)
         self.assertEqual(html.count('src="cid:liv-xs-lineup-xs"'), 1)
+        self.assertNotIn("cid:liv-xs-0", html)
+
+    def test_stage_weekly_lineup_flyer_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "xs.jpg")
+            Path(src).write_bytes(b"\xff\xd8\xff\xe0xs")
+            dest = w.stage_weekly_lineup_flyer(src, d, "XS", "2026-12-01")
+            self.assertEqual(os.path.basename(dest), "261201_XS_weekend-lineup.jpg")
+            dest_liv = w.stage_weekly_lineup_flyer(src, d, "LIV", date(2026, 12, 1))
+            self.assertEqual(os.path.basename(dest_liv), "261201_LIV_weekend-lineup.jpg")
 
     def test_does_not_promise_entry(self):
+
 
         start, end = w.week_window(WEDNESDAY)
         with tempfile.TemporaryDirectory() as data:
