@@ -14,6 +14,7 @@ import html
 import json
 import os
 import re
+import shutil
 from datetime import date, timedelta
 
 CONTACT = "info@playmakerentertainment.com"
@@ -23,7 +24,8 @@ LINEUP_FILES = (("weekly_nightclub.jpg", "lineup-nightclub", "TAO Group nightclu
                 ("weekly_dayclub.jpg", "lineup-dayclub", "TAO Group dayclub lineup"))
 VENUE_CODES = {"OMNIA Nightclub": "OMNC", "Hakkasan Nightclub": "HKLV", "JEWEL Nightclub": "JWL",
                "Marquee Nightclub": "MNC", "TAO Nightclub": "TNC", "OMNIA Dayclub": "OMDC",
-               "Marquee Dayclub": "MDC", "Liquid Pool Lounge": "LQD", "Palm Tree Beach Club": "PTBC"}
+               "Marquee Dayclub": "MDC", "Liquid Pool Lounge": "LQD", "Palm Tree Beach Club": "PTBC",
+               "LIV": "LIV", "LIV Nightclub": "LIV", "XS": "XS", "XS Nightclub": "XS"}
 NIGHTCLUBS = ("OMNIA Nightclub", "Hakkasan Nightclub", "JEWEL Nightclub", "Marquee Nightclub", "TAO Nightclub")
 # Default ranking when data/top_picks.json isn't updated for the week: bigger
 # draws first. Unknown acts rank after these, by venue order in NIGHTCLUBS.
@@ -59,9 +61,23 @@ def _rank(artist):
     return STAR_RANK.index(a) if a in STAR_RANK else len(STAR_RANK)
 
 
+# JEWEL closed after Saturday, Nov 21, 2026. Weeks that start after that
+# date must not feature it; earlier weeks may still include it if it ranks.
+JEWEL_CLOSED_AFTER = date(2026, 11, 21)
+CAPACITY_NOTE = "All subject to capacity."
+# Customer-facing copy may state venue terms (comp, open bar, list times) but
+# must never promise entry.
+_PROMISE_ENTRY = re.compile(
+    r"\b(guaranteed entry|you're in|you are in|skip the line|skip-the-line|"
+    r"promised entry|lock it in|to get in|we(?:'ll| will) get you in)\b",
+    re.I,
+)
+
+
 def default_picks(start, end, headliners_map):
-    """Biggest nightclub acts across all venues, with exactly one JEWEL pick
-    (Thomas's focus), 3 total. headliners_map: {iso: {venue: artist}}."""
+    """Biggest nightclub acts across venues, 3 total. JEWEL is not required,
+    and is dropped once the week starts after it closed (Nov 21, 2026).
+    headliners_map: {iso: {venue: artist}}."""
     cands = []
     d = start
     while d <= end:
@@ -69,13 +85,10 @@ def default_picks(start, end, headliners_map):
             if venue in NIGHTCLUBS and artist:
                 cands.append({"date": d.isoformat(), "venue": venue, "artist": artist})
         d += timedelta(days=1)
+    if start > JEWEL_CLOSED_AFTER:
+        cands = [p for p in cands if p["venue"] != "JEWEL Nightclub"]
     key = lambda p: (_rank(p["artist"]), NIGHTCLUBS.index(p["venue"]), p["date"])
-    jewel = sorted([p for p in cands if p["venue"] == "JEWEL Nightclub"], key=key)
-    others = sorted([p for p in cands if p["venue"] != "JEWEL Nightclub"], key=key)
-    picks = others[:2] + jewel[:1]
-    if len(picks) < 3:
-        picks += [p for p in others[2:] if p not in picks][:3 - len(picks)]
-    return picks[:3]
+    return sorted(cands, key=key)[:3]
 
 
 def load_picks(data_dir, start, end, headliners_map):
@@ -116,6 +129,155 @@ def load_also(data_dir, start, end, headliners_map, picks):
     return out
 
 
+def _clean_rules(text):
+    """Keep venue terms; drop any phrase that promises entry."""
+    raw = re.sub(r"\s+", " ", (text or "").strip())
+    if not raw:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", raw)
+    kept = [s for s in parts if s and not _PROMISE_ENTRY.search(s)]
+    return " ".join(kept).strip()
+
+
+def _resolve_flyer(name, data_dir, flyers_dir):
+    if not name:
+        return None
+    name = str(name).strip()
+    candidates = [name]
+    if flyers_dir:
+        candidates.append(os.path.join(flyers_dir, os.path.basename(name)))
+        candidates.append(os.path.join(flyers_dir, name))
+    if data_dir:
+        candidates.append(os.path.join(data_dir, name))
+        candidates.append(os.path.join(data_dir, "flyers", os.path.basename(name)))
+    seen = set()
+    for path in candidates:
+        path = os.path.abspath(path)
+        if path in seen:
+            continue
+        seen.add(path)
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            return path
+    return None
+
+
+def stage_liv_xs_flyer(src_path, flyers_dir, venue, event_date, event):
+    """Copy a LIV/XS flyer into the repo flyer dir with a TAO-style name,
+    e.g. 261204_LIV_SOSA.jpg. Returns the destination path."""
+    if not src_path or not os.path.isfile(src_path):
+        raise FileNotFoundError(src_path)
+    d = date.fromisoformat(event_date) if isinstance(event_date, str) else event_date
+    code = VENUE_CODES.get(venue, re.sub(r"[^A-Z0-9]", "", (venue or "").upper()) or "LIV")
+    act = re.sub(r"[^A-Za-z0-9-]+", "-", (event or "event")).strip("-") or "event"
+    os.makedirs(flyers_dir, exist_ok=True)
+    dest = os.path.join(flyers_dir, f"{d:%y%m%d}_{code}_{act}.jpg")
+    ext = os.path.splitext(src_path)[1].lower()
+    if ext in (".jpg", ".jpeg") and os.path.abspath(src_path) != os.path.abspath(dest):
+        shutil.copy2(src_path, dest)
+        return dest
+    try:
+        from PIL import Image
+        with Image.open(src_path) as im:
+            im.convert("RGB").save(dest, "JPEG", quality=90, optimize=True)
+        return dest
+    except Exception:  # noqa: BLE001
+        if os.path.abspath(src_path) != os.path.abspath(dest):
+            shutil.copy2(src_path, dest)
+        return dest
+
+
+def load_liv_xs(data_dir, start, end, flyers_dir=None):
+    """Optional LIV & XS guest-list section for the current Tue-Mon week.
+
+    data/liv_xs.json format::
+
+        {
+          "week_start": "2026-12-01",
+          "enabled": true,
+          "lineup_flyer": "261201_LIV_weekend-lineup.jpg",
+          "events": [
+            {
+              "venue": "LIV",
+              "date": "2026-12-04",
+              "weekday": "Fri",
+              "event": "SOSA",
+              "rules": "Guys and girls comp with open bar, list until 2 AM.",
+              "flyer": "261204_LIV_SOSA.jpg"
+            }
+          ],
+          "notes": ["LIV is closed Sun Dec 6."]
+        }
+
+    Returns None (render nothing) when the file is missing, empty, enabled is
+    false, week_start does not match this week's Tuesday, or week_start is in
+    the past. A missing or unreadable flyer is skipped; the section still
+    renders. Always carries a 'subject to capacity' footer. Never promises entry.
+    """
+    path = os.path.join(data_dir, "liv_xs.json")
+    try:
+        with open(path) as fh:
+            raw = fh.read().strip()
+        if not raw:
+            return None
+        cfg = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cfg, dict) or cfg.get("enabled") is False:
+        return None
+    week_start = (cfg.get("week_start") or "").strip()
+    if not week_start or week_start != start.isoformat():
+        return None
+    try:
+        if date.fromisoformat(week_start) < start:
+            return None
+    except ValueError:
+        return None
+    events = []
+    for item in cfg.get("events") or []:
+        if not isinstance(item, dict):
+            continue
+        iso = (item.get("date") or "").strip()
+        venue = (item.get("venue") or "").strip()
+        event = (item.get("event") or item.get("headliner") or "").strip()
+        if not (iso and venue and event):
+            continue
+        try:
+            d = date.fromisoformat(iso)
+        except ValueError:
+            continue
+        if not (start <= d <= end):
+            continue
+        rules = _clean_rules(item.get("rules") or "")
+        weekday = (item.get("weekday") or "").strip() or d.strftime("%a")
+        flyer_path = _resolve_flyer(item.get("flyer") or item.get("flyer_path") or "", data_dir, flyers_dir)
+        events.append({
+            "venue": venue,
+            "date": iso,
+            "weekday": weekday,
+            "event": event,
+            "rules": rules,
+            "flyer_path": flyer_path,
+            "cid": None,
+        })
+    notes = []
+    for n in cfg.get("notes") or []:
+        raw = n.strip() if isinstance(n, str) else (n.get("text") or "").strip() if isinstance(n, dict) else ""
+        cleaned = _clean_rules(raw)
+        if cleaned:
+            notes.append(cleaned)
+    lineup_path = _resolve_flyer(cfg.get("lineup_flyer") or cfg.get("lineup") or "", data_dir, flyers_dir)
+    if not events and not notes and not lineup_path:
+        return None
+    return {
+        "week_start": week_start,
+        "events": events,
+        "notes": notes,
+        "lineup_path": lineup_path,
+        "lineup_cid": None,
+        "capacity_note": CAPACITY_NOTE,
+    }
+
+
 def find_flyer(flyers_dir, pick):
     d = date.fromisoformat(pick["date"])
     code = VENUE_CODES.get(pick["venue"], "")
@@ -137,7 +299,7 @@ def find_flyer(flyers_dir, pick):
 
 VENUE_LABELS = {"OMNC": "OMNIA", "OMDC": "OMNIA-Dayclub", "HKLV": "Hakkasan", "JWL": "JEWEL",
                 "MNC": "Marquee", "MDC": "Marquee-Dayclub", "TNC": "TAO", "LQD": "Liquid",
-                "PTBC": "Palm-Tree"}
+                "PTBC": "Palm-Tree", "LIV": "LIV", "XS": "XS"}
 SERIES_TAGS = {"ss", "mon", "dw", "glf", "lowkey"}  # TAO series prefixes, not the act
 ACT_FIXES = {"linconjesser": "Lincoln-Jesser", "r-bae-wednesdays": "RnBae-Wednesdays", "zedd": "Zedd",
              "ritualsundays": "Ritual-Sundays"}  # tidy TAO's file-name typos/casing
@@ -255,7 +417,53 @@ def _card(p, cid):
             f'{_btn()}</td>')
 
 
-def render_html(start, end, picks, pick_cids, also):
+def _liv_xs_html(liv_xs):
+    """Compact LIV & XS block, or empty string when the section is off."""
+    if not liv_xs:
+        return ""
+    H = lambda t: (f'<tr><td style="padding:14px 14px 2px;"><p style="margin:0;{F}font-size:11px;letter-spacing:4px;'
+                   f'text-transform:uppercase;color:#D4AF37;font-weight:700;">{t}</p></td></tr>')
+    parts = [H("LIV &amp; XS")]
+    if liv_xs.get("lineup_cid"):
+        parts.append(
+            '<tr><td style="padding:0 14px 8px;"><img src="cid:' + liv_xs["lineup_cid"] +
+            '" width="572" alt="LIV weekend lineup" style="display:block;width:100%;max-width:572px;'
+            'height:auto;border-radius:8px;"></td></tr>')
+    flyer_ev = [e for e in liv_xs.get("events") or [] if e.get("cid")]
+    if flyer_ev:
+        cells = []
+        width = 50 if len(flyer_ev) <= 2 else 33
+        for e in flyer_ev:
+            alt = html.escape(f"{e['event']} at {e['venue']}")
+            cells.append(
+                f'<td class="col" width="{width}%" valign="top" style="padding:6px;">'
+                f'<img src="cid:{e["cid"]}" width="276" alt="{alt}" '
+                'style="display:block;width:100%;max-width:276px;height:auto;border-radius:8px;"></td>')
+        parts.append('<tr><td style="padding:0 8px 4px;"><table role="presentation" width="100%" '
+                     f'cellpadding="0" cellspacing="0" border="0"><tr>{"".join(cells)}</tr></table></td></tr>')
+    rows = []
+    for e in liv_xs.get("events") or []:
+        label = html.escape(f"{e['weekday']} {date.fromisoformat(e['date']).day} · {e['venue']} · {e['event']}")
+        rules = html.escape(e["rules"]) if e.get("rules") else ""
+        rules_html = (f'<div style="margin:2px 0 0;{F}font-size:12px;line-height:18px;color:#BDBDBD;">{rules}</div>'
+                      if rules else "")
+        rows.append(
+            f'<tr><td style="padding:7px 0;border-bottom:1px solid #1f1a0c;">'
+            f'<p style="margin:0;{F}font-size:13px;line-height:18px;color:#F5F5F5;font-weight:700;">{label}</p>'
+            f'{rules_html}</td></tr>')
+    for note in liv_xs.get("notes") or []:
+        rows.append(
+            f'<tr><td style="padding:7px 0;border-bottom:1px solid #1f1a0c;{F}font-size:12px;'
+            f'line-height:18px;color:#BDBDBD;">{html.escape(note)}</td></tr>')
+    cap = html.escape(liv_xs.get("capacity_note") or CAPACITY_NOTE)
+    rows.append(
+        f'<tr><td style="padding:8px 0 0;{F}font-size:11px;line-height:16px;color:#8a8a8a;">{cap}</td></tr>')
+    parts.append('<tr><td style="padding:2px 14px 14px;"><table role="presentation" width="100%" '
+                 f'cellpadding="0" cellspacing="0" border="0">{"".join(rows)}</table></td></tr>')
+    return "".join(parts)
+
+
+def render_html(start, end, picks, pick_cids, also, liv_xs=None):
     lineup = "".join(
         f'<td class="col" width="50%" valign="top" style="padding:6px;"><img src="cid:{cid}" width="276" '
         f'alt="{alt}" style="display:block;width:100%;max-width:276px;height:auto;border-radius:8px;"></td>'
@@ -274,6 +482,7 @@ def render_html(start, end, picks, pick_cids, also):
     names = ", ".join(html.escape(p["artist"]) for p in picks)
     also_block = (H("Also This Week") + '<tr><td style="padding:2px 14px 14px;"><table role="presentation" '
                   f'width="100%" cellpadding="0" cellspacing="0" border="0">{rows}</table></td></tr>') if also else ""
+    liv_block = _liv_xs_html(liv_xs)
     return f'''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="x-apple-disable-message-reformatting"><meta name="color-scheme" content="light only">
 <title>This Week in Vegas | Playmaker Entertainment</title>
 <style>body{{margin:0;padding:0;background:#050505;}}img{{border:0;}}@media screen and (max-width:620px){{.container{{width:100%!important;}}.col{{display:block!important;width:100%!important;box-sizing:border-box;}}.col img{{max-width:100%!important;}}}}</style></head>
@@ -289,15 +498,25 @@ def render_html(start, end, picks, pick_cids, also):
 <tr><td style="padding:0 8px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>{lineup}</tr></table></td></tr>
 {H("Don&rsquo;t Miss")}
 <tr><td style="padding:0 8px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>{top}</tr></table></td></tr>
+{liv_block}
 {also_block}
 <tr><td align="center" style="padding:14px 20px 18px;border-top:1px solid #2a2310;{F}font-size:12px;line-height:18px;color:#8a8a8a;">Questions? <a href="mailto:{CONTACT}" style="color:#D4AF37;">{CONTACT}</a> &middot; <a href="https://instagram.com/playmaker.entertainment" style="color:#D4AF37;">@playmaker.entertainment</a><br>Playmaker Entertainment &middot; Las Vegas</td></tr>
 </table></td></tr></table></body></html>'''
 
 
-def render_text(start, end, picks, also):
+def render_text(start, end, picks, also, liv_xs=None):
     lines = [f"THIS WEEK IN VEGAS — {start:%b} {start.day}-{end:%b} {end.day}",
              "Big names, best rooms, and you're on the list.", "", "DON'T MISS"]
     lines += [f"• {_day(p['date'])} — {p['artist']} @ {p['venue']}" for p in picks]
+    if liv_xs:
+        lines += ["", "LIV & XS"]
+        for e in liv_xs.get("events") or []:
+            row = f"{e['weekday']} {date.fromisoformat(e['date']).day} — {e['event']} @ {e['venue']}"
+            if e.get("rules"):
+                row += f". {e['rules']}"
+            lines.append(row)
+        lines += list(liv_xs.get("notes") or [])
+        lines.append(liv_xs.get("capacity_note") or CAPACITY_NOTE)
     if also:
         lines += ["", "ALSO THIS WEEK"]
         lines += [f"{_day(iso)}: " + " · ".join(f"{a} @ {v}" for v, a in ev) for iso, ev in also]
@@ -310,7 +529,9 @@ def render_text(start, end, picks, also):
 def build(today, data_dir, flyers_dir, headliners_map):
     """-> (subject, text, html, inline_images [(path, cid)], attachments
     [(path, filename)]). Raises
-    MissingLineup if either TAO weekly lineup flyer is absent (fail closed)."""
+    MissingLineup if either TAO weekly lineup flyer is absent (fail closed).
+    The LIV & XS section is omitted when data/liv_xs.json is missing, empty,
+    disabled, or dated for another week; the rest of the newsletter still builds."""
     start, end = week_window(today)
     inline = []
     for fn, cid, _ in LINEUP_FILES:
@@ -327,9 +548,19 @@ def build(today, data_dir, flyers_dir, headliners_map):
             inline.append((path, cid))
         cids.append(cid)
     also = load_also(data_dir, start, end, headliners_map, picks)
+    liv_xs = load_liv_xs(data_dir, start, end, flyers_dir)
+    if liv_xs:
+        if liv_xs.get("lineup_path"):
+            liv_xs["lineup_cid"] = "liv-xs-lineup"
+            inline.append((liv_xs["lineup_path"], "liv-xs-lineup"))
+        for i, ev in enumerate(liv_xs["events"]):
+            if ev.get("flyer_path"):
+                ev["cid"] = f"liv-xs-{i}"
+                inline.append((ev["flyer_path"], ev["cid"]))
     # Subject names the Wednesday send day (unchanged wording, so the weekly
     # dedupe still matches an issue that already went out).
     send_day = start + timedelta(days=(2 - start.weekday()) % 7)
     subject = f"🎉 This Week in Vegas — {send_day:%A, %B} {send_day.day}"
-    return (subject, render_text(start, end, picks, also), render_html(start, end, picks, cids, also), inline,
+    return (subject, render_text(start, end, picks, also, liv_xs),
+            render_html(start, end, picks, cids, also, liv_xs), inline,
             week_attachments(flyers_dir, start, end))

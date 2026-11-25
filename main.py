@@ -1563,7 +1563,7 @@ def send_weekly_lineup(service, mode, today=None, flyers_dir=FLYERS_DIR, force=F
     weekly_dayclub.jpg) as CID inline images; if either is missing it does NOT
     send (fail closed) and logs an error. Top 3 picks come from
     data/top_picks.json when its week_start matches, else a default (biggest
-    nightclub acts across venues, one JEWEL pick). WEEKLY_LINEUP_ENABLED=false
+    nightclub acts across venues; JEWEL is not required and is omitted after it closed Nov 21, 2026). WEEKLY_LINEUP_ENABLED=false
     pauses; WEEKLY_LINEUP_HOUR (default 9) sets the hour.
 
     WEEKLY_LINEUP_TEST_TO=<address> sends one "[TEST]" copy of this week's

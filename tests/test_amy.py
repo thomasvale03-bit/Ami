@@ -1283,16 +1283,24 @@ class WeeklyLineupTests(unittest.TestCase):
         self.assertIn("Sat-10-17_Hakkasan_Ohgeesy.jpg", names)
         self.assertFalse(any("10-12" in n or "10-20" in n for n in names))
 
-    def test_default_picks_one_jewel(self):
+    def test_default_picks_no_required_jewel(self):
         from templates import weekly_newsletter as w
         h = {"2026-10-21": {"OMNIA Nightclub": "Steve Aoki", "JEWEL Nightclub": "DJ Shift",
                             "Marquee Nightclub": "Deorro", "OMNIA Dayclub": "Alesso"},
              "2026-10-23": {"JEWEL Nightclub": "Lucky Lou", "Hakkasan Nightclub": "Tyga"}}
         picks = w.default_picks(date(2026, 10, 21), date(2026, 10, 27), h)
         self.assertEqual(len(picks), 3)
-        self.assertEqual(sum(p["venue"] == "JEWEL Nightclub" for p in picks), 1)
+        self.assertEqual([p["artist"] for p in picks], ["Steve Aoki", "Deorro", "Tyga"])
         self.assertNotIn("Alesso", [p["artist"] for p in picks])  # dayclub excluded
-        self.assertEqual(picks[0]["artist"], "Steve Aoki")
+        self.assertEqual(sum(p["venue"] == "JEWEL Nightclub" for p in picks), 0)
+
+    def test_default_picks_excludes_jewel_after_close(self):
+        from templates import weekly_newsletter as w
+        h = {"2026-11-27": {"OMNIA Nightclub": "Steve Aoki", "JEWEL Nightclub": "DJ Shift",
+                            "Marquee Nightclub": "Deorro", "Hakkasan Nightclub": "Tyga"}}
+        picks = w.default_picks(date(2026, 11, 24), date(2026, 11, 30), h)
+        self.assertEqual([p["artist"] for p in picks], ["Steve Aoki", "Deorro", "Tyga"])
+        self.assertTrue(all(p["venue"] != "JEWEL Nightclub" for p in picks))
 
     def test_sent_once_per_week_with_inline_images(self):
         import tempfile
