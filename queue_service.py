@@ -176,9 +176,12 @@ def is_approved_fallback(record, venue, night, requested_nights, drais):
         return False
     if drais:
         # Open or off-schedule Drai's nights still cannot complete as a TAO
-        # receipt. Weekly no_list/closed Drai's nights may fall back.
+        # receipt. Weekly no_list/closed Drai's nights may fall back. A
+        # date-specific venue override (e.g. Dec 24 -> TAO Nightclub) also
+        # applies to Drai's requests for that night.
         night_date = date.fromisoformat(night) if isinstance(night, str) else night
-        if not rules.night_rules_closed("Drai's After Hours", night_date):
+        override = rules.date_venue_override(night_date)
+        if not rules.night_rules_closed("Drai's After Hours", night_date) and venue != override:
             return False
     return venue in FALLBACK_TARGETS or (record.get('fallback') is True and 'Nightclub' in venue)
 

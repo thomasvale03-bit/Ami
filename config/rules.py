@@ -617,3 +617,52 @@ def scottsdale_venue(venues):
         if "scottsdale" in vl:
             return "Almost Famous"
     return None
+
+
+# Date-specific venue remaps (Thomas, Nov 27 2026): any Vegas sign-up on
+# these nights is booked at the named club instead, recorded as a venue
+# change like a fallback. Scottsdale venues are never moved.
+def date_venue_overrides():
+    """{YYYY-MM-DD: canonical venue} from data/date_venue_overrides.json."""
+    from pathlib import Path
+    import json
+    path = Path(__file__).resolve().parent.parent / "data" / "date_venue_overrides.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for day, venue in data.items():
+        try:
+            from datetime import date as _date
+            _date.fromisoformat(str(day)[:10])
+        except ValueError:
+            continue
+        name = normalize_venue_name(venue) if venue else ""
+        if name:
+            out[str(day)[:10]] = name
+    return out
+
+
+def date_venue_override(date_obj, requested_venue=None):
+    """Override club for this Vegas night, or None.
+
+    Returns None when there is no remap, the request is already that club
+    (book it normally), or the requested venue is Scottsdale / not Vegas.
+    """
+    key = date_obj.isoformat() if hasattr(date_obj, "isoformat") else str(date_obj)[:10]
+    dest = date_venue_overrides().get(key)
+    if not dest:
+        return None
+    if requested_venue:
+        if is_scottsdale(requested_venue):
+            return None
+        canon = normalize_venue_name(requested_venue)
+        if not (is_known_vegas_venue(canon) or is_open_venue_placeholder(requested_venue)):
+            return None
+        if canon == dest:
+            return None
+    return dest
+

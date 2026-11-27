@@ -761,6 +761,27 @@ class Worker:
                     continue
             if any(rules.is_manual_venue(v) for v in (raw.get("venues") or [])):
                 raise Stop("manual", "Requested venue stays manual")
+            override = rules.date_venue_override(date.fromisoformat(night), venue)
+            if override:
+                existing = self._existing_night_booking(job["ref"], night, out)
+                if existing and rules.is_nightclub((existing.get("record") or {}).get("venue")):
+                    out.append(existing)
+                    continue
+                try:
+                    item = self._book_tao(job["ref"], override, night, request, rehearse, token, partial=False)
+                except Stop as stop:
+                    if (waiting is None or stop.action != "retry"
+                            or stop.extra.get("kind") != "unposted"):
+                        raise
+                    waiting.append((venue, night, stop))
+                    continue
+                item.setdefault("meta", {})["fallback"] = True
+                item["meta"]["fallback_from"] = venue
+                if item.get("record"):
+                    item["record"]["fallback"] = True
+                if item:
+                    out.append(item)
+                continue
             if rules.is_door_venue(venue):
                 night_date = date.fromisoformat(night)
                 short = "ZOUK" if rules.is_zouk(venue) else "Ghostbar"
@@ -825,6 +846,8 @@ class Worker:
         for night in dates:
             if night > rules.MARQUEE_DAYCLUB_PUSH_END:
                 continue
+            if rules.date_venue_override(date.fromisoformat(night)):
+                continue  # night remapped to a specific club; don't also add MDC
             key = night_key(ref, "Marquee Dayclub", night)
             saved = (self.ledger.get(key) or {}).get("record") or {}
             if saved.get("verified") and saved.get("order_id"):
