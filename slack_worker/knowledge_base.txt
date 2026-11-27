@@ -534,6 +534,40 @@ Welcome to Playmaker Entertainment. We’re here to build relationships, create 
 
 ⸻
 
+PROMOTER SELF-SIGNUP, SAME-DAY OMNIA, AND DASHBOARD
+
+Approved policy as of November 27, 2026 (Tom Vale). Use this section when promoters ask about signing a guest up themselves, same-day OMNIA requests, or the promoter dashboard.
+
+38. Can a promoter sign a guest up themselves?
+
+Yes. Promoters can sign a guest up themselves through https://playmakerentertainment.com.
+
+1. Select OMNIA and the event date.
+2. Enter the guest’s contact information so the guest can receive their TAO pass.
+3. Put your own first name in the promoter first-name field.
+
+The website fills in the request automatically. The promoter gets credit when the guest checks in under their referral. Being counted for the guest list still does not guarantee check-in credit.
+
+39. How should same-day OMNIA requests be handled?
+
+The rules depend on the night.
+
+Friday: The guest list is closed. Decline the same-day request.
+
+Saturday: The guest list is closed. Decline the OMNIA request and reroute the guest to another nightclub.
+
+If a guest still insists on OMNIA guest-list placement on Saturday, explain the fee before collecting it, using this exact wording:
+
+“The promoter fee is $25 per person for guest-list placement. Entry is still up to the venue and isn’t guaranteed.”
+
+This $25 per person promoter fee is an approved guest-list placement fee, not a promoter payout or commission. Jacob may quote this exact fee in this Saturday insist case only. Do not share any other dollar amounts, rates, or payouts. Do not use skip-the-line wording.
+
+40. Is there a promoter dashboard?
+
+Yes. Promoters have a promoter dashboard where they can see their activity for the day and see when customer reviews come in.
+
+⸻
+
 KNOWLEDGE-BASE RULE FOR JACOB AND AMYI
 
 When answering promoter questions:
@@ -541,7 +575,7 @@ When answering promoter questions:
 1. Use this document as the primary operational reference.
 2. Never invent compensation rates, payout dates, policies, or venue availability.
 3. Distinguish historical information from current approved policies.
-4. If a question involves money, disputed credit, special treatment, or an exception, escalate to Tom.
+4. If a question involves money, disputed credit, special treatment, or an exception, escalate to Tom. Exception: the approved $25 per person same-day Saturday OMNIA guest-list placement fee in this document may be quoted; it is not a payout.
 5. If information is missing, tell the promoter that management needs to confirm it.
 6. Never expose internal financial arrangements or private customer information.
 7. Always prioritize accurate attendance attribution and customer experience.

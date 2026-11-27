@@ -1101,6 +1101,8 @@ class JacobPersonaTest(unittest.TestCase):
             self.assertIn('playmakerentertainment.com', text)
             self.assertIn('Promoter first name', text)
             self.assertIn('Tom still needs to confirm', text)
+            self.assertIn('PROMOTER SELF-SIGNUP, SAME-DAY OMNIA, AND DASHBOARD', text)
+            self.assertIn('$25 per person for guest-list placement', text)
             self.assertNotIn('$1', text)
             self.assertNotIn('$3', text)
             self.assertNotIn('2–3%', text)
@@ -1138,6 +1140,38 @@ class JacobPersonaTest(unittest.TestCase):
         out_amy, flags_amy = guardrails.apply_guardrails(
             'We pay $1 per check-in.', persona='amy', amy_confirmed=True)
         self.assertNotIn('pay_figure_blocked', flags_amy)
+
+    def test_jacob_approved_omnia_fee_is_allowed(self):
+        quote = (
+            'The promoter fee is $25 per person for guest-list placement. '
+            "Entry is still up to the venue and isn't guaranteed."
+        )
+        self.assertFalse(guardrails.looks_like_pay_figure(quote))
+        self.assertFalse(prompt.re_pay_figure(quote))
+        out, flags = guardrails.apply_guardrails(quote, persona='jacob')
+        self.assertNotIn('pay_figure_blocked', flags)
+        self.assertIn('$25 per person for guest-list placement', out)
+        mixed, mixed_flags = guardrails.apply_guardrails(
+            quote + ' We also pay $1 per check-in.', persona='jacob')
+        self.assertIn('pay_figure_blocked', mixed_flags)
+        self.assertEqual(mixed, guardrails.PAY_ESCALATION_REPLY)
+        self.assertFalse(guardrails.is_pay_question(
+            'Can I sign a guest up myself for same-day OMNIA on Saturday?'))
+        self.assertFalse(guardrails.is_pay_question(
+            'What is the promoter fee if they still want OMNIA tonight?'))
+
+    def test_knowledge_base_includes_promoter_signup_omnia_dashboard(self):
+        kb = prompt.KNOWLEDGE_BASE
+        self.assertIn('PROMOTER SELF-SIGNUP, SAME-DAY OMNIA, AND DASHBOARD', kb)
+        self.assertIn('promoter first-name field', kb)
+        self.assertIn('Friday: The guest list is closed. Decline the same-day request.', kb)
+        self.assertIn('reroute the guest to another nightclub', kb)
+        self.assertIn('$25 per person for guest-list placement', kb)
+        self.assertIn('promoter dashboard', kb.lower())
+        self.assertIn('customer reviews', kb.lower())
+        self.assertFalse(prompt.re_pay_figure(kb))
+        self.assertNotIn('$1', kb)
+        self.assertNotIn('$3', kb)
 
     def test_jacob_skips_amy_commands(self):
         lk = Lookups(FakeApi([]), clock=lambda: NOW)

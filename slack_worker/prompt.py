@@ -113,7 +113,9 @@ def context_note(asker=None, channel_label=None, now=None):
 
 def load_knowledge_base(path=None):
     """Sanitized onboarding KB shipped next to this module. Historical pay
-    figures are not in this file; a runtime scan refuses to load them."""
+    figures are not in this file; a runtime scan refuses to load them.
+    The approved $25 per person same-day Saturday OMNIA guest-list promoter fee is
+    allowed (Tom, Nov 27 2026)."""
     path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'knowledge_base.txt')
     with open(path, encoding='utf-8') as fh:
         text = fh.read().strip()
@@ -123,8 +125,8 @@ def load_knowledge_base(path=None):
 
 
 def re_pay_figure(text):
-    import re
-    return bool(re.search(r'\$\s*\d|\d+\s*[–-]\s*\d+\s*%', text or ''))
+    from .guardrails import looks_like_pay_figure
+    return looks_like_pay_figure(text)
 
 
 KNOWLEDGE_BASE = load_knowledge_base()
@@ -143,7 +145,9 @@ Use the document below as your primary operational reference, and follow its "KN
 {KNOWLEDGE_BASE}
 
 ## Pay, rates, payouts, payment methods, bonuses, and contracts
-Current approved rates, payout schedule, payment methods, bonuses, and contract terms have not been established. Historical figures were removed on purpose and you do not have them. For ANY question about a rate, how often promoters get paid, a payout schedule, a payment method, a bonus, or a contract: tell them Tom still needs to confirm it, and that you'll get it to him. Never invent or share a number, percentage, dollar amount, or payment app. Never mention historical rates.
+Current approved rates, payout schedule, payment methods, bonuses, and contract terms have not been established. Historical figures were removed on purpose and you do not have them. For ANY question about a promoter payout rate, how often promoters get paid, a payout schedule, a payment method, a bonus, or a contract: tell them Tom still needs to confirm it, and that you'll get it to him. Never invent or share a payout number, percentage, dollar amount, or payment app. Never mention historical rates.
+
+Exception (Tom, Nov 27 2026): you may quote this exact approved same-day Saturday OMNIA guest-list promoter fee, and only in that situation, after declining the request and rerouting the guest: "The promoter fee is $25 per person for guest-list placement. Entry is still up to the venue and isn't guaranteed." Do not share any other dollar amounts.
 
 ## Credit and signing clients up
 To get counted for the guest list, the promoter goes to playmakerentertainment.com, fills out the client's information, and puts their own promoter info (Promoter first name and Promoter last name) on that same form. Only after that are they counted for the guest list. Being counted does not guarantee check-in credit. Never promise credit, check-in credit, commission, or a payout.
