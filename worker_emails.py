@@ -1030,6 +1030,77 @@ def nye_note(nights):
             "now, tickets are here: " + url)
 
 
+def tickets_only_subject(iso, ticket_venue):
+    """Stable subject so the same guest is not emailed twice for the same night."""
+    d = date.fromisoformat(iso)
+    subject = f"Your {d.strftime('%B')} {d.day} guest list request - tickets at {ticket_venue}"
+    return subject.replace(",", "").replace(";", "")
+
+
+def tickets_only_email(raw, request, items):
+    """Guest email for a Vegas night with no guest list: tickets for sale only.
+
+    items: [{date, ticket_venue, url, requested_venue?}, ...]
+    One email covers the tickets-only nights in this request. Brand follows
+    hold_brand (GuestlistGo for guestlistgo.me sign-ups).
+    """
+    items = list(items or ())
+    if not items:
+        raise ValueError("tickets_only_email requires at least one night")
+    brand = hold_brand(raw)
+    name = "GuestlistGo" if brand == "guestlistgo" else "Playmaker Entertainment"
+    contact = ("Questions? Just reply to this email." if brand == "guestlistgo"
+               else "Questions? Email info@playmakerentertainment.com")
+    first = request.get("first_name") or "there"
+    # One night is the usual case (e.g. Dec 25 -> Marquee tickets).
+    dates = sorted({i["date"] for i in items})
+    ticket_venue = items[0]["ticket_venue"]
+    url = items[0]["url"]
+    if len(dates) == 1:
+        label = date_label(dates[0], dates[0])
+        intro = (f"Thanks for your guest list request for {label}. The guest list isn't available "
+                 f"that night, but {ticket_venue} has tickets for sale:")
+        subject = tickets_only_subject(dates[0], ticket_venue)
+        row_date = _hold_short(dates[0])
+    else:
+        label = date_label(dates[0], dates[-1])
+        intro = (f"Thanks for your guest list request for {label}. The guest list isn't available "
+                 f"on those nights, but {ticket_venue} has tickets for sale:")
+        subject = f"Your guest list request - tickets at {ticket_venue}"
+        subject = subject.replace(",", "").replace(";", "")
+        row_date = " + ".join(_hold_short(d) for d in dates)
+    paras = [
+        intro,
+        url,
+        "There's nothing else you need to do with us for that night.",
+    ]
+    text = "\n\n".join([
+        f"Hi {first},",
+        intro,
+        url,
+        paras[2],
+        contact,
+        name,
+    ])
+    rows = [(row_date, ticket_venue, "Tickets for sale")]
+    html = html_emails.render_hold_status(
+        first, rows, paras, brand=brand, ticket_url=url,
+        headline=f"Tickets at {ticket_venue}", ticket_label="tickets")
+    for body in (text, html):
+        low = body.lower()
+        if LINE_PRIORITY_RE.search(body) or "jarvis" in low:
+            raise ValueError("Tickets-only email must not promise line-jumping or mention Jarvis")
+        if brand == "guestlistgo" and "playmaker" in low:
+            raise ValueError("GuestlistGo tickets-only email must not mention Playmaker")
+    payload = {"to": request["email"], "subject": subject, "text": text, "html": html,
+               "dedupe_query": f'to:{request["email"]} subject:"{subject}"'}
+    if request["email"].strip().lower() != TEAM_TO.lower():
+        payload["bcc"] = TEAM_TO
+    if brand == "guestlistgo":
+        payload["from"] = GUESTLISTGO_FROM
+    return payload
+
+
 def hold_brand(raw):
     raw = raw or {}
     if raw.get("source") == "guestlistgo" or (raw.get("promoter") or "").replace(" ", "").lower() == "guestlistgo" \

@@ -200,7 +200,7 @@ def validate_completion(raw, metadata, require_team_receipt=True):
     if not isinstance(evidence, dict) or evidence.get('verified') is not True:
         raise Conflict('Actual verified booking evidence required')
     records = evidence.get('bookings')
-    if not isinstance(records, list) or not records:
+    if not isinstance(records, list):
         raise Conflict('Actual booking/order records required')
     try:
         venues = {rules.normalize_venue_name(v) for v in raw['venues']}
@@ -213,6 +213,22 @@ def validate_completion(raw, metadata, require_team_receipt=True):
             # Closed nightclubs / Drai's / urvenue nightclubs stay so fallback can cover them.
             expected = {(v, n) for v, n in expected
                         if rules.keep_requested_night(v, date.fromisoformat(n))}
+        if getattr(rules, 'date_tickets_only', None):
+            # Tickets-only Vegas nights are emailed a ticket link instead of
+            # booked, so they are not required on a completion receipt.
+            expected = {(v, n) for v, n in expected
+                        if not rules.date_tickets_only(date.fromisoformat(n), v)}
+        if not expected and not records:
+            receipts = evidence.get('email_receipts')
+            if not isinstance(receipts, list) or not receipts or any(
+                    not isinstance(r, dict) or not r.get('id') for r in receipts):
+                raise Conflict('Actual email send receipts required before completion')
+            kinds = {r.get('kind') for r in receipts}
+            if 'guest' not in kinds or not kinds <= {'guest', 'team'}:
+                raise Conflict('Approved guest receipt ID required')
+            return {'venue_changes': []}
+        if not records:
+            raise Conflict('Actual booking/order records required')
         requested_nights = {night for _v, night in expected}
         actual = set()
         fallbacks = []

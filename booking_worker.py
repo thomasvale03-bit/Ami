@@ -678,6 +678,9 @@ class Worker:
         except Stop as stop:
             # A closed / access-code night with no open fallback stops the job
             # before the end; the guest still hears (once) what is on hold.
+            tickets_only = list(getattr(self, "_tickets_only", []) or [])
+            if tickets_only:
+                self._notify_tickets_only(job, ref, token, raw, tickets_only)
             drais = self._is_drais_email_job(raw, self._booked_so_far)
             if (not drais and stop.action == "retry" and stop.extra.get("hold_kind")
                     and stop.extra.get("venue") and stop.extra.get("night")):
@@ -685,6 +688,8 @@ class Worker:
                 held.append((stop.extra["venue"], stop.extra["night"], stop.extra["hold_kind"]))
                 self._notify_hold(job, ref, token, raw, held, booked=bool(self._booked_so_far))
             raise
+        tickets_only = list(getattr(self, "_tickets_only", []) or [])
+        tickets_marker = self._notify_tickets_only(job, ref, token, raw, tickets_only) if tickets_only else None
         drais = self._is_drais_email_job(raw, bookings)
         if waiting:
             # Some nights of this request are only waiting for their guest list
@@ -715,7 +720,26 @@ class Worker:
                 f"{len(waiting)} night(s) waiting for their guest list to be posted ("
                 + "; ".join(f"{v} {n}" for v, n, _ in waiting) + "); nothing submitted for them")
             raise Stop("retry", reason, kind="unposted")
+        if not bookings and tickets_only:
+            mid = (tickets_marker or {}).get("message_id")
+            if not mid or mid == "duplicate":
+                raise Stop("retry", "Tickets-only email not sent yet; will try at the next pickup")
+            evidence = {"verified": True, "worker": "railway", "tickets_only": tickets_only,
+                        "bookings": [], "email_receipts": [{"kind": "guest", "id": str(mid)}]}
+            reason = "Dec 25 tickets-only email sent per Tom Nov 27"
+            if not any(i.get("date") == "2026-12-25" for i in tickets_only):
+                nights = ", ".join(sorted({i["date"] for i in tickets_only}))
+                reason = f"{nights} tickets-only email sent; guest list is not available"
+            code, body = self.api.update(ref, token, "complete", {"evidence": evidence}, reason)
+            if code != 200:
+                raise Stop("manual", f"Tickets-only email sent but completion refused (HTTP {code}: "
+                           f"{(body or {}).get('error') if isinstance(body, dict) else body}); DO NOT rebook",
+                           evidence=evidence)
+            log.info("Job %s complete (tickets-only): %s", ref, [i.get("date") for i in tickets_only])
+            return {"status": "done", "ref": ref, "evidence": evidence}
         evidence = {"verified": True, "worker": "railway", "bookings": [b["record"] for b in bookings]}
+        if tickets_only:
+            evidence["tickets_only"] = tickets_only
         evidence["email_receipts"] = self._send_emails(job, ref, token, raw, bookings, drais=drais)
         code, body = self.api.update(ref, token, "complete", {"evidence": evidence}, "Booked by Railway worker")
         if code != 200:
@@ -741,6 +765,7 @@ class Worker:
         progress = ((job.get("metadata") or {}).get("progress") or {}).get("bookings") or {}
         out = []
         self._booked_so_far = out
+        self._tickets_only = []
         self.tao.reset()
         nights = source_nights(raw)
         for venue, night in nights:
@@ -759,6 +784,15 @@ class Worker:
                 if existing and rules.is_nightclub((existing.get("record") or {}).get("venue")):
                     out.append(existing)
                     continue
+            policy = rules.date_tickets_only(date.fromisoformat(night), venue)
+            if policy:
+                self._tickets_only.append({
+                    "requested_venue": venue,
+                    "date": night,
+                    "ticket_venue": policy["venue"],
+                    "url": policy["url"],
+                })
+                continue
             if any(rules.is_manual_venue(v) for v in (raw.get("venues") or [])):
                 raise Stop("manual", "Requested venue stays manual")
             override = rules.date_venue_override(date.fromisoformat(night), venue)
@@ -848,6 +882,8 @@ class Worker:
                 continue
             if rules.date_venue_override(date.fromisoformat(night)):
                 continue  # night remapped to a specific club; don't also add MDC
+            if rules.date_tickets_only(date.fromisoformat(night)):
+                continue  # tickets-only night; no guest list, including MDC
             key = night_key(ref, "Marquee Dayclub", night)
             saved = (self.ledger.get(key) or {}).get("record") or {}
             if saved.get("verified") and saved.get("order_id"):
@@ -1312,6 +1348,66 @@ class Worker:
             except Exception:  # noqa: BLE001
                 log.exception("Could not save hold_notified marker on the server for %s", ref)
         return marker
+
+    def _tickets_only_marker(self, job, ref):
+        local = (self.ledger.get(f"{ref}|tickets_only_notified") or {})
+        server = (((job or {}).get("metadata") or {}).get("progress") or {}).get("tickets_only_notified") or {}
+        if not local and not server:
+            return {}
+        return {**server, **local}
+
+    def _save_tickets_only_marker(self, ref, token, marker):
+        marker = {**marker, "at": self.now()}
+        self.ledger.put(f"{ref}|tickets_only_notified", marker)
+        if token:
+            try:
+                self.api.update(ref, token, "progress", {"progress": {"tickets_only_notified": marker}})
+            except Exception:  # noqa: BLE001
+                log.exception("Could not save tickets_only_notified marker on the server for %s", ref)
+        return marker
+
+    def _notify_tickets_only(self, job, ref, token, raw, items):
+        """ONE tickets-only guest email per request (deduped by subject +
+        recipient in /send-branded, and by a per-job marker). Never books.
+        A failed send is retried at the next pickup and does not raise."""
+        if not items:
+            return None
+        try:
+            import worker_emails
+            from rules_engine import normalize_guest_request
+            prior = self._tickets_only_marker(job, ref)
+            if prior.get("rejected"):
+                return prior
+            if prior.get("message_id"):
+                return prior
+            request = normalize_guest_request(raw)
+            payload = worker_emails.tickets_only_email(raw, request, items)
+            if not worker_emails.allowed_recipient(payload["to"]):
+                return None
+            code, body = self.api.send_branded({**payload, "report_prior": True})
+            result = (body or {}).get("result") if isinstance(body, dict) else None
+            if not isinstance(result, dict) and isinstance(body, dict) and ("sent" in body or "rejected" in body):
+                result = body
+            mid = None
+            if code == 200 and isinstance(result, dict) and result.get("sent") and result.get("id"):
+                mid = result["id"]
+            elif code == 200 and isinstance(result, dict) and result.get("duplicate"):
+                mid = (result.get("prior") or {}).get("id") or "duplicate"
+            elif code == 422 or (isinstance(result, dict) and result.get("rejected")):
+                log.warning("Tickets-only email for %s rejected/suppressed; never retried", ref)
+                return self._save_tickets_only_marker(ref, token, {**prior, "rejected": True})
+            else:
+                log.warning("Tickets-only email for %s not sent (HTTP %s); will try at the next pickup", ref, code)
+                return None
+            marker = self._save_tickets_only_marker(ref, token, {
+                "via": "tickets_only_email", "message_id": str(mid),
+                "subject": payload["subject"], "dates": sorted({i["date"] for i in items}),
+                "sends": int(prior.get("sends") or 0) + 1})
+            log.info("Tickets-only email for %s sent (%s)", ref, mid)
+            return marker
+        except Exception:  # noqa: BLE001 - a tickets notice must never break the job
+            log.exception("Tickets-only email for %s failed", ref)
+            return None
 
     def _notify_hold(self, job, ref, token, raw, held, booked=False, confirmation_id=None):
         """ONE hold-status email per trip: sent when the hold first appears or

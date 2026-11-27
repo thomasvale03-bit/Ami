@@ -406,7 +406,8 @@ def _hold_para(text):
             f'line-height:24px;color:#BDBDBD;">{text}</p>')
 
 
-def render_hold_status(first_name, rows, paragraphs, brand="playmaker", ticket_url=None, headline=None):
+def render_hold_status(first_name, rows, paragraphs, brand="playmaker", ticket_url=None, headline=None,
+                       ticket_label="NYE tickets"):
     """Branded "your request is on hold" email. rows: [(date_label, venue,
     status)], paragraphs: plain-text paragraphs (escaped here)."""
     b = HOLD_BRANDS.get(brand) or HOLD_BRANDS["playmaker"]
@@ -424,8 +425,9 @@ def render_hold_status(first_name, rows, paragraphs, brand="playmaker", ticket_u
         html = _h.escape(p)
         if ticket_url and ticket_url in p:
             esc = _h.escape(ticket_url)
+            label = _h.escape(ticket_label or "tickets")
             html = html.replace(esc, f'<a href="{esc}" target="_blank" style="color:#D4AF37;'
-                                     f'text-decoration:underline;word-break:break-all;">NYE tickets</a>')
+                                     f'text-decoration:underline;word-break:break-all;">{label}</a>')
         body.append(_hold_para(html))
     page = _read("hold_status.html")
     return _fill(page, TITLE=_h.escape(headline or "Your guest list request is on hold"),
