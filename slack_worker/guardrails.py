@@ -127,13 +127,24 @@ PAY_QUESTION_RE = re.compile(
 PAY_ESCALATION_REPLY = "Tom still needs to confirm that. I'll get it over to him."
 PAY_FIGURE_RE = re.compile(r'\$\s*\d|\d+\s*[–-]\s*\d+\s*%')
 
+# Approved exception (Tom, Nov 27 2026): Jacob may quote the $25 same-day
+# Saturday OMNIA guest-list promoter fee. Other dollar or percent figures
+# stay blocked. Strip this phrase before scanning for pay figures.
+APPROVED_PROMOTER_FEE_RE = re.compile(
+    r'(?i)\$\s*25(?:\.00)?\s+per\s+person(?:\s+for\s+guest-list\s+placement)?'
+)
+
 
 def is_pay_question(text):
     return bool(PAY_QUESTION_RE.search(text or ''))
 
 
+def strip_approved_fee_quotes(text):
+    return APPROVED_PROMOTER_FEE_RE.sub('', text or '')
+
+
 def looks_like_pay_figure(text):
-    return bool(PAY_FIGURE_RE.search(text or ''))
+    return bool(PAY_FIGURE_RE.search(strip_approved_fee_quotes(text)))
 
 
 def needs_escalation(text, persona=None):

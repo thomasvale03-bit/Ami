@@ -159,8 +159,10 @@ running the same `slack_worker` package with `SLACK_PERSONA=jacob`.
 * Knowledge bot only: Tom's onboarding knowledge base
   (`slack_worker/knowledge_base.txt`) is the primary reference, with the same
   voice guide as AMYI. Historical pay figures were removed from the file and
-  are never loaded into the prompt. Jacob has no AMY queue tools and does
-  not run the booking watcher, so AMYI's behavior is unchanged.
+  are never loaded into the prompt. The one approved exception (Tom, Nov 27
+  2026) is the $25 per person same-day Saturday OMNIA guest-list placement
+  fee, which Jacob may quote in that situation only. Jacob has no AMY queue
+  tools and does not run the booking watcher, so AMYI's behavior is unchanged.
 * Intro DM (deduped on the `/data` volume, including IDs from the earlier
   welcome file): on `team_join`; when a new member joins `#newhire`
   (`C0CJZ69MPB7`) via `member_joined_channel` (bots and Tom are skipped);
@@ -186,7 +188,8 @@ running the same `slack_worker` package with `SLACK_PERSONA=jacob`.
   the client's full name, venue, and date and escalates to Tom.
 * Guardrails match AMYI (banned phrases, no phones or secrets, no
   unconfirmed promises) and also rewrite any dollar or percent pay
-  figures out of Jacob's replies.
+  figures out of Jacob's replies, except the approved $25 per person
+  same-day Saturday OMNIA guest-list placement fee quote.
 * Startup logs a plain OpenAI self-check plus two logged-only model tests
   (`how often do we get paid?` and `how do I sign up a client?`). Those
   checks never post to Slack.
