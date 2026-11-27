@@ -666,3 +666,52 @@ def date_venue_override(date_obj, requested_venue=None):
             return None
     return dest
 
+
+# Date-specific tickets-only nights (Thomas, Nov 27 2026): Vegas sign-ups
+# on these dates get a tickets email instead of a guest-list booking.
+# Scottsdale venues are never included.
+def date_tickets_only_map():
+    """{YYYY-MM-DD: {venue, url}} from data/date_tickets_only.json."""
+    from pathlib import Path
+    import json
+    path = Path(__file__).resolve().parent.parent / "data" / "date_tickets_only.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for day, spec in data.items():
+        try:
+            from datetime import date as _date
+            _date.fromisoformat(str(day)[:10])
+        except ValueError:
+            continue
+        if not isinstance(spec, dict):
+            continue
+        name = normalize_venue_name(spec.get("venue")) if spec.get("venue") else ""
+        url = str(spec.get("url") or "").strip()
+        if name and url.startswith("https://"):
+            out[str(day)[:10]] = {"venue": name, "url": url}
+    return out
+
+
+def date_tickets_only(date_obj, requested_venue=None):
+    """Tickets-only policy for this Vegas night, or None.
+
+    Returns None when there is no policy or the requested venue is
+    Scottsdale / not a Vegas club. With no requested_venue (e.g. skipping
+    a Marquee Dayclub add-on), a matching date still returns the policy.
+    """
+    key = date_obj.isoformat() if hasattr(date_obj, "isoformat") else str(date_obj)[:10]
+    policy = date_tickets_only_map().get(key)
+    if not policy:
+        return None
+    if requested_venue:
+        if is_scottsdale(requested_venue):
+            return None
+        canon = normalize_venue_name(requested_venue)
+        if not (is_known_vegas_venue(canon) or is_open_venue_placeholder(requested_venue)):
+            return None
+    return policy
