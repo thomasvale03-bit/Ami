@@ -511,6 +511,39 @@ def test_owner_requeue_clear_unsubmitted_refuses_real_booking(raw):
         'owner_approval': 'pt1195u', 'clear_unsubmitted': True})[0] == 409
 
 
+def test_owner_close_marks_manual_closed_keeps_evidence_and_is_not_claimed(raw):
+    s = _manual(raw, reason='Past or invalid source date; never move to tonight')
+    s.set_meta('mock', 'progress', {'bookings': {'Marquee Nightclub|2026-11-25': {
+        'verified': True, 'order_id': 'KEEP-ME'}}})
+    assert api(s, '/queue/owner-close/mock', {})[0] == 409  # approval required
+    assert api(s, '/queue/owner-close/mock', {'owner_approval': 't1281s5555'})[0] == 409  # reason required
+    code, row = api(s, '/queue/owner-close/mock', {
+        'owner_approval': 't1281s5555', 'reason': 'Closed per Tom Nov 27: night passed'})
+    assert code == 200 and row['state'] == 'closed'
+    assert row['reason'] == 'Closed per Tom Nov 27: night passed'
+    assert row['metadata']['owner_close']['approval'] == 't1281s5555'
+    assert row['metadata']['owner_close']['previous_state'] == 'manual'
+    assert row['metadata']['progress']['bookings']['Marquee Nightclub|2026-11-25']['order_id'] == 'KEEP-ME'
+    assert 'claim_token' not in row
+    assert api(s, '/queue/status', method='GET')[1]['counts'].get('closed') == 1
+    assert s.claim(None, NOW, allow_new=True, limit=10) == []
+    # Already closed is idempotent and does not wipe evidence.
+    code2, row2 = api(s, '/queue/owner-close/mock', {
+        'owner_approval': 't1281s5555', 'reason': 'Closed per Tom Nov 27: night passed'})
+    assert code2 == 200 and row2['state'] == 'closed'
+    assert row2['metadata']['progress']['bookings']['Marquee Nightclub|2026-11-25']['order_id'] == 'KEEP-ME'
+
+
+def test_owner_close_refuses_assigned_or_done(raw):
+    s, token = assigned(raw)
+    body = {'owner_approval': 't1281s5555', 'reason': 'Closed per Tom Nov 27: night passed'}
+    assert api(s, '/queue/owner-close/mock', body)[0] == 409
+    assert update(s, token, 'complete', evidence(raw))[0] == 200
+    assert s.get('mock')['state'] == 'done'
+    assert api(s, '/queue/owner-close/mock', body)[0] == 409
+    assert api(s, '/queue/owner-close/unknown', body)[0] == 409
+
+
 def test_complete_accepts_per_night_party(raw):
     raw.update(start_date='2026-11-21', end_date='2026-11-22',
                venues=['LAVO Party Brunch', 'TAO Nightclub'],

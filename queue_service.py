@@ -454,6 +454,14 @@ def handle(method, url, headers, payload, *, s=None, now=None):
             if payload.get('alert', True) is not False:
                 _dispatch_alert(s, ref, now)
             return 200, row
+        if method == 'POST' and path.startswith('/queue/owner-close/'):
+            if not isinstance(payload, dict):
+                raise Conflict('JSON object required')
+            ref = unquote(path[len('/queue/owner-close/'):])
+            row = s.owner_close(ref, payload.get('owner_approval'), now, str(payload.get('reason', ''))[:1000])
+            import job_tracker
+            job_tracker.update(ref, queue_owned=True, status='closed', done_at=now)
+            return 200, row
         if method == 'POST' and path.startswith('/queue/stall-requeue/'):
             if not isinstance(payload, dict):
                 raise Conflict('JSON object required')

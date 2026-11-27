@@ -315,6 +315,33 @@ class Store:
                        ('Completed from saved receipts (owner ' + approval[:200] + ')', json.dumps(meta), now, ref))
         return self.get(ref)
 
+    def owner_close(self, ref, approval, now, reason=''):
+        """Owner-approved: mark ONE open job closed in the queue only.
+        Never books, never emails, and never touches TAO, urvenue or Posh.
+        Existing metadata and evidence are kept intact."""
+        approval = str(approval or '').strip()
+        if not approval:
+            raise Conflict('owner approval (message id) required')
+        reason = (reason or '').strip()[:1000]
+        if not reason:
+            raise Conflict('reason required')
+        allowed = ('manual', 'retry', 'submission_uncertain', 'needs_review', 'queued')
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM queue_jobs WHERE ref=?', (ref,)).fetchone()
+            if row is None:
+                raise Conflict('Unknown job')
+            if row['state'] == 'closed':
+                return self.decode(row)
+            if row['state'] not in allowed:
+                raise Conflict('Only a manual, retry, submission_uncertain, needs_review or queued job can be closed')
+            meta = json.loads(row['metadata'] or '{}')
+            meta['owner_close'] = {'approval': approval[:200], 'at': now,
+                                   'previous_state': row['state'], 'previous_reason': row['reason']}
+            db.execute(
+                "UPDATE queue_jobs SET state='closed',reason=?,metadata=?,updated=?,claim_token=NULL,lease_until=NULL WHERE ref=?",
+                (reason, json.dumps(meta), now, ref))
+        return self.get(ref)
+
     def all_jobs(self, states=None):
         """Every job (optionally only these states), oldest first. No claim tokens."""
         with self.connect() as db:
