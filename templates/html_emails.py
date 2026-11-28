@@ -429,10 +429,33 @@ def _hold_para(text):
             f'line-height:24px;color:#BDBDBD;">{text}</p>')
 
 
+def _ticket_buttons(ticket_links):
+    """Gold venue-labeled buttons for tickets-only nights with several links."""
+    rows = []
+    for label, url in ticket_links or ():
+        if not url:
+            continue
+        esc_u = _h.escape(url, quote=True)
+        esc_l = _h.escape(label or "Tickets")
+        rows.append(
+            '<tr><td style="padding:6px 0;">'
+            f'<a href="{esc_u}" target="_blank" '
+            'style="display:inline-block;background:#D4AF37;color:#111111;'
+            "font-family:'Inter',Helvetica,Arial,sans-serif;font-size:15px;font-weight:600;"
+            'text-decoration:none;padding:12px 18px;border-radius:4px;line-height:20px;">'
+            f'{esc_l}</a></td></tr>'
+        )
+    if not rows:
+        return ""
+    return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+            f'style="margin:16px 0 0 0;">{"".join(rows)}</table>')
+
+
 def render_hold_status(first_name, rows, paragraphs, brand="playmaker", ticket_url=None, headline=None,
-                       ticket_label="NYE tickets"):
+                       ticket_label="NYE tickets", ticket_links=None):
     """Branded "your request is on hold" email. rows: [(date_label, venue,
-    status)], paragraphs: plain-text paragraphs (escaped here)."""
+    status)], paragraphs: plain-text paragraphs (escaped here).
+    ticket_links: optional [(label, url), ...] rendered as venue-labeled buttons."""
     b = HOLD_BRANDS.get(brand) or HOLD_BRANDS["playmaker"]
     items = "".join(
         '<tr><td style="padding:10px 0;border-bottom:1px solid #241f12;font-family:\'Inter\',Helvetica,Arial,'
@@ -444,13 +467,25 @@ def render_hold_status(first_name, rows, paragraphs, brand="playmaker", ticket_u
     body.append(_hold_para(_h.escape(paragraphs[0])))
     body.append('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
                 f'style="margin:14px 0 0 0;">{items}</table>')
+    buttons = _ticket_buttons(ticket_links)
+    if buttons:
+        body.append(buttons)
+    skip_urls = {u for _label, u in (ticket_links or ()) if u}
     for p in paragraphs[1:]:
+        if p in skip_urls or p.strip() in skip_urls:
+            continue
         html = _h.escape(p)
         if ticket_url and ticket_url in p:
             esc = _h.escape(ticket_url)
             label = _h.escape(ticket_label or "tickets")
             html = html.replace(esc, f'<a href="{esc}" target="_blank" style="color:#D4AF37;'
                                      f'text-decoration:underline;word-break:break-all;">{label}</a>')
+        for label, url in (ticket_links or ()):
+            if url and url in p:
+                esc = _h.escape(url)
+                html = html.replace(esc, f'<a href="{esc}" target="_blank" style="color:#D4AF37;'
+                                         f'text-decoration:underline;word-break:break-all;">'
+                                         f'{_h.escape(label or "tickets")}</a>')
         body.append(_hold_para(html))
     page = _read("hold_status.html")
     return _fill(page, TITLE=_h.escape(headline or "Your guest list request is on hold"),

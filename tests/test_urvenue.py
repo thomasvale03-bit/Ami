@@ -515,11 +515,12 @@ def test_no_items_nye_liv_falls_back_then_holds_with_ticket_link(tmp_path):
     assert tao.submits == []
     assert len(api.sent) == 1
     mail = api.sent[0]
-    assert mail["subject"] == "Your New Year's Eve guest list request - tickets"
+    assert mail["subject"] == "New Year's Eve tickets - all venues"
     assert mail["bcc"] == TEAM
     assert "guest list isn't available for New Year's Eve" in mail["text"]
-    assert "grootnightlife.com/microsite/playmaker/event/2268/1121561/ti-sto-nye" in mail["text"]
-    assert "Marquee" not in mail["text"]
+    assert "tickets.taogroup.com/e/omnia-las-vegas-12-31-2026/tickets" in mail["text"]
+    assert "Calvin Harris at XS Nightclub" in mail["text"]
+    assert "booketing.com/microsite/playmaker/event/719/1115/calvin-harris" in mail["text"]
     assert s.get("n")["state"] == "done"
     assert "tickets-only email sent" in (s.get("n")["reason"] or "")
 

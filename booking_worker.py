@@ -786,11 +786,14 @@ class Worker:
                     continue
             policy = rules.date_tickets_only(date.fromisoformat(night), venue)
             if policy:
+                tickets = list(policy.get("tickets") or [])
+                url = policy.get("url") or (tickets[0]["url"] if tickets else "")
                 self._tickets_only.append({
                     "requested_venue": venue,
                     "date": night,
                     "ticket_venue": policy.get("venue") or "",
-                    "url": policy["url"],
+                    "url": url,
+                    "tickets": tickets,
                 })
                 continue
             if any(rules.is_manual_venue(v) for v in (raw.get("venues") or [])):

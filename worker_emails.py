@@ -1030,19 +1030,53 @@ def nye_note(nights):
             "now, tickets are here: " + url)
 
 
-def tickets_only_subject(iso, ticket_venue=None):
+def tickets_only_subject(iso, ticket_venue=None, tickets=None):
     """Stable subject so the same guest is not emailed twice for the same night."""
     d = date.fromisoformat(iso)
     venue = (ticket_venue or "").strip()
-    if is_nye(iso) or not venue:
-        subject = "Your New Year's Eve guest list request - tickets"
+    many = len(list(tickets or ())) > 1
+    if is_nye(iso) or many or not venue:
+        if is_nye(iso) or many:
+            subject = "New Year's Eve tickets - all venues"
+        else:
+            subject = "Your New Year's Eve guest list request - tickets"
     else:
         subject = f"Your {d.strftime('%B')} {d.day} guest list request - tickets at {venue}"
     return subject.replace(",", "").replace(";", "")
 
 
 def _tickets_only_is_nye(item):
-    return is_nye(item.get("date") or "") or not (item.get("ticket_venue") or "").strip()
+    return is_nye(item.get("date") or "") or not (item.get("ticket_venue") or "").strip() or bool(item.get("tickets"))
+
+
+def _ticket_label(t):
+    return (t.get("label") or t.get("venue") or "Tickets").strip()
+
+
+def _item_tickets(item):
+    tickets = [t for t in (item.get("tickets") or ()) if isinstance(t, dict) and t.get("url")]
+    if tickets:
+        return tickets
+    url = item.get("url") or ""
+    if not url:
+        return []
+    label = (item.get("ticket_venue") or "").strip() or "tickets"
+    return [{"url": url, "label": label, "venue": label}]
+
+
+def _all_ticket_links(items):
+    """Unique (label, url) pairs, preferring the longest NYE list when present."""
+    nye_lists = [_item_tickets(i) for i in items if _tickets_only_is_nye(i)]
+    chosen = max(nye_lists, key=len) if nye_lists else []
+    links = []
+    seen = set()
+    for t in chosen:
+        url, label = t.get("url") or "", _ticket_label(t)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        links.append((label, url))
+    return links
 
 
 def _without_ticket_urls(body, urls):
@@ -1065,13 +1099,13 @@ def _without_ticket_urls(body, urls):
 def tickets_only_email(raw, request, items):
     """Guest email for a Vegas night with no guest list: tickets for sale only.
 
-    items: [{date, ticket_venue, url, requested_venue?}, ...]
+    items: [{date, ticket_venue, url, tickets?, requested_venue?}, ...]
     One email covers the tickets-only nights in this request. Brand follows
     hold_brand (GuestlistGo for guestlistgo.me sign-ups).
 
-    New Year's Eve (and other nights with a tickets link but no club name)
-    uses Tom's NYE wording and does not name a venue. Dec 25-style nights
-    still name the ticket venue (e.g. Marquee Nightclub).
+    New Year's Eve lists every event Tom is selling, each with a venue label
+    and link. Dec 25-style nights still name a single ticket venue
+    (e.g. Marquee Nightclub).
     """
     items = list(items or ())
     if not items:
@@ -1082,65 +1116,94 @@ def tickets_only_email(raw, request, items):
                else "Questions? Email info@playmakerentertainment.com")
     first = request.get("first_name") or "there"
     dates = sorted({i["date"] for i in items})
-    urls = [i.get("url") or "" for i in items]
+    nye_links = _all_ticket_links(items)
+    urls = []
+    for i in items:
+        for t in _item_tickets(i):
+            if t.get("url"):
+                urls.append(t["url"])
+    urls = list(dict.fromkeys(urls))
     all_nye = all(_tickets_only_is_nye(i) for i in items)
     ticket_venue = (items[0].get("ticket_venue") or "").strip()
-    url = items[0]["url"]
+    url = items[0].get("url") or (urls[0] if urls else "")
+
+    nye_intro = ("Thanks for your guest list request for New Year's Eve. The guest list isn't "
+                 "available for New Year's Eve, but if you'd like to book your spot, use one "
+                 "of these links to get your tickets:")
+    closer_one = "There's nothing else you need to do with us for that night."
+    closer_many = "There's nothing else you need to do with us for those nights."
 
     if len(dates) == 1 and all_nye:
-        intro = ("Thanks for your guest list request for New Year's Eve. The guest list isn't "
-                 "available for New Year's Eve, but if you'd like to book your spot, use this "
-                 "link to get your tickets:")
-        subject = tickets_only_subject(dates[0], ticket_venue)
-        row_date = "New Year's Eve"
-        row_label = "New Year's Eve"
+        intro = nye_intro
+        subject = tickets_only_subject(dates[0], ticket_venue, [dict(url=u, label=l) for l, u in nye_links])
+        paras = [intro]
+        for label, turl in nye_links:
+            paras.extend([label, turl])
+        if not nye_links and url:
+            paras.append(url)
+        paras.append(closer_one)
+        rows = [("New Year's Eve", label, "Tickets for sale") for label, _u in nye_links] or [
+            ("New Year's Eve", "New Year's Eve", "Tickets for sale")]
         headline = "New Year's Eve tickets"
-        paras = [intro, url, "There's nothing else you need to do with us for that night."]
-        rows = [(row_date, row_label, "Tickets for sale")]
+        ticket_links = nye_links
     elif len(dates) == 1:
         label = date_label(dates[0], dates[0])
         intro = (f"Thanks for your guest list request for {label}. The guest list isn't available "
                  f"that night, but {ticket_venue} has tickets for sale:")
         subject = tickets_only_subject(dates[0], ticket_venue)
         row_date = _hold_short(dates[0])
-        paras = [intro, url, "There's nothing else you need to do with us for that night."]
+        paras = [intro, url, closer_one]
         rows = [(row_date, ticket_venue, "Tickets for sale")]
         headline = f"Tickets at {ticket_venue}"
+        ticket_links = [(ticket_venue or "tickets", url)] if url else []
     elif all_nye:
-        intro = ("Thanks for your guest list request for New Year's Eve. The guest list isn't "
-                 "available for New Year's Eve, but if you'd like to book your spot, use this "
-                 "link to get your tickets:")
-        subject = "Your New Year's Eve guest list request - tickets"
+        intro = nye_intro
+        subject = "New Year's Eve tickets - all venues"
         subject = subject.replace(",", "").replace(";", "")
-        paras = [intro, url, "There's nothing else you need to do with us for that night."]
-        rows = [("New Year's Eve", "New Year's Eve", "Tickets for sale")]
+        paras = [intro]
+        for label, turl in nye_links:
+            paras.extend([label, turl])
+        paras.append(closer_one)
+        rows = [("New Year's Eve", label, "Tickets for sale") for label, _u in nye_links] or [
+            ("New Year's Eve", "New Year's Eve", "Tickets for sale")]
         headline = "New Year's Eve tickets"
+        ticket_links = nye_links
     else:
-        # Mixed tickets-only nights (e.g. Dec 25 Marquee + Dec 31 NYE).
         intro = ("Thanks for your guest list request. The guest list isn't available on those "
                  "nights. Here's how to get tickets:")
         subject = "Your guest list request - tickets"
         subject = subject.replace(",", "").replace(";", "")
         paras = [intro]
         rows = []
+        ticket_links = []
         seen = set()
         for i in sorted(items, key=lambda x: x["date"]):
-            d, u = i["date"], i["url"]
-            venue = (i.get("ticket_venue") or "").strip()
-            key = (d, u, venue)
-            if key in seen:
-                continue
-            seen.add(key)
             if _tickets_only_is_nye(i):
-                line = (f"New Year's Eve: the guest list isn't available, but if you'd like to "
-                        f"book your spot, use this link to get your tickets:")
-                paras.extend([line, u])
-                rows.append(("New Year's Eve", "New Year's Eve", "Tickets for sale"))
+                if "nye" in seen:
+                    continue
+                seen.add("nye")
+                paras.append("New Year's Eve: the guest list isn't available, but if you'd like to "
+                             "book your spot, use one of these links to get your tickets:")
+                links = nye_links or [( (i.get("ticket_venue") or "Tickets"), i.get("url") or "" )]
+                for label, turl in links:
+                    if not turl:
+                        continue
+                    paras.extend([label, turl])
+                    rows.append(("New Year's Eve", label, "Tickets for sale"))
+                    ticket_links.append((label, turl))
             else:
+                d, u = i["date"], i.get("url") or ""
+                venue = (i.get("ticket_venue") or "").strip()
+                key = (d, u, venue)
+                if key in seen:
+                    continue
+                seen.add(key)
                 label = date_label(d, d)
                 paras.extend([f"{label}: {venue} has tickets for sale:", u])
                 rows.append((_hold_short(d), venue, "Tickets for sale"))
-        paras.append("There's nothing else you need to do with us for those nights.")
+                if u:
+                    ticket_links.append((venue or "tickets", u))
+        paras.append(closer_many)
         headline = "Tickets"
 
     text_body = "\n\n".join([
@@ -1150,24 +1213,8 @@ def tickets_only_email(raw, request, items):
         name,
     ])
     html = html_emails.render_hold_status(
-        first, rows, paras, brand=brand, ticket_url=url if all_nye or len(dates) == 1 else None,
-        headline=headline, ticket_label="tickets")
-    # When several different ticket URLs appear, pass each so the HTML can link them.
-    if not (all_nye or len(dates) == 1):
-        html = html_emails.render_hold_status(
-            first, rows, paras, brand=brand,
-            ticket_url="\n".join(u for u in dict.fromkeys(urls) if u),
-            headline=headline, ticket_label="tickets")
-        # render_hold_status links only a single ticket_url found in a paragraph.
-        # Link each URL individually as a fallback.
-        import html as _html
-        for u in dict.fromkeys(urls):
-            if u and u in html:
-                esc = _html.escape(u, quote=False)
-                if f'href="{esc}"' not in html and f"href='{esc}'" not in html:
-                    html = html.replace(esc, f'<a href="{esc}" target="_blank" style="color:#D4AF37;'
-                                           f'text-decoration:underline;word-break:break-all;">tickets</a>')
-
+        first, rows, paras, brand=brand, ticket_url=url if not ticket_links else None,
+        headline=headline, ticket_label="tickets", ticket_links=ticket_links or None)
     for body in (text_body, html):
         low = body.lower()
         if LINE_PRIORITY_RE.search(body) or "jarvis" in low:
