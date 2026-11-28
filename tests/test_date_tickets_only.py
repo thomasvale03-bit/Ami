@@ -16,6 +16,11 @@ DEC25_URL = (
     "?utm_source=promoter&utm_id=68d79ff587c84397b19f00330a1e6107"
 )
 
+DEC31_URL = (
+    "https://grootnightlife.com/microsite/playmaker/event/2268/1121561/ti-sto-nye"
+    "?eventcode=EVE112156100020261231"
+)
+
 
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch, tmp_path):
@@ -149,3 +154,101 @@ def test_second_pickup_does_not_resend_tickets_email(tmp_path):
     assert worker.run_once()["status"] == "retry"
     again = [m for m in api.sent if "tickets at Marquee Nightclub" in m.get("subject", "")]
     assert len(again) == 1
+
+
+def test_dec31_vegas_is_tickets_only_without_a_club_name():
+    d = date(2026, 12, 31)
+    for venue in ("OMNIA Nightclub", "Hakkasan Nightclub", "Marquee Nightclub",
+                  "JEWEL Nightclub", "LIV Nightclub", "XS Nightclub",
+                  "TAO Nightclub", "Drai's After Hours", "Marquee Dayclub"):
+        policy = rules.date_tickets_only(d, venue)
+        assert policy is not None
+        assert not policy.get("venue")
+        assert policy["url"] == DEC31_URL
+    assert rules.date_tickets_only(d, "Riot House") is None
+    assert rules.date_tickets_only(d, "El Hefe") is None
+    # Neighboring nights are unchanged (Dec 25 stays Marquee tickets).
+    assert rules.date_tickets_only(date(2026, 12, 30), "OMNIA Nightclub") is None
+
+
+def test_nye_tickets_only_email_uses_toms_wording_and_skips_a_club_name():
+    req = {"first_name": "Will", "email": "guest@example.invalid",
+           "start_date": "2026-12-31", "end_date": "2026-12-31",
+           "female_count": 0, "male_count": 1}
+    items = [{"date": "2026-12-31", "ticket_venue": "", "url": DEC31_URL}]
+    p = worker_emails.tickets_only_email({}, req, items)
+    assert p["to"] == "guest@example.invalid"
+    assert p["bcc"] == TEAM
+    assert p["subject"] == "Your New Year's Eve guest list request - tickets"
+    assert "guest list isn't available for New Year's Eve" in p["text"]
+    assert "book your spot" in p["text"]
+    assert "use this link to get your tickets" in p["text"]
+    assert DEC31_URL in p["text"]
+    assert DEC31_URL in p["html"]
+    assert "Marquee" not in p["text"] and "Marquee" not in p["html"]
+    assert "tickets at" not in p["subject"].lower()
+    assert "Playmaker Entertainment" in p["text"]
+    assert "skip" not in p["text"].lower() and "skip" not in p["html"].lower()
+    assert "702" not in p["text"] and "$" not in p["text"]
+    q = worker_emails.tickets_only_email({"source": "guestlistgo"}, req, items)
+    assert q["from"] == "confirmations@guestlistgo.me" and q["bcc"] == TEAM
+    # The official ticket URL path contains "playmaker"; branding in the
+    # rest of the email must not.
+    scrubbed = (q["text"] + q["html"]).lower().replace(DEC31_URL.lower(), "")
+    assert "playmaker" not in scrubbed
+    assert "GuestlistGo" in q["text"]
+    assert q["subject"] == p["subject"]
+
+
+def test_mixed_dec25_and_nye_email_includes_both_links():
+    req = {"first_name": "Alex", "email": "guest@example.invalid",
+           "start_date": "2026-12-25", "end_date": "2026-12-31"}
+    items = [
+        {"date": "2026-12-25", "ticket_venue": "Marquee Nightclub", "url": DEC25_URL},
+        {"date": "2026-12-31", "ticket_venue": "", "url": DEC31_URL},
+    ]
+    p = worker_emails.tickets_only_email({}, req, items)
+    assert p["subject"] == "Your guest list request - tickets"
+    assert DEC25_URL in p["text"] and DEC31_URL in p["text"]
+    assert "Marquee Nightclub has tickets for sale" in p["text"]
+    assert "guest list isn't available" in p["text"]
+    assert "book your spot" in p["text"]
+    assert "skip" not in p["text"].lower()
+
+
+def test_worker_sends_tickets_email_and_completes_dec31_only(tmp_path):
+    s, api, worker = make(tmp_path, tao=FakeTao(posted=True, dayclubs=True))
+    s.enqueue("a", raw(start_date="2026-12-31", end_date="2026-12-31",
+                       venues=["Hakkasan Nightclub"]), 1)
+    result = worker.run_once()
+    assert result["status"] == "done", result
+    assert s.get("a")["state"] == "done"
+    assert "tickets-only email sent" in (s.get("a")["reason"] or "")
+    assert worker.tao.submits == []
+    assert len(api.sent) == 1
+    mail = api.sent[0]
+    assert mail["to"] == "guest@example.invalid"
+    assert mail["subject"] == "Your New Year's Eve guest list request - tickets"
+    assert "guest list isn't available for New Year's Eve" in mail["text"]
+    assert DEC31_URL in mail["text"]
+    assert "Marquee" not in mail["text"]
+    ev = s.get("a")["metadata"]["evidence"]
+    assert ev["bookings"] == []
+    assert ev["email_receipts"][0]["kind"] == "guest"
+
+
+def test_worker_skips_dec31_and_retries_other_nights(tmp_path):
+    s, api, worker = make(tmp_path, tao=FakeTao(posted=False, dayclubs=True))
+    s.enqueue("a", raw(start_date="2026-12-31", end_date="2027-01-02",
+                       venues=["OMNIA Nightclub"]), 1)
+    result = worker.run_once()
+    assert result["status"] == "retry", result
+    reason = s.get("a")["reason"] or ""
+    assert "OMNIA Nightclub 2027-01-01" in reason or "OMNIA Nightclub 2027-01-02" in reason
+    assert "2026-12-31" not in reason
+    bookings = ((s.get("a")["metadata"].get("progress") or {}).get("bookings") or {})
+    assert "Marquee Dayclub|2026-12-31" not in bookings
+    ticket_mails = [m for m in api.sent if m.get("subject") == "Your New Year's Eve guest list request - tickets"]
+    assert len(ticket_mails) == 1
+    assert DEC31_URL in ticket_mails[0]["text"]
+    assert "Marquee" not in ticket_mails[0]["subject"]
