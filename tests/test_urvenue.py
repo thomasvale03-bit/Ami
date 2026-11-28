@@ -503,22 +503,25 @@ def test_browser_wrong_password_stops_before_anything(site_browser, monkeypatch)
 # --- "There are no items available" + reused bookings (Nov 21 2026) ----------
 
 def test_no_items_nye_liv_falls_back_then_holds_with_ticket_link(tmp_path):
-    """LIV NYE has no guest list items: closed -> OMNIA-first fallback; no NYE
-    list anywhere -> one hold email carrying the promoter ticket link."""
+    """LIV NYE is tickets-only (Tom Nov 28): no guest-list booking or fallback;
+    one tickets email with Tom's NYE tickets link, then the job completes."""
     class NoItems(FakeUrvenue):
         def add(self, venue, night, guest, **kw):
             raise urvenue.NotOpen("no guest list items", "Tiesto - NYE")
     tao = FakeTao(posted=False)
     s, api, worker = mk(tmp_path, NoItems(), tao)
     s.enqueue("n", raw(venues=["LIV"], start_date="2026-12-31", end_date="2026-12-31"), NOW)
-    assert worker.run_once()["status"] == "retry"
+    assert worker.run_once()["status"] == "done"
     assert tao.submits == []
     assert len(api.sent) == 1
-    hold = api.sent[0]
-    assert "on hold" in hold["subject"] and hold["bcc"] == TEAM
-    assert "utm_id=68d79ff587c84397b19f00330a1e6107" in hold["text"]
-    assert "OMNIA doesn't have a guest list on NYE" in hold["text"]
-    assert s.get("n")["state"] == "retry"
+    mail = api.sent[0]
+    assert mail["subject"] == "Your New Year's Eve guest list request - tickets"
+    assert mail["bcc"] == TEAM
+    assert "guest list isn't available for New Year's Eve" in mail["text"]
+    assert "grootnightlife.com/microsite/playmaker/event/2268/1121561/ti-sto-nye" in mail["text"]
+    assert "Marquee" not in mail["text"]
+    assert s.get("n")["state"] == "done"
+    assert "tickets-only email sent" in (s.get("n")["reason"] or "")
 
 
 def test_no_items_liv_beach_goes_on_hold(tmp_path):

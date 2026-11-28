@@ -789,7 +789,7 @@ class Worker:
                 self._tickets_only.append({
                     "requested_venue": venue,
                     "date": night,
-                    "ticket_venue": policy["venue"],
+                    "ticket_venue": policy.get("venue") or "",
                     "url": policy["url"],
                 })
                 continue

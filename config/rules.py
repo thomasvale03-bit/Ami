@@ -671,7 +671,11 @@ def date_venue_override(date_obj, requested_venue=None):
 # on these dates get a tickets email instead of a guest-list booking.
 # Scottsdale venues are never included.
 def date_tickets_only_map():
-    """{YYYY-MM-DD: {venue, url}} from data/date_tickets_only.json."""
+    """{YYYY-MM-DD: {url, venue?}} from data/date_tickets_only.json.
+
+    venue is optional: nights like New Year's Eve use one tickets link
+    without naming a club (guest lists are not offered at any venue).
+    """
     from pathlib import Path
     import json
     path = Path(__file__).resolve().parent.parent / "data" / "date_tickets_only.json"
@@ -692,8 +696,12 @@ def date_tickets_only_map():
             continue
         name = normalize_venue_name(spec.get("venue")) if spec.get("venue") else ""
         url = str(spec.get("url") or "").strip()
-        if name and url.startswith("https://"):
-            out[str(day)[:10]] = {"venue": name, "url": url}
+        if not url.startswith("https://"):
+            continue
+        entry = {"url": url}
+        if name:
+            entry["venue"] = name
+        out[str(day)[:10]] = entry
     return out
 
 
