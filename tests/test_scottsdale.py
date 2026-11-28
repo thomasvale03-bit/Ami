@@ -10,6 +10,7 @@ import main
 import posh
 import tao_portal
 from config import rules
+from templates import html_emails
 from rules_engine import ActionNeeded, normalize_guest_request
 
 FIX = pathlib.Path(__file__).parent / "fixtures"
@@ -286,6 +287,51 @@ class HandleMessageTests(unittest.TestCase):
         self.assertNotIn("Female Admission", af)
         self.assertNotIn("10:00 PM", af)
         self.assertNotIn("Playmaker Entertainment", af)
+
+
+class DoorShowBannerTests(unittest.TestCase):
+    LINE = "Please show this email at the door for free entry before midnight."
+    DISCLAIMER = "Does not guarantee expedited check-in."
+
+    def _assert_banner(self, html, text):
+        self.assertIn(self.LINE, html)
+        self.assertIn(self.DISCLAIMER, html)
+        # Gold high-contrast banner wraps the door-show line.
+        self.assertIn('bgcolor="#D4AF37"', html)
+        idx = html.index(self.LINE)
+        self.assertLess(html.rfind('bgcolor="#D4AF37"', 0, idx), idx)
+        self.assertLess(idx, html.index(self.DISCLAIMER))
+        self.assertIn(self.LINE.upper(), text)
+        self.assertIn(self.DISCLAIMER, text)
+        # Banner sits near the top, before venue details.
+        self.assertLess(html.index("<!-- Show this email at the door -->"), html.index("<!-- Event details -->") if "<!-- Event details -->" in html else html.index("<!-- Riot House guestlist details -->"))
+
+    def test_riot_house_confirmation_has_door_banner(self):
+        subj, text, html = html_emails.scottsdale_confirmation_email(
+            "Selamawit", "Riot House", ["2026-11-28", "2026-11-29"])
+        self._assert_banner(html, text)
+        self.assertIn("Selamawit", html)
+        self.assertIn("Riot House", html)
+
+    def test_almost_famous_confirmation_has_door_banner(self):
+        subj, text, html = html_emails.scottsdale_confirmation_email(
+            "Sample Guest", "Almost Famous", ["2026-11-28"])
+        self._assert_banner(html, text)
+        self.assertIn("Sample Guest", html)
+        self.assertIn("Almost Famous", html)
+
+    def test_vegas_confirmation_does_not_get_the_banner(self):
+        html = html_emails.render_confirmation(
+            "Amy", [("Fri, Nov 27", "OMNIA Nightclub", None)], 8)
+        self.assertNotIn(self.LINE, html)
+        self.assertNotIn(self.DISCLAIMER, html)
+        _, ev_text, ev_html = html_emails.scottsdale_confirmation_email(
+            "Amy", "El Hefe", ["2026-11-28"])
+        # Other Scottsdale venues (not Riot House / Almost Famous) stay unchanged.
+        self.assertNotIn(self.LINE, ev_html)
+        self.assertNotIn(self.LINE.upper(), ev_text)
+
+
 
 if __name__ == "__main__":
     unittest.main()
