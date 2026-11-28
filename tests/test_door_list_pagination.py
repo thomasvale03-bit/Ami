@@ -100,7 +100,11 @@ def test_live_send_uses_every_page_and_never_resends():
     with mock.patch.object(gmail_client, "already_sent", return_value=False), send:
         assert run(svc, lambda: main.send_scottsdale_door_lists(svc, "live", now=SAT)) == 2
     riot = sent[0][2]
-    assert "across 201 orders" in riot and "#40900200" in riot and riot.count("#40900000") == 1
+    assert riot.startswith("Riot House – Sat 11/14\n")
+    assert "Total: 201 parties – 201 girls / 0 guys" in riot
+    # All unique orders from every Gmail page are in the body, deduped (no order #s).
+    assert riot.count("Guest 200") == 1 and riot.count("Guest 0") == 1
+    assert "#40900200" not in riot and "#40900000" not in riot
     # Already sent tonight: no second send, no search, even with new signups.
     svc2 = FakeGmail({"Riot House": riot_mail(205)})
     sent.clear()
