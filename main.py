@@ -367,43 +367,39 @@ def send_scottsdale_door_lists(service, mode, now=None):
     day_long = f"{tonight.strftime('%a, %b')} {tonight.day}, {tonight.year}"
 
     sent_count = 0
-    for venue, header_title in (
-        ("Riot House", f"Riot House | Guest List — {day_long} (10:00 PM - 2:00 AM)"),
-        ("Almost Famous", f"Almost Famous — {day_long} (10:00 PM - 2:00 AM)"),
-    ):
+    def _count_label(n, singular, plural):
+        return f"{n} {singular}" if n == 1 else f"{n} {plural}"
+
+    for venue in ("Riot House", "Almost Famous"):
         subject = f"{venue} Guest List — {day_short}"
         dedupe_q = f'to:{rules.PLAYMAKER_EMAIL} subject:"{subject}" newer_than:2d'
         if mode != "dry-run" and gmail_client.already_sent(service, dedupe_q):
             continue
 
         orders = collect_scottsdale_door_orders(service, venue, tonight, cutoff=now)
+        heading = f"{venue} – {tonight.strftime('%a')} {tonight.month}/{tonight.day}"
         if orders:
             lines = []
             tot_w = sum(o["women"] for o in orders)
             tot_m = sum(o["men"] for o in orders)
-            tot_g = tot_w + tot_m
             for o in orders:
-                w_lbl = "1 woman" if o["women"] == 1 else f"{o['women']} women"
-                m_lbl = "1 man" if o["men"] == 1 else f"{o['men']} men"
-                t_part = f" ({o['ticket']})" if o["ticket"] else ""
-                ord_part = f" #{o['order_number']}" if o["order_number"] else ""
-                email_part = f" ({o['email']})" if o["email"] and o["email"] not in o["name"].lower() else ""
-                lines.append(f"{o['name']}{email_part} — {w_lbl}, {m_lbl}{t_part}{ord_part}")
-            ord_word = "1 order" if len(orders) == 1 else f"{len(orders)} orders"
-            g_word = "1 guest" if tot_g == 1 else f"{tot_g} guests"
-            w_word = "1 woman" if tot_w == 1 else f"{tot_w} women"
-            m_word = "1 man" if tot_m == 1 else f"{tot_m} men"
+                party = o["women"] + o["men"]
+                lines.append(
+                    f"{o['name']} – {party} "
+                    f"({_count_label(o['women'], 'girl', 'girls')} / "
+                    f"{_count_label(o['men'], 'guy', 'guys')})"
+                )
             text = (
-                f"{header_title}\n\n"
+                heading
+                + "\n"
                 + "\n".join(lines)
-                + f"\n\nTotals: {g_word} ({w_word}, {m_word}) across {ord_word}.\n\nPlaymaker Entertainment"
+                + "\n"
+                + f"Total: {_count_label(len(orders), 'party', 'parties')} – "
+                f"{_count_label(tot_w, 'girl', 'girls')} / "
+                f"{_count_label(tot_m, 'guy', 'guys')}"
             )
         else:
-            text = (
-                f"{header_title}\n\n"
-                "No guests yet. Posh shows 0 orders for tonight.\n\n"
-                "Totals: 0 guests (0 women, 0 men).\n\nPlaymaker Entertainment"
-            )
+            text = f"{heading}\nTotal: 0 parties – 0 girls / 0 guys"
         html = f'<html><body><pre style="font-family:inherit;white-space:pre-wrap">{text}</pre></body></html>'
         if mode == "dry-run":
             log.info("[dry run] would send %s:\n%s", subject, text)

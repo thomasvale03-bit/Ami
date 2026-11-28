@@ -201,7 +201,14 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(count, 2)
         self.assertEqual(sent[0][1], "Riot House Guest List — Fri Oct 23")
         self.assertEqual(sent[1][1], "Almost Famous Guest List — Fri Oct 23")
-        self.assertIn("No guests yet. Posh shows 0 orders for tonight.", sent[0][2])
+        self.assertEqual(
+            sent[0][2],
+            "Riot House – Fri 10/23\nTotal: 0 parties – 0 girls / 0 guys",
+        )
+        self.assertEqual(
+            sent[1][2],
+            "Almost Famous – Fri 10/23\nTotal: 0 parties – 0 girls / 0 guys",
+        )
 
     def test_door_list_query_includes_sent_webhooks(self):
         q = main.scottsdale_door_list_query('"Almost Famous"')
@@ -261,17 +268,24 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(count, 2)
         self.assertTrue(any('subject:"NEW POSH SIGNUP"' in q for q in queries))
         self.assertEqual(sent[0][1], "Riot House Guest List — Fri Nov 13")
-        self.assertIn("No guests yet. Posh shows 0 orders for tonight.", sent[0][2])
+        self.assertEqual(
+            sent[0][2],
+            "Riot House – Fri 11/13\nTotal: 0 parties – 0 girls / 0 guys",
+        )
         self.assertEqual(sent[1][1], "Almost Famous Guest List — Fri Nov 13")
         af = sent[1][2]
-        self.assertIn("Wajhee Amer", af)
-        self.assertIn("#40722378", af)
-        self.assertIn("1 woman", af)
-        self.assertIn("1 man", af)
-        self.assertIn("2 guests", af)
-        self.assertIn("1 order", af)
+        self.assertEqual(
+            af,
+            "Almost Famous – Fri 11/13\n"
+            "Wajhee Amer – 2 (1 girl / 1 guy)\n"
+            "Total: 1 party – 1 girl / 1 guy",
+        )
         self.assertEqual(af.count("Wajhee Amer"), 1)
-        self.assertEqual(af.count("#40722378"), 1)
+        self.assertNotIn("#40722378", af)
+        self.assertNotIn("wajhee.amer.24@gmail.com", af)
+        self.assertNotIn("Female Admission", af)
+        self.assertNotIn("10:00 PM", af)
+        self.assertNotIn("Playmaker Entertainment", af)
 
 if __name__ == "__main__":
     unittest.main()
