@@ -671,10 +671,12 @@ def date_venue_override(date_obj, requested_venue=None):
 # on these dates get a tickets email instead of a guest-list booking.
 # Scottsdale venues are never included.
 def date_tickets_only_map():
-    """{YYYY-MM-DD: {url, venue?}} from data/date_tickets_only.json.
+    """{YYYY-MM-DD: {url, venue?} or {tickets: [{url, label, venue?}]}} from
+    data/date_tickets_only.json.
 
-    venue is optional: nights like New Year's Eve use one tickets link
-    without naming a club (guest lists are not offered at any venue).
+    A single venue+url night (e.g. Dec 25 -> Marquee) keeps that shape.
+    A tickets list (e.g. New Year's Eve) holds every event Tom is selling,
+    each with a display label and URL. Scottsdale venues are never included.
     """
     from pathlib import Path
     import json
@@ -694,14 +696,34 @@ def date_tickets_only_map():
             continue
         if not isinstance(spec, dict):
             continue
+        parsed = []
+        raw_tickets = spec.get("tickets")
+        if isinstance(raw_tickets, list):
+            for t in raw_tickets:
+                if not isinstance(t, dict):
+                    continue
+                t_url = str(t.get("url") or "").strip()
+                if not t_url.startswith("https://"):
+                    continue
+                venue_raw = str(t.get("venue") or "").strip()
+                venue = normalize_venue_name(venue_raw) if venue_raw else ""
+                label = str(t.get("label") or "").strip() or venue or venue_raw
+                item = {"url": t_url, "label": label}
+                if venue:
+                    item["venue"] = venue
+                parsed.append(item)
         name = normalize_venue_name(spec.get("venue")) if spec.get("venue") else ""
         url = str(spec.get("url") or "").strip()
+        key = str(day)[:10]
+        if parsed:
+            out[key] = {"tickets": parsed}
+            continue
         if not url.startswith("https://"):
             continue
         entry = {"url": url}
         if name:
             entry["venue"] = name
-        out[str(day)[:10]] = entry
+        out[key] = entry
     return out
 
 

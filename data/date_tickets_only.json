@@ -4,6 +4,32 @@
     "url": "https://tickets.taogroup.com/e/marquee-nightclub-las-vegas-12-25-2026/tickets?utm_source=promoter&utm_id=68d79ff587c84397b19f00330a1e6107"
   },
   "2026-12-31": {
-    "url": "https://grootnightlife.com/microsite/playmaker/event/2268/1121561/ti-sto-nye?eventcode=EVE112156100020261231"
+    "tickets": [
+      {
+        "venue": "OMNIA Nightclub",
+        "url": "https://tickets.taogroup.com/e/omnia-las-vegas-12-31-2026/tickets?utm_source=promoter&utm_id=68d79ff587c84397b19f00330a1e6107"
+      },
+      {
+        "venue": "Hakkasan Nightclub",
+        "url": "https://tickets.taogroup.com/e/hakkasan-nightclub-las-vegas-12-31-2026/tickets?utm_source=promoter&utm_id=68d79ff587c84397b19f00330a1e6107"
+      },
+      {
+        "venue": "Marquee Nightclub",
+        "url": "https://tickets.taogroup.com/e/marquee-nightclub-las-vegas-12-31-2026/tickets?utm_source=promoter&utm_id=68d79ff587c84397b19f00330a1e6107"
+      },
+      {
+        "venue": "TAO Nightclub",
+        "url": "https://tickets.taogroup.com/e/tao-nightclub-las-vegas-12-31-2026/tickets?utm_source=promoter&utm_id=68d79ff587c84397b19f00330a1e6107"
+      },
+      {
+        "venue": "OMNIA Dayclub",
+        "url": "https://tickets.taogroup.com/e/omnia-dayclub-las-vegas-12-31-2026/tickets?utm_source=promoter&utm_id=68d79ff587c84397b19f00330a1e6107"
+      },
+      {
+        "venue": "XS Nightclub",
+        "label": "Calvin Harris at XS Nightclub",
+        "url": "https://booketing.com/microsite/playmaker/event/719/1115/calvin-harris?eventcode=EVE111500020261231"
+      }
+    ]
   }
 }
