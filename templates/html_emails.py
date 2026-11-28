@@ -153,7 +153,8 @@ def render_almost_famous(first_name, date_label):
     return _fill(_read("almost_famous.html"),
                  first_name=_h.escape(first_name or "there"),
                  date_label=_h.escape(date_label),
-                 night=_af_night(date_label))
+                 night=_af_night(date_label),
+                 door_banner=_DOOR_SHOW_BANNER)
 
 
 def render_almost_famous_text(first_name, date_label):
@@ -163,6 +164,9 @@ def render_almost_famous_text(first_name, date_label):
     return f"""YOU'RE ON THE LIST!
 ALMOST FAMOUS {night_up}S
 Your {night} Night. Your Crew. Your VIP Energy.
+
+{DOOR_SHOW_LINE.upper()}
+{DOOR_SHOW_DISCLAIMER}
 
 Hey {fn}, get ready for a night of electrifying EDM, nonstop dancing, and unforgettable memories in the heart of Old Town Scottsdale! Your guest list registration with Playmaker Entertainment has been received.
 
@@ -203,6 +207,24 @@ Instagram: @playmaker.entertainment
 Must be 21+ with valid ID. Entry not guaranteed; all admission at venue discretion.
 """
 
+
+
+DOOR_SHOW_LINE = "Please show this email at the door for free entry before midnight."
+DOOR_SHOW_DISCLAIMER = "Does not guarantee expedited check-in."
+
+_DOOR_SHOW_BANNER = f"""    <!-- Show this email at the door -->
+    <tr><td class="px" style="padding:18px 40px 8px 40px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#D4AF37" style="width:100%;background-color:#D4AF37;background-image:linear-gradient(#D4AF37,#D4AF37);border-radius:10px;">
+        <tr><td align="center" style="padding:18px 20px 6px 20px;font-family:'Inter',Helvetica,Arial,sans-serif;font-size:20px;line-height:26px;color:#0d0d0d;font-weight:800;letter-spacing:0.2px;text-align:center;">
+          {DOOR_SHOW_LINE}
+        </td></tr>
+        <tr><td align="center" style="padding:0 20px 16px 20px;font-family:'Inter',Helvetica,Arial,sans-serif;font-size:13px;line-height:18px;color:#3a2a08;font-weight:500;text-align:center;">
+          {DOOR_SHOW_DISCLAIMER}
+        </td></tr>
+      </table>
+    </td></tr>
+
+"""
 
 RIOT_HOUSE_EVENT = "Riot House | Guest List"
 RIOT_HOUSE_HOURS = "Doors open 9:15 PM"
@@ -260,7 +282,7 @@ def render_riot_house(first_name, nights):
     a = html.index("<!-- How to get passes -->"); b = html.index("<!-- Before you go -->")
     html = html[:a] + _RIOT_CHECKIN + html[b:]
     i = html.index("<!-- Nights -->")
-    html = html[:i] + _RIOT_DETAILS + "    " + html[i:]
+    html = html[:i] + _DOOR_SHOW_BANNER + _RIOT_DETAILS + "    " + html[i:]
     a = html.index("<!-- Optional VIP upsell (parties of 4+) -->"); b = html.index("<!-- Sign-off -->")
     html = html[:a] + html[b:]
     html = html.replace("Here's how to get your passes for the night.", "Just check in at the door under your name.")
@@ -272,7 +294,8 @@ def render_riot_house(first_name, nights):
 def render_riot_house_text(first_name, nights):
     fn = first_name or "there"
     lines = [f"{d} - {v}: {hl}" for d, v, hl in _riot_nights(nights)]
-    return (f"Hi {fn},\n\nYou're on the Playmaker Entertainment guest list for:\n" + "\n".join(lines) +
+    return (f"Hi {fn},\n\n{DOOR_SHOW_LINE.upper()}\n{DOOR_SHOW_DISCLAIMER}\n\n"
+            "You're on the Playmaker Entertainment guest list for:\n" + "\n".join(lines) +
             "\n\n" + CAPACITY_LINE + "\n\n" + RIOT_DETAILS_TEXT + "\n\nHow to get in: no app or pass needed. Just check in at the door under your name.\n\n"
             "Arrive early and bring a valid, government-issued 21+ photo ID. Guest-list admission is subject to "
             "the venue's rules, dress code, and capacity.\n\nQuestions? Email info@playmakerentertainment.com\n\nPlaymaker Entertainment")
